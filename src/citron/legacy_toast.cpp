@@ -7,6 +7,7 @@
 
 #include <QApplication>
 #include <QEasingCurve>
+#include <QEvent>
 #include <QFont>
 #include <QFontMetrics>
 #include <QMouseEvent>
@@ -14,6 +15,7 @@
 #include <QPainterPath>
 #include <QPropertyAnimation>
 #include <QScreen>
+#include <QWindow>
 
 #include "citron/legacy_avatar_cache.h"
 #include "citron/uisettings.h"
@@ -52,9 +54,26 @@ OpenPakToast::OpenPakToast(QWidget* main_window_)
 
     auto_hide_timer.setSingleShot(true);
     connect(&auto_hide_timer, &QTimer::timeout, this, &OpenPakToast::HideAnimated);
+
+    if (main_window) {
+        main_window->installEventFilter(this);
+    }
 }
 
 OpenPakToast::~OpenPakToast() = default;
+
+bool OpenPakToast::eventFilter(QObject* watched, QEvent* event) {
+    // A toast already on screen doesn't hide itself just because main_window got minimized --
+    // it's a separate top-level window (Qt::ToolTip), not a child that follows its parent's state.
+    if (watched == main_window && event->type() == QEvent::WindowStateChange &&
+        main_window->isMinimized()) {
+        auto_hide_timer.stop();
+        fade->stop();
+        setWindowOpacity(0.0);
+        hide();
+    }
+    return QWidget::eventFilter(watched, event);
+}
 
 float OpenPakToast::ComputeScale() const {
     QScreen* screen = main_window ? main_window->screen() : nullptr;
@@ -77,8 +96,16 @@ void OpenPakToast::Show(const QString& headline, const QString& detail,
     if (!UISettings::values.legacy_notifications_enabled.GetValue()) {
         return;
     }
-    // qApp->activeWindow() covers child dialogs (e.g. the Friends list) too, not just main_window.
-    if (!main_window || main_window->isMinimized() || !qApp->activeWindow()) {
+    if (!main_window) {
+        return;
+    }
+    // isMinimized() alone is unreliable on Wayland (compositors don't report iconified state the
+    // way X11 did); windowHandle()->visibility() catches it there. qApp->activeWindow() covers
+    // child dialogs (e.g. the Friends list) too, not just main_window.
+    const bool minimized = main_window->isMinimized() ||
+                           (main_window->windowHandle() &&
+                            main_window->windowHandle()->visibility() == QWindow::Minimized);
+    if (minimized || !qApp->activeWindow()) {
         return;
     }
 

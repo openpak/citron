@@ -31,6 +31,7 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void Reposition();
