@@ -85,6 +85,10 @@ void PushProfileName(const std::string& name);
 // joinable. app_id is the running title id; empty when nothing is running.
 void PushPresence(s32 status, const std::string& app_field, const std::string& app_id);
 
+// Downloads the BCAT schedule seed (a zip of vsdata/coopdata/fesdata) for titles that need one
+// locally to go online (Splatoon 2). title_id_hex is 16 uppercase hex digits. Empty on failure.
+std::vector<u8> DownloadBcatSeed(const std::string& title_id_hex);
+
 // Public, unauthenticated. Maps lowercase-hex title id -> currently connected player count.
 std::map<std::string, int> GetOnlineCounts();
 

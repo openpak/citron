@@ -2624,6 +2624,10 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
 
     u64 program_id = item.data(GameListItemPath::ProgramIdRole).toULongLong();
 
+    if (main_window) {
+        main_window->OfferOpenPakByamlDownload(program_id);
+    }
+
     QStandardItem* original_item = nullptr;
     for (int folder_idx = 0; folder_idx < item_model->rowCount(); ++folder_idx) {
         QStandardItem* folder = item_model->item(folder_idx, 0);
@@ -3204,6 +3208,10 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
     QAction* favorite = context_menu.addAction(tr("Favorite"));
     QAction* hide_game = context_menu.addAction(tr("Hide Game"));
     context_menu.addSeparator();
+    QAction* download_online_schedule = nullptr;
+    if (main_window && main_window->OpenPakByamlRequired(program_id)) {
+        download_online_schedule = context_menu.addAction(tr("Download Online Schedule"));
+    }
     QAction* start_game = context_menu.addAction(tr("Start Game"));
     QAction* start_game_global =
         context_menu.addAction(tr("Start Game without Custom Configuration"));
@@ -3508,6 +3516,13 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
             dir.mkpath(QStringLiteral("."));
         QDesktopServices::openUrl(QUrl::fromLocalFile(qpath));
     });
+    if (download_online_schedule) {
+        connect(download_online_schedule, &QAction::triggered, [this, program_id]() {
+            if (main_window) {
+                main_window->OpenPakByamlDownloadFromMenu(program_id);
+            }
+        });
+    }
     connect(start_game, &QAction::triggered, [this, index]() { ValidateEntry(index); });
     connect(start_game_global, &QAction::triggered, [this, path_str]() {
         emit BootGame(QString::fromStdString(path_str), StartGameType::Global);

@@ -153,6 +153,9 @@ class GMainWindow : public QMainWindow {
 public:
     void filterBarSetChecked(bool state);
     void UpdateUITheme();
+    void OfferOpenPakByamlDownload(u64 title_id);
+    void OpenPakByamlDownloadFromMenu(u64 title_id);
+    bool OpenPakByamlRequired(u64 title_id) const;
     bool IsConfiguring() const {
         return m_is_configuring;
     }
@@ -477,6 +480,12 @@ private:
     std::string current_game_name;
 
     void SyncOpenPakHistory();
+
+    bool OpenPakByamlInstalled(u64 title_id) const;
+    bool OpenPakByamlSkipped(u64 title_id) const;
+    void OpenPakByamlMarkSkipped(u64 title_id) const;
+    bool OpenPakByamlDownload(u64 title_id);
+    void RunOpenPakByamlDownloadWithProgress(u64 title_id);
 
     bool user_flag_cmd_line = false;
     bool auto_paused = false;
