@@ -478,6 +478,7 @@ private:
     std::unique_ptr<EmuThread> emu_thread;
     QString current_game_path;
     std::string current_game_name;
+    std::string current_game_icon_base64;
 
     void SyncOpenPakHistory();
 

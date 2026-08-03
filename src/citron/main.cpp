@@ -2526,6 +2526,15 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     LOG_INFO(Frontend, "Booting game: {:016X} | {} | {}", title_id, title_name, title_version);
     const auto gpu_vendor = system->GPU().Renderer().GetDeviceVendor();
     current_game_name = title_name;
+    current_game_icon_base64.clear();
+    std::vector<u8> icon_bytes;
+    if (system->GetAppLoader().ReadIcon(icon_bytes) == Loader::ResultStatus::Success) {
+        current_game_icon_base64 =
+            QByteArray::fromRawData(reinterpret_cast<const char*>(icon_bytes.data()),
+                                    static_cast<int>(icon_bytes.size()))
+                .toBase64()
+                .toStdString();
+    }
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
 
     loading_screen->Prepare(system->GetAppLoader());
@@ -7087,13 +7096,7 @@ void GMainWindow::SyncOpenPakHistory() {
         "{:%Y-%m-%dT%H:%M:%SZ}", fmt::gmtime(std::chrono::system_clock::to_time_t(
                                      std::chrono::system_clock::now())));
 
-    std::vector<u8> icon_bytes;
-    if (system->GetAppLoader().ReadIcon(icon_bytes) == Loader::ResultStatus::Success) {
-        entry.icon_base64 = QByteArray::fromRawData(reinterpret_cast<const char*>(icon_bytes.data()),
-                                                     static_cast<int>(icon_bytes.size()))
-                                .toBase64()
-                                .toStdString();
-    }
+    entry.icon_base64 = current_game_icon_base64;
 
     // Detached: shutdown must not block on the network.
     std::thread{[entry] { WebService::OpenPakApi::SyncHistory({entry}); }}.detach();
