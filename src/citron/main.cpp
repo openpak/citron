@@ -154,12 +154,21 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/install_dialog.h"
 #include "citron/loading_screen.h"
 #include "citron/main.h"
+#include "citron/legacy_account_dialog.h"
+#include "citron/legacy_controller.h"
+#include "citron/legacy_online_counts.h"
+#include "citron/legacy_toast.h"
 #include "citron/play_time_manager.h"
+#include "common/legacy_account.h"
+#include "common/legacy_friends.h"
 #include "citron/startup_checks.h"
 #include "citron/uisettings.h"
 #include "citron/theme.h"
 #include "citron/util/rainbow_style.h"
 #include "common/settings.h"
+#ifdef ENABLE_WEB_SERVICE
+#include "web_service/legacy_api.h"
+#endif
 #include "common/string_util.h"
 #include "common/xci_trimmer.h"
 #include "core/core.h"
@@ -192,6 +201,10 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/shader_notify.h"
 
+#ifdef CITRON_USE_AUTO_UPDATER
+#include "citron/updater/updater_dialog.h"
+#include "citron/updater/updater_service.h"
+#endif
 #include "citron/util/clickable_label.h"
 #include "citron/util/multiplayer_room_overlay.h"
 #include "citron/util/performance_overlay.h"
@@ -1181,6 +1194,7 @@ void GMainWindow::InitializeWidgets() {
     add_menu(ui->menu_View);
     add_menu(ui->menu_Tools);
     add_menu(ui->menu_Multiplayer);
+    add_menu(ui->menu_OpenPak);
     add_menu(ui->menu_Help);
 
     // Set first/last button specific styling if needed, but the new flat look is preferred
@@ -1234,6 +1248,10 @@ void GMainWindow::InitializeWidgets() {
     multiplayer_state = new MultiplayerState(this, game_list->GetModel(), ui->action_Leave_Room,
                                              ui->action_Show_Room, *system);
     multiplayer_state->setVisible(false);
+
+    legacy_controller = new OpenPakController(*system, this, this);
+    legacy_toast = new OpenPakToast(this);
+    OpenPak::OnlineCounts::Start(this);
 
     // Create status bar
     // Style applied in UpdateUITheme()
@@ -1896,6 +1914,92 @@ void GMainWindow::ConnectMenuEvents() {
             &MultiplayerState::OnCreateRoom);
     connect(ui->action_Leave_Room, &QAction::triggered, multiplayer_state,
             &MultiplayerState::OnCloseRoom);
+    legacy_presence_timer.setInterval(5000);
+    connect(&legacy_presence_timer, &QTimer::timeout, this, [this] {
+#ifdef ENABLE_WEB_SERVICE
+        if (!Common::OpenPakAccount::IsLinked()) {
+            return;
+        }
+        const std::string app_id =
+            emulation_running ? fmt::format("{:016X}", play_time_manager->GetProgramId())
+                              : std::string{};
+        const bool app_id_changed = app_id != legacy_last_pushed_app_id;
+
+        s32 status = 0;
+        std::string app_field;
+        const bool have_update = Common::OpenPakFriends::TakeLocalPresenceForPublish(status, app_field);
+        if (!have_update && !app_id_changed) {
+            return;
+        }
+        if (!have_update) {
+            status = Common::OpenPakFriends::GetLocalStatus();
+            app_field = Common::OpenPakFriends::GetLocalAppField();
+        }
+
+        legacy_last_pushed_app_id = app_id;
+        std::thread{[status, app_field, app_id] {
+            WebService::OpenPakApi::PushPresence(status, app_field, app_id);
+        }}.detach();
+#endif
+    });
+    legacy_presence_timer.start();
+
+    // OpenPak
+    ui->action_OpenPak_Sign_In->setEnabled(!Common::OpenPakAccount::IsLinked());
+    ui->action_OpenPak_Sign_Out->setEnabled(Common::OpenPakAccount::IsLinked());
+    ui->action_OpenPak_Enable_Redirection->setChecked(Settings::values.enable_legacy.GetValue());
+
+    connect(ui->action_OpenPak_Open_Account, &QAction::triggered, this, [this] {
+        if (!Common::OpenPakAccount::IsLinked()) {
+            QMessageBox::information(this, tr("OpenPak Account"),
+                                     tr("Sign in to your OpenPak account first."));
+            return;
+        }
+        OpenPakAccountDialog(legacy_controller, this).exec();
+    });
+    connect(ui->action_OpenPak_Sign_In, &QAction::triggered, legacy_controller,
+            &OpenPakController::SignIn);
+    connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, legacy_controller,
+            &OpenPakController::SignOut);
+    connect(ui->action_OpenPak_Enable_Redirection, &QAction::toggled, this, [](bool checked) {
+        Settings::values.enable_legacy.SetValue(checked);
+    });
+    connect(legacy_controller, &OpenPakController::AccountLinked, this, [this] {
+        ui->action_OpenPak_Sign_In->setEnabled(false);
+        ui->action_OpenPak_Sign_Out->setEnabled(true);
+    });
+    connect(legacy_controller, &OpenPakController::AccountUnlinked, this, [this] {
+        ui->action_OpenPak_Sign_In->setEnabled(true);
+        ui->action_OpenPak_Sign_Out->setEnabled(false);
+    });
+    connect(legacy_controller, &OpenPakController::StatusChanged, this,
+            [this](const QString& message) {
+                if (!message.isEmpty()) {
+                    statusBar()->showMessage(message, 8000);
+                }
+            });
+    connect(legacy_controller, &OpenPakController::FriendCameOnline, this,
+            [this](u64 /*pid*/, const QString& name, const QString& game_name,
+                  const QString& avatar_base64) {
+                const QString detail =
+                    game_name.isEmpty() ? tr("is now online") : tr("is now playing %1").arg(game_name);
+                legacy_toast->Show(name, detail, avatar_base64, OpenPakToast::Kind::Online);
+            });
+    connect(legacy_controller, &OpenPakController::FriendWentOffline, this,
+            [this](u64 /*pid*/, const QString& name, const QString& avatar_base64) {
+                legacy_toast->Show(name, tr("is now offline"), avatar_base64,
+                                     OpenPakToast::Kind::Offline);
+            });
+    connect(legacy_controller, &OpenPakController::FriendRequestReceived, this,
+            [this](u64 /*pid*/, const QString& name, const QString& avatar_base64) {
+                legacy_toast->Show(name, tr("sent you a friend request"), avatar_base64,
+                                     OpenPakToast::Kind::Request);
+            });
+    connect(legacy_controller, &OpenPakController::FriendRequestSent, this,
+            [this](const QString& friend_code) {
+                legacy_toast->Show(tr("Friend Request Sent!"), friend_code, {},
+                                     OpenPakToast::Kind::RequestSent);
+            });
     connect(ui->action_Connect_To_Room, &QAction::triggered, multiplayer_state,
             &MultiplayerState::OnDirectConnectToRoom);
     connect(ui->action_Show_Room, &QAction::triggered, multiplayer_state,
@@ -1929,6 +2033,7 @@ void GMainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Verify_installed_contents, &GMainWindow::OnVerifyInstalledContents);
     connect_menu(ui->action_Install_Firmware, &GMainWindow::OnInstallFirmware);
     connect_menu(ui->action_Install_Keys, &GMainWindow::OnInstallDecryptionKeys);
+    connect_menu(ui->action_Check_For_Updates, &GMainWindow::OnCheckForUpdates);
     connect_menu(ui->action_About, &GMainWindow::OnAbout);
 
     connect(ui->actionControllerOverlay, &QAction::triggered, this,
@@ -2418,6 +2523,7 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
                      .toStdString();
     LOG_INFO(Frontend, "Booting game: {:016X} | {} | {}", title_id, title_name, title_version);
     const auto gpu_vendor = system->GPU().Renderer().GetDeviceVendor();
+    current_game_name = title_name;
     UpdateWindowTitle(title_name, title_version, gpu_vendor);
 
     loading_screen->Prepare(system->GetAppLoader());
@@ -2501,6 +2607,11 @@ void GMainWindow::OnEmulationStopTimeExpired() {
 }
 
 void GMainWindow::OnEmulationStopped() {
+    // Every shutdown path lands here; ShutdownGame() is bypassed by the Stop button.
+    play_time_manager->Stop();
+    SyncOpenPakHistory();
+    Common::OpenPakFriends::SetLocalStatus(Common::OpenPakFriends::PresenceOnline);
+
     shutdown_timer.stop();
     if (emu_thread) {
         emu_thread->disconnect();
@@ -2605,7 +2716,6 @@ void GMainWindow::ShutdownGame() {
         return;
     }
 
-    play_time_manager->Stop();
     OnShutdownBegin();
     OnEmulationStopTimeExpired();
     OnEmulationStopped();
@@ -4069,6 +4179,7 @@ void GMainWindow::OnStartGame() {
     UpdateMenuState();
     OnTasStateChanged();
 
+    Common::OpenPakFriends::SetLocalStatus(Common::OpenPakFriends::PresenceOnlinePlay);
     play_time_manager->SetProgramId(system->GetApplicationProcessProgramID());
     play_time_manager->Start();
 
@@ -4222,7 +4333,7 @@ void GMainWindow::OnOpenSupport() {
                                   QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 
         if (second_warning == QMessageBox::Yes) {
-            OpenURL(QUrl(QStringLiteral("https://discord.gg/axqZFEyzPQ")));
+            OpenURL(QUrl(QStringLiteral("https://discord.gg/JGJdAaMZuD")));
         }
     }
 }
@@ -5361,6 +5472,18 @@ void GMainWindow::OnInstallDecryptionKeys() {
 void GMainWindow::OnAbout() {
     AboutDialog aboutDialog(this);
     aboutDialog.exec();
+}
+
+void GMainWindow::OnCheckForUpdates() {
+#ifdef CITRON_USE_AUTO_UPDATER
+    auto* updater_dialog = new Updater::UpdaterDialog(this);
+    updater_dialog->setAttribute(Qt::WA_DeleteOnClose);
+    updater_dialog->show();
+    updater_dialog->CheckForUpdates();
+#else
+    QMessageBox::information(this, tr("Updates"),
+                             tr("The automatic updater is not enabled in this build."));
+#endif
 }
 
 void GMainWindow::OnToggleControllerOverlay() {
@@ -6568,7 +6691,7 @@ void GMainWindow::UpdateUITheme() {
     const QString final_global_style =
         global_style + QStringLiteral("QToolTip, QTipLabel { background: %1 !important; background-color: %1 !important; border: 1px solid %2 !important; }")
             .arg(tooltip_bg, tooltip_border);
-    
+
     // Completely reset the app stylesheet to prevent bloat and ensure our overrides win
     qApp->setStyleSheet(final_global_style);
 
@@ -6889,6 +7012,29 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
+#ifdef CITRON_USE_AUTO_UPDATER
+    std::filesystem::path app_dir =
+        std::filesystem::path(QCoreApplication::applicationDirPath().toStdString());
+
+#ifdef _WIN32
+    // On Windows, updates are applied by the helper script after the app exits.
+    std::filesystem::path staging_path = app_dir / "update_staging";
+    if (std::filesystem::exists(staging_path)) {
+        try {
+            std::filesystem::remove_all(staging_path);
+        } catch (...) {
+        }
+    }
+#else
+    if (Updater::UpdaterService::HasStagedUpdate(app_dir)) {
+        if (Updater::UpdaterService::ApplyStagedUpdate(app_dir)) {
+            QMessageBox::information(nullptr, QObject::tr("Update Applied"),
+                                     QObject::tr("Citron has been updated successfully!"));
+        }
+    }
+#endif
+#endif
+
     setlocale(LC_ALL, "C");
 
     GMainWindow main_window{std::move(config), has_broken_vulkan};
@@ -6917,3 +7063,38 @@ int main(int argc, char* argv[]) {
 void GMainWindow::OnToggleGridView() {
     game_list->ToggleViewMode();
 }
+
+void GMainWindow::SyncOpenPakHistory() {
+#ifdef ENABLE_WEB_SERVICE
+    const bool linked = Common::OpenPakAccount::IsLinked();
+    const u64 program_id = play_time_manager->GetProgramId();
+    const u64 seconds = play_time_manager->GetPlayTime(program_id);
+
+    LOG_INFO(Frontend, "OpenPak history: linked={} title={:016X} seconds={}", linked, program_id,
+             seconds);
+
+    if (!linked || program_id == 0 || seconds == 0) {
+        return;
+    }
+
+    WebService::OpenPakApi::HistoryEntry entry;
+    entry.title_id = fmt::format("{:016X}", program_id);
+    entry.name = current_game_name;
+    entry.seconds = seconds;
+    entry.last_played = fmt::format(
+        "{:%Y-%m-%dT%H:%M:%SZ}", fmt::gmtime(std::chrono::system_clock::to_time_t(
+                                     std::chrono::system_clock::now())));
+
+    std::vector<u8> icon_bytes;
+    if (system->GetAppLoader().ReadIcon(icon_bytes) == Loader::ResultStatus::Success) {
+        entry.icon_base64 = QByteArray::fromRawData(reinterpret_cast<const char*>(icon_bytes.data()),
+                                                     static_cast<int>(icon_bytes.size()))
+                                .toBase64()
+                                .toStdString();
+    }
+
+    // Detached: shutdown must not block on the network.
+    std::thread{[entry] { WebService::OpenPakApi::SyncHistory({entry}); }}.detach();
+#endif
+}
+

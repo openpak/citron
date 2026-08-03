@@ -358,19 +358,6 @@ if (ENABLE_CUBEB AND NOT TARGET cubeb::cubeb)
     endif()
 endif()
 
-# ── SDL2 ──────────────────────────────────────────────────────────────────────
-if (CITRON_USE_EXTERNAL_SDL2 AND NOT TARGET SDL2::SDL2)
-    CPMAddPackage(
-        NAME SDL2
-        GITHUB_REPOSITORY libsdl-org/SDL
-        GIT_TAG release-2.32.10
-        OPTIONS
-            "SDL_SHARED OFF"
-            "SDL_STATIC ON"
-            "SDL_TEST OFF"
-            "SDL_FORCE_STATIC_VCRT OFF"
-    )
-endif()
 
 # ── tzdb_to_nx ────────────────────────────────────────────────────────────────
 # On POSIX hosts: fetch source via CPM; nx_tzdb/CMakeLists.txt builds zic and

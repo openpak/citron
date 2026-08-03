@@ -705,7 +705,6 @@ stage_setup() {
             mingw-w64-clang-x86_64-ninja \
             mingw-w64-clang-x86_64-python \
             mingw-w64-clang-x86_64-boost \
-            mingw-w64-clang-x86_64-SDL2 \
             mingw-w64-clang-x86_64-nasm \
             mingw-w64-clang-x86_64-yasm \
             mingw-w64-clang-x86_64-glslang \
@@ -1945,6 +1944,7 @@ build_common_cmake_args() {
         "-DCITRON_TESTS=OFF"
         "-DCITRON_USE_BUNDLED_FFMPEG=ON"
         "-DCITRON_USE_EXTERNAL_SDL2=ON"
+        "-DCITRON_USE_AUTO_UPDATER=ON"
         "-DCITRON_USE_EXTERNAL_VULKAN_HEADERS=ON"
         "-DCITRON_USE_EXTERNAL_VULKAN_UTILITY_LIBRARIES=ON"
         "-DSPIRV-Headers_DIR=${CMAKE_SPIRV_HEADERS_INSTALL}/share/cmake/SPIRV-Headers"

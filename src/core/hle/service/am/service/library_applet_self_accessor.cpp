@@ -138,10 +138,17 @@ Result ILibraryAppletSelfAccessor::GetLibraryAppletInfo(
 
 Result ILibraryAppletSelfAccessor::GetMainAppletIdentityInfo(
     Out<AppletIdentityInfo> out_identity_info) {
-    LOG_WARNING(Service_AM, "(STUBBED) called");
+    LOG_INFO(Service_AM, "called");
+
+    auto applet = m_window_system.GetMainApplet();
+    if (!applet) {
+        LOG_ERROR(Service_AM, "Main applet not found!");
+        R_THROW(ResultUnknown);
+    }
+
     *out_identity_info = {
-        .applet_id = AppletId::QLaunch,
-        .application_id = 0x0100000000001000ull,
+        .applet_id = applet->applet_id,
+        .application_id = applet->program_id,
     };
     R_SUCCEED();
 }

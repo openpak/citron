@@ -39,7 +39,7 @@ public:
 
 protected:
     /// Called by WaitEvent when a key is pressed or released.
-    void OnKeyEvent(int key, u8 state);
+    void OnKeyEvent(int key, bool down);
 
     /// Converts a SDL mouse button into MouseInput mouse button
     InputCommon::MouseButton SDLButtonToMouseButton(u32 button) const;
@@ -48,7 +48,7 @@ protected:
     std::pair<float, float> MouseToTouchPos(s32 touch_x, s32 touch_y) const;
 
     /// Called by WaitEvent when a mouse button is pressed or released
-    void OnMouseButton(u32 button, u8 state, s32 x, s32 y);
+    void OnMouseButton(u32 button, bool down, s32 x, s32 y);
 
     /// Called by WaitEvent when the mouse moves.
     void OnMouseMotion(s32 x, s32 y);

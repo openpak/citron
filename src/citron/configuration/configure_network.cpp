@@ -2,8 +2,6 @@
 // SPDX-FileCopyrightText: Copyright 2025 Citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <QMessageBox>
-#include <QtConcurrent/QtConcurrent>
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/internal_network/network_interface.h"

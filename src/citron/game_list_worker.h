@@ -76,6 +76,9 @@ private:
     void AddTitlesToGameList(const QString& parent_path,
                              const std::map<u64, std::pair<int, int>>& online_stats);
 
+    void AddHomebrewToGameList(const QString& parent_path,
+                               const std::map<u64, std::pair<int, int>>& online_stats);
+
     void ScanFileSystem(ScanTarget target, const std::string& dir_path, bool deep_scan,
                         const QString& parent_path,
                         const std::map<u64, std::pair<int, int>>& online_stats,

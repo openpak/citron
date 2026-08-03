@@ -5,6 +5,34 @@
 #include "citron/applets/qt_error.h"
 #include "citron/main.h"
 
+#ifdef ENABLE_WEB_SERVICE
+#include "web_service/legacy_api.h"
+#endif
+
+namespace {
+
+// NEX carries no field for why a login was refused, so every account gate reaches the player as a
+// bare 2306-XXXX. Ask the account server about our own account and say what it actually was.
+QString OpenPakGateHint(Result error) {
+#ifdef ENABLE_WEB_SERVICE
+    constexpr u32 NexModule = 306;
+    if (static_cast<u32>(error.GetModule()) != NexModule) {
+        return {};
+    }
+
+    const auto status = WebService::OpenPakApi::GetOnlineStatus();
+    if (!status.queried || status.allow || status.message.empty()) {
+        return {};
+    }
+
+    return QStringLiteral("\n\n%1").arg(QString::fromStdString(status.message));
+#else
+    return {};
+#endif
+}
+
+} // Anonymous namespace
+
 QtErrorDisplay::QtErrorDisplay(GMainWindow& parent) {
     connect(this, &QtErrorDisplay::MainWindowDisplayError, &parent,
             &GMainWindow::ErrorDisplayDisplayError, Qt::QueuedConnection);
@@ -28,7 +56,8 @@ void QtErrorDisplay::ShowError(Result error, FinishedCallback finished) const {
             .arg(static_cast<u32>(error.GetModule()) + 2000, 4, 10, QChar::fromLatin1('0'))
             .arg(error.GetDescription(), 4, 10, QChar::fromLatin1('0'))
             .arg(error.raw, 8, 16, QChar::fromLatin1('0')),
-        tr("An error has occurred.\nPlease try again or contact the developer of the software."));
+        tr("An error has occurred.\nPlease try again or contact the developer of the software.") +
+            OpenPakGateHint(error));
 }
 
 void QtErrorDisplay::ShowErrorWithTimestamp(Result error, std::chrono::seconds time,
@@ -51,6 +80,12 @@ void QtErrorDisplay::ShowCustomErrorText(Result error, std::string dialog_text,
                                          std::string fullscreen_text,
                                          FinishedCallback finished) const {
     callback = std::move(finished);
+    // [OpenPak] ResultSuccess = informational notice, skip the error framing.
+    if (error == ResultSuccess) {
+        emit MainWindowDisplayError(QString::fromStdString(dialog_text),
+                                    QString::fromStdString(fullscreen_text));
+        return;
+    }
     emit MainWindowDisplayError(
         tr("Error Code: %1-%2 (0x%3)")
             .arg(static_cast<u32>(error.GetModule()) + 2000, 4, 10, QChar::fromLatin1('0'))

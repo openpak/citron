@@ -75,6 +75,7 @@ void Scheduler::WaitWorker() {
 }
 
 void Scheduler::DispatchWork() {
+    std::scoped_lock cl{chunk_mutex};
     if (chunk->Empty()) {
         return;
     }
@@ -220,6 +221,7 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     EndPendingOperations();
     InvalidateState();
 
+    std::scoped_lock cl{chunk_mutex};
     const u64 signal_value = master_semaphore->NextTick();
     RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
                             this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {

@@ -394,6 +394,10 @@ struct PlayerInput {
     bool vibration_enabled;
     int vibration_strength;
 
+    // Switch 2 back buttons: each additively triggers a chosen NativeButton (-1 = off)
+    int back_button_gl;
+    int back_button_gr;
+
     u32 body_color;
     u32 body_color_left;
     u32 body_color_right;

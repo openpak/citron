@@ -16,6 +16,7 @@
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/system_archive/system_archive.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/frontend/applets/error.h"
 #include "core/frontend/applets/web_browser.h"
 #include "core/hle/result.h"
 #include "core/hle/service/am/am.h"
@@ -514,7 +515,14 @@ void WebBrowser::ExecuteWifi() {
 }
 
 void WebBrowser::ExecuteLobby() {
+    // [OpenPak] NSO voice-chat lounge page; needs the phone app, so tell the player why.
     LOG_WARNING(Service_AM, "(STUBBED) called, Lobby Applet is not implemented");
+    if (const auto& error = system.GetFrontendAppletHolder().GetFrontendAppletSet().error) {
+        error->ShowCustomErrorText(
+            ResultSuccess,
+            "Voice chat isn't supported here — it requires the Nintendo Switch Online phone app.",
+            "Turn OFF voice chat in this game's settings, then host or join again.", [] {});
+    }
     WebBrowserExit(WebExitReason::EndButtonPressed);
 }
 } // namespace Service::AM::Frontend

@@ -120,7 +120,7 @@ namespace UISettings {
                 true,
                 true};
 
-                Setting<bool> first_start{linkage, true, "firstStart", Category::Ui};
+                Setting<bool> first_start{linkage, false, "firstStart", Category::Ui};
                 Setting<bool> setup_resume{linkage, false, "setupResume", Category::Ui};
                 Setting<bool> pause_when_in_background{linkage,
                     false,
@@ -156,6 +156,18 @@ namespace UISettings {
                                     // GameBanana Mod Manager
                                     Setting<bool> always_ask_manual_extraction{linkage, false, "always_ask_manual_extraction", Category::Ui};
                                     Setting<bool> disable_backup_archives{linkage, false, "disable_backup_archives", Category::Ui};
+
+                                    // User might not want backups. Allow them to disable/re-enable accordingly.
+                                    Setting<bool> updater_enable_backups{linkage, true, "updater/enableBackups", Category::Ui};
+
+                                    // The custom directory to store AppImage backups on Linux. If empty, backups are stored
+                                    // in a 'backup' folder next to the main AppImage.
+                                    Setting<std::string> updater_backup_path{linkage, "", "updater/backupPath", Category::Ui};
+
+                                    Setting<bool> legacy_notifications_enabled{linkage, true, "legacy/notificationsEnabled", Category::Ui};
+
+                                    // 0 = top-right, 1 = top-left, 2 = bottom-right, 3 = bottom-left. See OpenPakToast::Corner.
+                                    Setting<int> legacy_notification_corner{linkage, 0, "legacy/notificationCorner", Category::Ui};
 
                                     // logging
                                     Setting<bool> show_console{linkage, false, "showConsole", Category::Ui};

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <queue>
@@ -83,6 +84,7 @@ public:
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
+        std::scoped_lock lock{chunk_mutex};
         if (chunk->Record(command)) {
             return;
         }
@@ -241,6 +243,11 @@ private:
     vk::CommandBuffer current_cmdbuf;
     vk::CommandBuffer current_upload_cmdbuf;
 
+    // Guards the `chunk` pointer itself: the present thread and the main thread both call
+    // Record()/SubmitExecution() on this Scheduler, and DispatchWork() briefly nulls `chunk`
+    // between moving it into work_queue and AcquireNewChunk() reassigning it. Recursive: callers
+    // hold it across calls to other chunk-touching methods on the same thread.
+    std::recursive_mutex chunk_mutex;
     std::unique_ptr<CommandChunk> chunk;
     std::function<void()> on_submit;
 

@@ -295,20 +295,27 @@ inline u32 ResourceSet(const Profile& profile) {
 
 void DefineConstBuffers(EmitContext& ctx, const Info& info, Id UniformDefinitions::*member_type,
                         u32 binding, Id type, char type_char, u32 element_size) {
-    const Id array_type{ctx.TypeArray(type, ctx.Const(65536U / element_size))};
-    ctx.Decorate(array_type, spv::Decoration::ArrayStride, element_size);
-
-    const Id struct_type{ctx.TypeStruct(array_type)};
-    Name(ctx, struct_type, "{}_cbuf_block_{}{}", ctx.stage, type_char, element_size * CHAR_BIT);
-    ctx.Decorate(struct_type, spv::Decoration::Block);
-    ctx.MemberName(struct_type, 0, "data");
-    ctx.MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
-
-    const Id struct_pointer_type{ctx.TypePointer(spv::StorageClass::Uniform, struct_type)};
     const Id uniform_type{ctx.TypePointer(spv::StorageClass::Uniform, type)};
     ctx.uniform_types.*member_type = uniform_type;
 
     for (const ConstantBufferDescriptor& desc : info.constant_buffer_descriptors) {
+        u32 actual_size = info.constant_buffer_used_sizes[desc.index];
+
+        // NVIDIA requires 256-byte alignment.
+        // If we provide 112 but the shader expects an array, it fails.
+        actual_size = std::max((actual_size + 255U) & ~255U, 256U);
+
+        const Id array_type{ctx.TypeArray(type, ctx.Const(actual_size / element_size))};
+        ctx.Decorate(array_type, spv::Decoration::ArrayStride, element_size);
+
+        const Id struct_type{ctx.TypeStruct(array_type)};
+        Name(ctx, struct_type, "{}_cbuf_block_{}{}_{}", ctx.stage, type_char, element_size * CHAR_BIT, desc.index);
+        ctx.Decorate(struct_type, spv::Decoration::Block);
+        ctx.MemberName(struct_type, 0, "data");
+        ctx.MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+
+        const Id struct_pointer_type{ctx.TypePointer(spv::StorageClass::Uniform, struct_type)};
+
         const Id id{ctx.AddGlobalVariable(struct_pointer_type, spv::StorageClass::Uniform)};
         ctx.Decorate(id, spv::Decoration::Binding, binding);
         ctx.Decorate(id, spv::Decoration::DescriptorSet, kSet0);

@@ -289,6 +289,12 @@ std::unordered_map<VkFormat, VkFormatProperties> GetFormatProperties(vk::Physica
         VK_FORMAT_R8_UNORM,
         VK_FORMAT_R8_USCALED,
         VK_FORMAT_S8_UINT,
+        VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK,
+        VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK,
+        VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK,
+        VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK,
+        VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK,
+        VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK,
     };
     std::unordered_map<VkFormat, VkFormatProperties> format_properties;
     for (const auto format : formats) {

@@ -82,13 +82,14 @@ if (ENABLE_LIBUSB AND NOT TARGET libusb::usb)
     add_subdirectory(libusb)
 endif()
 
-# SDL2
-if (CITRON_USE_EXTERNAL_SDL2 AND NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2-static)
+# SDL3 (submodule — externals/SDL points to SDL 3.x)
+# The SDL_compat/ shim re-exports SDL3 under the legacy SDL.h include path so
+# sources using `#include <SDL.h>` continue to compile against SDL3 headers.
+if (CITRON_USE_EXTERNAL_SDL2 AND NOT TARGET SDL2::SDL2 AND NOT TARGET SDL3::SDL3)
     if (NOT WIN32)
         # Citron itself needs: Atomic Audio Events Joystick Haptic Sensor Threads Timers
-        # Since 2.0.18 Atomic+Threads required for HIDAPI/libusb (see https://github.com/libsdl-org/SDL/issues/5095)
-        # Citron-cmd also needs: Video (depends on Loadso/Dlopen)
-        # CPUinfo also required for SDL Audio, at least until 2.28.0 (see https://github.com/libsdl-org/SDL/issues/7809)
+        # SDL3 handles subsystem dependencies automatically; disable unused ones to
+        # keep build times down.
         set(SDL_UNUSED_SUBSYSTEMS
             File Filesystem
             Locale Power Render)
@@ -103,7 +104,44 @@ if (CITRON_USE_EXTERNAL_SDL2 AND NOT TARGET SDL2::SDL2 AND NOT TARGET SDL2-stati
         set(SDL_FILE ON)
     endif()
 
+    # libusb backend is required for the Switch 2 Joy-Con / Pro driver (SDL_hidapi_switch2.c
+    # is gated behind HAVE_LIBUSB). Force it on so those controllers are recognized.
+    set(SDL_HIDAPI ON CACHE BOOL "" FORCE)
+    set(SDL_HIDAPI_LIBUSB ON CACHE BOOL "" FORCE)
+
+    # SDL probes getresuid/getresgid without _GNU_SOURCE, so the check fails on glibc while the
+    # real compile still sees unistd.h declare them -- SDL_gtk.c then defines its own static
+    # fallbacks and the build fails. Redo the probe correctly and seed the result, so
+    # check_symbol_exists skips SDL's. Detected rather than assumed: musl has neither symbol and
+    # still needs SDL's fallback.
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        include(CheckSymbolExists)
+        set(CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
+        check_symbol_exists(getresuid "unistd.h" CITRON_HAS_GETRESUID)
+        check_symbol_exists(getresgid "unistd.h" CITRON_HAS_GETRESGID)
+        unset(CMAKE_REQUIRED_DEFINITIONS)
+        if (CITRON_HAS_GETRESUID)
+            set(HAVE_GETRESUID 1 CACHE INTERNAL "getresuid is declared with _GNU_SOURCE")
+        endif()
+        if (CITRON_HAS_GETRESGID)
+            set(HAVE_GETRESGID 1 CACHE INTERNAL "getresgid is declared with _GNU_SOURCE")
+        endif()
+    endif()
+
     add_subdirectory(SDL)
+    if (TARGET SDL3-shared)
+        target_include_directories(SDL3-shared INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/SDL_compat")
+        add_library(SDL2::SDL2 ALIAS SDL3-shared)
+    elseif (TARGET SDL3-static)
+        target_include_directories(SDL3-static INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/SDL_compat")
+        add_library(SDL2::SDL2 ALIAS SDL3-static)
+    elseif (TARGET SDL3)
+        target_include_directories(SDL3 INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/SDL_compat")
+        add_library(SDL2::SDL2 ALIAS SDL3)
+    endif()
+elseif (CITRON_USE_EXTERNAL_SDL2 AND TARGET SDL3::SDL3 AND NOT TARGET SDL2::SDL2)
+    # System SDL3 is present (e.g. installed via sdl3 Arch package) — create the compat alias.
+    add_library(SDL2::SDL2 ALIAS SDL3::SDL3)
 endif()
 
 # ENet

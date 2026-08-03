@@ -173,7 +173,7 @@ static_assert(sizeof(NifmNetworkProfileData) == 0x18E,
               "NifmNetworkProfileData has incorrect size.");
 #pragma pack(pop)
 
-constexpr Result ResultPendingConnection{ErrorModule::NIFM, 111};
+[[maybe_unused]] constexpr Result ResultPendingConnection{ErrorModule::NIFM, 111};
 constexpr Result ResultNetworkCommunicationDisabled{ErrorModule::NIFM, 1111};
 
 class IScanRequest final : public ServiceFramework<IScanRequest> {
@@ -285,23 +285,31 @@ public:
     }
 
 private:
-    void Submit(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_NIFM, "(STUBBED) called");
-
-        if (state == RequestState::Free) {
-            UpdateState(RequestState::OnHold);
+    // Resolves immediately; parking in OnHold made titles that poll GetRequestState hang.
+    RequestState ResolveState() {
+        const auto new_state = Network::GetHostIPv4Address().has_value() ? RequestState::Accepted
+                                                                        : RequestState::Free;
+        if (state != new_state) {
+            UpdateState(new_state);
         }
+        return state;
+    }
+
+    void Submit(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(ResolveState()));
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
 
     void GetRequestState(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_NIFM, "(STUBBED) called");
+        const auto current = ResolveState();
+
+        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(current));
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.PushEnum(state);
+        rb.PushEnum(current);
     }
 
     void SetRequirementPreset(HLERequestContext& ctx) {
@@ -315,25 +323,11 @@ private:
     }
 
     void GetResult(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_NIFM, "(STUBBED) called");
+        const auto current = ResolveState();
+        const auto result = current == RequestState::Accepted ? ResultSuccess
+                                                             : ResultNetworkCommunicationDisabled;
 
-        const auto result = [this] {
-            const auto has_connection = Network::GetHostIPv4Address().has_value();
-            switch (state) {
-            case RequestState::Free:
-                return has_connection ? ResultSuccess : ResultNetworkCommunicationDisabled;
-            case RequestState::OnHold:
-                if (has_connection) {
-                    UpdateState(RequestState::Accepted);
-                } else {
-                    UpdateState(RequestState::Invalid);
-                }
-                return ResultPendingConnection;
-            case RequestState::Accepted:
-            default:
-                return ResultSuccess;
-            }
-        }();
+        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(current));
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(result);
@@ -795,25 +789,21 @@ void IGeneralService::IsEthernetCommunicationEnabled(HLERequestContext& ctx) {
 }
 
 void IGeneralService::IsAnyInternetRequestAccepted(HLERequestContext& ctx) {
-    LOG_ERROR(Service_NIFM, "(STUBBED) called");
+    LOG_DEBUG(Service_NIFM, "called");
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    if (Network::GetHostIPv4Address().has_value()) {
-        rb.Push<u8>(1);
-    } else {
-        rb.Push<u8>(0);
-    }
+    rb.Push<u8>(1);
 }
 
 void IGeneralService::IsAnyForegroundRequestAccepted(HLERequestContext& ctx) {
-    const bool is_accepted{};
+    const bool is_accepted = Network::GetHostIPv4Address().has_value();
 
-    LOG_WARNING(Service_NIFM, "(STUBBED) called, is_accepted={}", is_accepted);
+    LOG_INFO(Service_NIFM, "called, is_accepted={}", is_accepted);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u8>(is_accepted);
+    rb.Push<u8>(is_accepted ? 1 : 0);
 }
 
 void IGeneralService::GetSsidListVersion(HLERequestContext& ctx) {

@@ -112,6 +112,9 @@ Result Container::SetLayerVisibility(u64 layer_id, bool visible) {
     std::scoped_lock lk{m_lock};
 
     auto* const layer = m_layers.GetLayerById(layer_id);
+    if (layer == nullptr) {
+        LOG_ERROR(Service_VI, "layer_id={} not found; it was never created", layer_id);
+    }
     R_UNLESS(layer != nullptr, VI::ResultNotFound);
 
     m_surface_flinger->SetLayerVisibility(layer->GetConsumerBinderId(), visible);

@@ -148,6 +148,16 @@
     <addaction name="action_Show_Room"/>
     <addaction name="action_Leave_Room"/>
    </widget>
+   <widget class="QMenu" name="menu_OpenPak">
+    <property name="title">
+     <string>Nex&amp;Tendo</string>
+    </property>
+    <addaction name="action_OpenPak_Open_Account"/>
+    <addaction name="action_OpenPak_Sign_In"/>
+    <addaction name="action_OpenPak_Sign_Out"/>
+    <addaction name="separator"/>
+    <addaction name="action_OpenPak_Enable_Redirection"/>
+   </widget>
    <widget class="QMenu" name="menu_Tools">
     <property name="title">
      <string>&amp;Tools</string>
@@ -193,6 +203,8 @@
     <addaction name="separator"/>
     <addaction name="action_Open_Log_Folder"/>
     <addaction name="separator"/>
+    <addaction name="action_Check_For_Updates"/>
+    <addaction name="separator"/>
     <addaction name="action_About"/>
    </widget>
    <addaction name="menu_File"/>
@@ -200,6 +212,7 @@
    <addaction name="menu_View"/>
    <addaction name="menu_Tools"/>
    <addaction name="menu_Multiplayer"/>
+   <addaction name="menu_OpenPak"/>
    <addaction name="menu_Help"/>
   </widget>
   <action name="action_Install_File_NAND">
@@ -257,6 +270,11 @@
   <action name="action_About">
    <property name="text">
     <string>&amp;About citron-neo: The switch fell off</string>
+   </property>
+  </action>
+  <action name="action_Check_For_Updates">
+   <property name="text">
+    <string>Check for &amp;Updates...</string>
    </property>
   </action>
   <action name="action_Single_Window_Mode">
@@ -360,6 +378,32 @@
    </property>
    <property name="text">
     <string>&amp;Browse Public Game Lobby</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Open_Account">
+   <property name="text">
+    <string>&amp;Open Account Page</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Sign_In">
+   <property name="text">
+    <string>&amp;Sign In</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Sign_Out">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="text">
+    <string>Sign &amp;Out</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Enable_Redirection">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>&amp;Enable Network Redirection</string>
    </property>
   </action>
   <action name="action_Start_Room">

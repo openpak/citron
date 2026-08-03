@@ -118,6 +118,8 @@ constexpr IPv4Address TranslateIPv4(in_addr addr) {
 std::optional<IPv4Address> GetHostIPv4Address();
 
 std::string IPv4AddressToString(IPv4Address ip_addr);
+std::string IPv4AddressToRedactedString(IPv4Address ip_addr);
+
 u32 IPv4AddressToInteger(IPv4Address ip_addr);
 
 // named to avoid name collision with Windows macro

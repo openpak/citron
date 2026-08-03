@@ -20,11 +20,10 @@
 EmuWindow_SDL2::EmuWindow_SDL2(InputCommon::InputSubsystem* input_subsystem_, Core::System& system_)
     : input_subsystem{input_subsystem_}, system{system_} {
     input_subsystem->Initialize();
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) < 0) {
-        LOG_CRITICAL(Frontend, "Failed to initialize SDL2: {}, Exiting...", SDL_GetError());
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD)) {
+        LOG_CRITICAL(Frontend, "Failed to initialize SDL: {}, Exiting...", SDL_GetError());
         exit(1);
     }
-    SDL_SetMainReady();
 }
 
 EmuWindow_SDL2::~EmuWindow_SDL2() {
@@ -59,9 +58,9 @@ std::pair<float, float> EmuWindow_SDL2::MouseToTouchPos(s32 touch_x, s32 touch_y
     return {std::clamp<float>(fx, 0.0f, 1.0f), std::clamp<float>(fy, 0.0f, 1.0f)};
 }
 
-void EmuWindow_SDL2::OnMouseButton(u32 button, u8 state, s32 x, s32 y) {
+void EmuWindow_SDL2::OnMouseButton(u32 button, bool down, s32 x, s32 y) {
     const auto mouse_button = SDLButtonToMouseButton(button);
-    if (state == SDL_PRESSED) {
+    if (down) {
         const auto [touch_x, touch_y] = MouseToTouchPos(x, y);
         input_subsystem->GetMouse()->PressButton(x, y, mouse_button);
         input_subsystem->GetMouse()->PressMouseButton(mouse_button);
@@ -80,7 +79,7 @@ void EmuWindow_SDL2::OnMouseMotion(s32 x, s32 y) {
 
 void EmuWindow_SDL2::OnMouseWheel(s32 x, s32 y) {
     input_subsystem->GetMouse()->MouseWheelChange(x, y);
-    LOG_DEBUG(Frontend, "SDL2 Mouse wheel event: x={}, y={}", x, y);
+    LOG_DEBUG(Frontend, "SDL Mouse wheel event: x={}, y={}", x, y);
 }
 
 void EmuWindow_SDL2::OnFingerDown(float x, float y, std::size_t id) {
@@ -95,10 +94,10 @@ void EmuWindow_SDL2::OnFingerUp() {
     input_subsystem->GetTouchScreen()->ReleaseAllTouch();
 }
 
-void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
-    if (state == SDL_PRESSED) {
+void EmuWindow_SDL2::OnKeyEvent(int key, bool down) {
+    if (down) {
         input_subsystem->GetKeyboard()->PressKey(static_cast<std::size_t>(key));
-    } else if (state == SDL_RELEASED) {
+    } else {
         input_subsystem->GetKeyboard()->ReleaseKey(static_cast<std::size_t>(key));
     }
 }
@@ -113,35 +112,39 @@ bool EmuWindow_SDL2::IsShown() const {
 
 void EmuWindow_SDL2::OnResize() {
     int width, height;
-    SDL_GL_GetDrawableSize(render_window, &width, &height);
+    SDL_GetWindowSizeInPixels(render_window, &width, &height);
     UpdateCurrentFramebufferLayout(width, height);
 }
 
 void EmuWindow_SDL2::ShowCursor(bool show_cursor) {
-    SDL_ShowCursor(show_cursor ? SDL_ENABLE : SDL_DISABLE);
+    if (show_cursor) {
+        SDL_ShowCursor();
+    } else {
+        SDL_HideCursor();
+    }
 }
 
 void EmuWindow_SDL2::Fullscreen() {
-    SDL_DisplayMode display_mode;
     switch (Settings::values.fullscreen_mode.GetValue()) {
-    case Settings::FullscreenMode::Exclusive:
-        // Set window size to render size before entering fullscreen -- SDL2 does not resize window
-        // to display dimensions automatically in this mode.
-        if (SDL_GetDesktopDisplayMode(0, &display_mode) == 0) {
-            SDL_SetWindowSize(render_window, display_mode.w, display_mode.h);
+    case Settings::FullscreenMode::Exclusive: {
+        const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+        if (mode != nullptr) {
+            SDL_SetWindowFullscreenMode(render_window, mode);
         } else {
             LOG_ERROR(Frontend, "SDL_GetDesktopDisplayMode failed: {}", SDL_GetError());
         }
 
-        if (SDL_SetWindowFullscreen(render_window, SDL_WINDOW_FULLSCREEN) == 0) {
+        if (SDL_SetWindowFullscreen(render_window, true)) {
             return;
         }
 
         LOG_ERROR(Frontend, "Fullscreening failed: {}", SDL_GetError());
         LOG_INFO(Frontend, "Attempting to use borderless fullscreen...");
         [[fallthrough]];
+    }
     case Settings::FullscreenMode::Borderless:
-        if (SDL_SetWindowFullscreen(render_window, SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) {
+        SDL_SetWindowFullscreenMode(render_window, nullptr);
+        if (SDL_SetWindowFullscreen(render_window, true)) {
             return;
         }
 
@@ -149,7 +152,6 @@ void EmuWindow_SDL2::Fullscreen() {
         [[fallthrough]];
     default:
         // Fallback algorithm: Maximise window.
-        // Works on all systems (unless something is seriously wrong), so no fallback for this one.
         LOG_INFO(Frontend, "Falling back on a maximised window...");
         SDL_MaximizeWindow(render_window);
         break;
@@ -163,9 +165,7 @@ void EmuWindow_SDL2::WaitEvent() {
     if (!SDL_WaitEvent(&event)) {
         const char* error = SDL_GetError();
         if (!error || strcmp(error, "") == 0) {
-            // https://github.com/libsdl-org/SDL/issues/5780
-            // Sometimes SDL will return without actually having hit an error condition;
-            // just ignore it in this case.
+            // Ignore if no actual error
             return;
         }
 
@@ -174,55 +174,54 @@ void EmuWindow_SDL2::WaitEvent() {
     }
 
     switch (event.type) {
-    case SDL_WINDOWEVENT:
-        switch (event.window.event) {
-        case SDL_WINDOWEVENT_SIZE_CHANGED:
-        case SDL_WINDOWEVENT_RESIZED:
-        case SDL_WINDOWEVENT_MAXIMIZED:
-        case SDL_WINDOWEVENT_RESTORED:
-            OnResize();
-            break;
-        case SDL_WINDOWEVENT_MINIMIZED:
-        case SDL_WINDOWEVENT_EXPOSED:
-            is_shown = event.window.event == SDL_WINDOWEVENT_EXPOSED;
-            OnResize();
-            break;
-        case SDL_WINDOWEVENT_CLOSE:
-            is_open = false;
-            break;
-        }
+    case SDL_EVENT_WINDOW_RESIZED:
+    case SDL_EVENT_WINDOW_MAXIMIZED:
+    case SDL_EVENT_WINDOW_RESTORED:
+        OnResize();
         break;
-    case SDL_KEYDOWN:
-    case SDL_KEYUP:
-        OnKeyEvent(static_cast<int>(event.key.keysym.scancode), event.key.state);
+    case SDL_EVENT_WINDOW_MINIMIZED:
+        is_shown = false;
+        OnResize();
         break;
-    case SDL_MOUSEMOTION:
+    case SDL_EVENT_WINDOW_EXPOSED:
+        is_shown = true;
+        OnResize();
+        break;
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        is_open = false;
+        break;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+        OnKeyEvent(static_cast<int>(event.key.scancode), event.key.down);
+        break;
+    case SDL_EVENT_MOUSE_MOTION:
         // ignore if it came from touch
-        if (event.button.which != SDL_TOUCH_MOUSEID)
-            OnMouseMotion(event.motion.x, event.motion.y);
+        if (event.motion.which != SDL_TOUCH_MOUSEID)
+            OnMouseMotion(static_cast<s32>(event.motion.x), static_cast<s32>(event.motion.y));
         break;
-    case SDL_MOUSEBUTTONDOWN:
-    case SDL_MOUSEBUTTONUP:
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
         // ignore if it came from touch
         if (event.button.which != SDL_TOUCH_MOUSEID) {
-            OnMouseButton(event.button.button, event.button.state, event.button.x, event.button.y);
+            OnMouseButton(event.button.button, event.button.down,
+                          static_cast<s32>(event.button.x), static_cast<s32>(event.button.y));
         }
         break;
-    case SDL_MOUSEWHEEL:
-        OnMouseWheel(event.wheel.x, event.wheel.y);
+    case SDL_EVENT_MOUSE_WHEEL:
+        OnMouseWheel(static_cast<s32>(event.wheel.x), static_cast<s32>(event.wheel.y));
         break;
-    case SDL_FINGERDOWN:
+    case SDL_EVENT_FINGER_DOWN:
         OnFingerDown(event.tfinger.x, event.tfinger.y,
-                     static_cast<std::size_t>(event.tfinger.touchId));
+                     static_cast<std::size_t>(event.tfinger.fingerID));
         break;
-    case SDL_FINGERMOTION:
+    case SDL_EVENT_FINGER_MOTION:
         OnFingerMotion(event.tfinger.x, event.tfinger.y,
-                       static_cast<std::size_t>(event.tfinger.touchId));
+                       static_cast<std::size_t>(event.tfinger.fingerID));
         break;
-    case SDL_FINGERUP:
+    case SDL_EVENT_FINGER_UP:
         OnFingerUp();
         break;
-    case SDL_QUIT:
+    case SDL_EVENT_QUIT:
         is_open = false;
         break;
     default:
@@ -243,12 +242,12 @@ void EmuWindow_SDL2::WaitEvent() {
 
 // Credits to Samantas5855 and others for this function.
 void EmuWindow_SDL2::SetWindowIcon() {
-    SDL_RWops* const citron_icon_stream = SDL_RWFromConstMem((void*)citron_icon, citron_icon_size);
+    SDL_IOStream* const citron_icon_stream = SDL_IOFromConstMem((void*)citron_icon, citron_icon_size);
     if (citron_icon_stream == nullptr) {
         LOG_WARNING(Frontend, "Failed to create citron icon stream.");
         return;
     }
-    SDL_Surface* const window_icon = SDL_LoadBMP_RW(citron_icon_stream, 1);
+    SDL_Surface* const window_icon = SDL_LoadBMP_IO(citron_icon_stream, true);
     if (window_icon == nullptr) {
         LOG_WARNING(Frontend, "Failed to read BMP from stream.");
         return;

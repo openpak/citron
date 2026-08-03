@@ -4,11 +4,21 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <mutex>
+
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
 
 #include "common/common_types.h"
 #include "common/fs/file.h"
 #include "common/fs/path_util.h"
+#include "common/hex_util.h"
 #include "common/logging.h"
+#include "common/legacy_account.h"
+#include "common/settings.h"
 #include <ranges>
 #include "common/stb.h"
 #include "common/string_util.h"
@@ -37,6 +47,208 @@
 #include "core/loader/loader.h"
 
 namespace Service::Account {
+
+namespace {
+
+// The BAAS id_token read through LoadIdTokenCache. NEX parses it before logging in, so it must be
+// a real RS256 JWT. Key comes from OPENPAK_LEGACY_BAAS_SIGNING_KEY or legacy_baas.pem, else generated.
+constexpr const char* BaasIssuer = "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
+constexpr const char* BaasJku =
+    "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates";
+constexpr const char* BaasAudience = "ed9e2f05d286f7b8";
+constexpr const char* BaasKeyId = "legacy-baas-key-1";
+
+std::string Base64UrlEncode(std::span<const u8> data) {
+    static constexpr std::string_view alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    std::string out;
+    out.reserve((data.size() + 2) / 3 * 4);
+
+    for (std::size_t i = 0; i < data.size(); i += 3) {
+        const u32 remaining = static_cast<u32>(data.size() - i);
+        const u32 triple = (static_cast<u32>(data[i]) << 16) |
+                           (remaining > 1 ? static_cast<u32>(data[i + 1]) << 8 : 0) |
+                           (remaining > 2 ? static_cast<u32>(data[i + 2]) : 0);
+
+        out += alphabet[(triple >> 18) & 0x3F];
+        out += alphabet[(triple >> 12) & 0x3F];
+        if (remaining > 1) {
+            out += alphabet[(triple >> 6) & 0x3F];
+        }
+        if (remaining > 2) {
+            out += alphabet[triple & 0x3F];
+        }
+    }
+
+    return out;
+}
+
+std::string Base64UrlEncode(std::string_view text) {
+    return Base64UrlEncode(
+        std::span{reinterpret_cast<const u8*>(text.data()), text.size()});
+}
+
+std::string RandomHex(std::size_t bytes) {
+    std::vector<u8> buffer(bytes);
+    if (RAND_bytes(buffer.data(), static_cast<int>(buffer.size())) != 1) {
+        for (std::size_t i = 0; i < buffer.size(); ++i) {
+            buffer[i] = static_cast<u8>(std::rand());
+        }
+    }
+    return Common::HexToString(buffer, /*upper=*/false);
+}
+
+EVP_PKEY* GetBaasSigningKey() {
+    static EVP_PKEY* key = []() -> EVP_PKEY* {
+        std::string pem;
+
+        if (const char* env = std::getenv("OPENPAK_LEGACY_BAAS_SIGNING_KEY"); env && *env) {
+            pem = env;
+        } else if (const auto file = Common::FS::ReadStringFromFile(
+                       std::filesystem::path{"legacy_baas.pem"}, Common::FS::FileType::TextFile);
+                   !file.empty()) {
+            pem = file;
+        }
+
+        if (pem.find("BEGIN") != std::string::npos) {
+            BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+            if (bio) {
+                EVP_PKEY* loaded = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+                BIO_free(bio);
+                if (loaded) {
+                    LOG_INFO(Service_ACC, "[OpenPak] Using the supplied BAAS signing key");
+                    return loaded;
+                }
+                LOG_WARNING(Service_ACC,
+                            "[OpenPak] BAAS signing key could not be parsed; generating one");
+            }
+        }
+
+        // No key supplied: reuse a persisted auto-generated one so the identity (and its
+        // public JWK) stays stable across launches instead of a fresh key every process start.
+        const auto auto_key_path =
+            Common::FS::GetCitronPath(Common::FS::CitronPath::KeysDir) / "legacy_baas_auto.pem";
+        if (const auto existing =
+                Common::FS::ReadStringFromFile(auto_key_path, Common::FS::FileType::TextFile);
+            existing.find("BEGIN") != std::string::npos) {
+            BIO* bio = BIO_new_mem_buf(existing.data(), static_cast<int>(existing.size()));
+            if (bio) {
+                EVP_PKEY* loaded = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+                BIO_free(bio);
+                if (loaded) {
+                    LOG_DEBUG(Service_ACC, "[OpenPak] Using the persisted auto-generated BAAS signing key");
+                    return loaded;
+                }
+            }
+        }
+
+        EVP_PKEY* generated = EVP_RSA_gen(2048);
+        if (!generated) {
+            LOG_ERROR(Service_ACC, "[OpenPak] Failed to generate a BAAS signing key");
+            return generated;
+        }
+
+        BIO* out_bio = BIO_new(BIO_s_mem());
+        if (out_bio && PEM_write_bio_PrivateKey(out_bio, generated, nullptr, nullptr, 0, nullptr,
+                                                nullptr)) {
+            char* data = nullptr;
+            const long len = BIO_get_mem_data(out_bio, &data);
+            if (len > 0 && data) {
+                const auto written = Common::FS::WriteStringToFile(
+                    auto_key_path, Common::FS::FileType::TextFile,
+                    std::string_view{data, static_cast<size_t>(len)});
+                if (written > 0) {
+                    LOG_DEBUG(Service_ACC,
+                             "[OpenPak] Generated and persisted a new BAAS signing key at {}",
+                             auto_key_path.string());
+                }
+            }
+        }
+        if (out_bio) {
+            BIO_free(out_bio);
+        }
+        return generated;
+    }();
+
+    return key;
+}
+
+std::string SignRs256(std::string_view signing_input) {
+    EVP_PKEY* key = GetBaasSigningKey();
+    if (!key) {
+        return {};
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) {
+        return {};
+    }
+
+    std::string signature;
+    std::size_t length = 0;
+
+    if (EVP_DigestSignInit(ctx, nullptr, EVP_sha256(), nullptr, key) == 1 &&
+        EVP_DigestSign(ctx, nullptr, &length,
+                       reinterpret_cast<const u8*>(signing_input.data()),
+                       signing_input.size()) == 1) {
+        std::vector<u8> raw(length);
+        if (EVP_DigestSign(ctx, raw.data(), &length,
+                           reinterpret_cast<const u8*>(signing_input.data()),
+                           signing_input.size()) == 1) {
+            raw.resize(length);
+            signature = Base64UrlEncode(raw);
+        }
+    }
+
+    if (signature.empty()) {
+        LOG_ERROR(Service_ACC, "[OpenPak] Failed to sign the BAAS id_token");
+    }
+
+    EVP_MD_CTX_free(ctx);
+    return signature;
+}
+
+std::string BuildIdToken() {
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+
+    const std::string header =
+        fmt::format(R"({{"alg":"RS256","kid":"{}","typ":"id_token","jku":"{}"}})", BaasKeyId,
+                    BaasJku);
+
+    const std::string payload = fmt::format(
+        R"({{"sub":"{}","aud":"{}","iss":"{}","typ":"id_token","iat":{},"exp":{},"jku":"{}",)"
+        R"("jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}","hm":true}})",
+        RandomHex(0x10), BaasAudience, BaasIssuer, now, now + 3 * 60 * 60, BaasJku,
+        Common::UUID::MakeRandom().FormattedString(), RandomHex(0x10), RandomHex(0x10));
+
+    const std::string signing_input =
+        Base64UrlEncode(header) + "." + Base64UrlEncode(payload);
+
+    return signing_input + "." + SignRs256(signing_input);
+}
+
+std::vector<u8> GetIdTokenBytes() {
+    static std::mutex mutex;
+    static std::vector<u8> cached;
+    static std::chrono::steady_clock::time_point expiry{};
+
+    std::lock_guard lock{mutex};
+
+    const auto now = std::chrono::steady_clock::now();
+    if (cached.empty() || now >= expiry) {
+        const std::string token = BuildIdToken();
+        cached.assign(token.begin(), token.end());
+        expiry = now + std::chrono::hours{2};
+        LOG_INFO(Service_ACC, "[OpenPak] Issued a signed BAAS id_token ({} bytes)", cached.size());
+    }
+
+    return cached;
+}
+
+} // Anonymous namespace
 
 // Thumbnails are hard coded to be at least this size
 constexpr std::size_t THUMBNAIL_SIZE = 0x24000;
@@ -605,11 +817,15 @@ public:
     ~EnsureTokenIdCacheAsyncInterface() = default;
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        const std::vector<u8> token_bytes = GetIdTokenBytes();
+        LOG_INFO(Service_ACC, "[OpenPak] Providing BAAS ID token in async interface ({} bytes)",
+                 token_bytes.size());
+
+        ctx.WriteBuffer(token_bytes);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push(0);
+        rb.Push<u32>(static_cast<u32>(token_bytes.size()));
     }
 
 protected:
@@ -722,6 +938,63 @@ protected:
     }
 };
 
+// 6.0.0+
+class IAsyncNetworkServiceLicenseKindContext final
+    : public ServiceFramework<IAsyncNetworkServiceLicenseKindContext> {
+public:
+    explicit IAsyncNetworkServiceLicenseKindContext(Core::System& system_)
+        : ServiceFramework{system_, "IAsyncNetworkServiceLicenseKindContext"},
+          service_context{system_, "IAsyncNetworkServiceLicenseKindContext"} {
+        static const FunctionInfo functions[] = {
+            {0, &IAsyncNetworkServiceLicenseKindContext::GetSystemEvent, "GetSystemEvent"},
+            {1, &IAsyncNetworkServiceLicenseKindContext::Cancel, "Cancel"},
+            {2, &IAsyncNetworkServiceLicenseKindContext::HasDone, "HasDone"},
+            {3, &IAsyncNetworkServiceLicenseKindContext::GetResult, "GetResult"},
+            {4, &IAsyncNetworkServiceLicenseKindContext::GetNetworkServiceLicenseKind, "GetNetworkServiceLicenseKind"},
+        };
+        RegisterHandlers(functions);
+        completion_event = service_context.CreateEvent("IAsyncNetworkServiceLicenseKindContext:CompletionEvent");
+        completion_event->Signal();
+    }
+
+private:
+    void GetSystemEvent(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2, 1};
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(completion_event->GetReadableEvent());
+    }
+
+    void Cancel(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void HasDone(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push(true);
+    }
+
+    void GetResult(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetNetworkServiceLicenseKind(HLERequestContext& ctx) {
+        LOG_INFO(Service_ACC, "[OpenPak] GetNetworkServiceLicenseKind called -> returning Subscribed (2)");
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(2);
+    }
+
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* completion_event;
+};
+
 class IManagerForApplication final : public ServiceFramework<IManagerForApplication> {
 public:
     explicit IManagerForApplication(Core::System& system_,
@@ -740,7 +1013,7 @@ public:
             {136, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCache"}, // 19.0.0+
             {150, nullptr, "CreateAuthorizationRequest"},
             {160, &IManagerForApplication::StoreOpenContext, "StoreOpenContext"},
-            {170, nullptr, "LoadNetworkServiceLicenseKindAsync"},
+            {170, &IManagerForApplication::LoadNetworkServiceLicenseKindAsync, "LoadNetworkServiceLicenseKindAsync"},
         };
         // clang-format on
 
@@ -748,6 +1021,25 @@ public:
     }
 
 private:
+    u64 GetEffectivePid() const {
+        if (const u64 linked = Common::OpenPakAccount::GetPid(); linked != 0) {
+            return linked;
+        }
+        std::string pid_setting = Settings::values.legacy_pid.GetValue();
+        if (!pid_setting.empty()) {
+            try {
+                return std::stoull(pid_setting);
+            } catch (...) {}
+        }
+        const char* pid_env = std::getenv("OPENPAK_LEGACY_PID");
+        if (pid_env && *pid_env) {
+            try {
+                return std::stoull(pid_env);
+            } catch (...) {}
+        }
+        return 0xcafe;
+    }
+
     void CheckAvailability(HLERequestContext& ctx) {
         LOG_DEBUG(Service_ACC, "(STUBBED) called");
         IPC::ResponseBuilder rb{ctx, 2};
@@ -755,11 +1047,13 @@ private:
     }
 
     void GetAccountId(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_ACC, "called");
+        u64 account_id = GetEffectivePid();
+        // The PID is accepted as a bare identity by the online service, so never log its value.
+        LOG_DEBUG(Service_ACC, "[OpenPak] Returning the linked account's Network ID");
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(account_id);
     }
 
     void EnsureIdTokenCacheAsync(HLERequestContext& ctx) {
@@ -777,28 +1071,33 @@ private:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        const std::vector<u8> token_bytes = GetIdTokenBytes();
+        LOG_INFO(Service_ACC, "[OpenPak] Providing BAAS ID token ({} bytes)", token_bytes.size());
+
+        ctx.WriteBuffer(token_bytes);
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.Push(0); // token size
-        rb.Push(0); // unknown
+        rb.Push<u32>(static_cast<u32>(token_bytes.size()));
+        rb.Push(0);
     }
 
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
+        u64 account_id = GetEffectivePid();
+        LOG_DEBUG(Service_ACC, "[OpenPak] GetNintendoAccountUserResourceCacheForApplication called");
 
-        std::vector<u8> nas_user_base_for_application(0x68);
+        std::vector<u8> nas_user_base_for_application(0x68, 0);
+        std::memcpy(nas_user_base_for_application.data(), &account_id, sizeof(account_id));
         ctx.WriteBuffer(nas_user_base_for_application, 0);
 
         if (ctx.CanWriteBuffer(1)) {
-            std::vector<u8> unknown_out_buffer(ctx.GetWriteBufferSize(1));
+            std::vector<u8> unknown_out_buffer(ctx.GetWriteBufferSize(1), 0);
             ctx.WriteBuffer(unknown_out_buffer, 1);
         }
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
-        rb.PushRaw<u64>(profile_manager->GetLastOpenedUser().Hash());
+        rb.PushRaw<u64>(account_id);
     }
 
     void StoreOpenContext(HLERequestContext& ctx) {
@@ -810,28 +1109,18 @@ private:
         rb.Push(ResultSuccess);
     }
 
+    void LoadNetworkServiceLicenseKindAsync(HLERequestContext& ctx) {
+        LOG_INFO(Service_ACC, "[OpenPak] LoadNetworkServiceLicenseKindAsync called");
+
+        auto async_context = std::make_shared<IAsyncNetworkServiceLicenseKindContext>(system);
+
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface(async_context);
+    }
+
     std::shared_ptr<EnsureTokenIdCacheAsyncInterface> ensure_token_id{};
     std::shared_ptr<ProfileManager> profile_manager;
-};
-
-// 6.0.0+
-class IAsyncNetworkServiceLicenseKindContext final
-    : public ServiceFramework<IAsyncNetworkServiceLicenseKindContext> {
-public:
-    explicit IAsyncNetworkServiceLicenseKindContext(Core::System& system_, Common::UUID)
-        : ServiceFramework{system_, "IAsyncNetworkServiceLicenseKindContext"} {
-        // clang-format off
-        static const FunctionInfo functions[] = {
-            {0, nullptr, "GetSystemEvent"},
-            {1, nullptr, "Cancel"},
-            {2, nullptr, "HasDone"},
-            {3, nullptr, "GetResult"},
-            {4, nullptr, "GetNetworkServiceLicenseKind"},
-        };
-        // clang-format on
-
-        RegisterHandlers(functions);
-    }
 };
 
 // 8.0.0+
@@ -904,7 +1193,7 @@ public:
 };
 
 void Module::Interface::GetUserCount(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_ACC, "called");
+    LOG_DEBUG(Service_ACC, "called, user_count={}", profile_manager->GetUserCount());
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push<u32>(static_cast<u32>(profile_manager->GetUserCount()));
@@ -913,15 +1202,16 @@ void Module::Interface::GetUserCount(HLERequestContext& ctx) {
 void Module::Interface::GetUserExistence(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     Common::UUID user_id = rp.PopRaw<Common::UUID>();
-    LOG_DEBUG(Service_ACC, "called user_id=0x{}", user_id.RawString());
+    const bool exists = profile_manager->UserExists(user_id);
+    LOG_DEBUG(Service_ACC, "called user_id=0x{}, exists={}", user_id.RawString(), exists);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push(profile_manager->UserExists(user_id));
+    rb.Push(exists);
 }
 
 void Module::Interface::ListAllUsers(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_ACC, "called");
+    LOG_DEBUG(Service_ACC, "called, user_count={}", profile_manager->GetUserCount());
     ctx.WriteBuffer(profile_manager->GetAllUsers());
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
@@ -935,7 +1225,7 @@ void Module::Interface::ListOpenUsers(HLERequestContext& ctx) {
 }
 
 void Module::Interface::GetLastOpenedUser(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_ACC, "called");
+    LOG_DEBUG(Service_ACC, "called, uuid=0x{}", profile_manager->GetLastOpenedUser().RawString());
     IPC::ResponseBuilder rb{ctx, 6};
     rb.Push(ResultSuccess);
     rb.PushRaw<Common::UUID>(profile_manager->GetLastOpenedUser());
@@ -1243,11 +1533,13 @@ void Module::Interface::StoreSaveDataThumbnail(HLERequestContext& ctx, const Com
 }
 
 void Module::Interface::TrySelectUserWithoutInteraction(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_ACC, "called");
-    // A u8 is passed into this function which we can safely ignore. It's to determine if we have
-    // access to use the network or not by the looks of it
+    IPC::RequestParser rp{ctx};
+    const auto is_network_service_account_required = rp.Pop<bool>();
+    LOG_DEBUG(Service_ACC, "called, is_network_service_account_required={}, user_count={}",
+             is_network_service_account_required, profile_manager->GetUserCount());
     IPC::ResponseBuilder rb{ctx, 6};
     if (profile_manager->GetUserCount() != 1) {
+        LOG_DEBUG(Service_ACC, "-> ResultSuccess w/ InvalidUUID (user_count != 1)");
         rb.Push(ResultSuccess);
         rb.PushRaw(Common::InvalidUUID);
         return;
@@ -1255,12 +1547,14 @@ void Module::Interface::TrySelectUserWithoutInteraction(HLERequestContext& ctx) 
 
     const auto user_list = profile_manager->GetAllUsers();
     if (std::ranges::all_of(user_list, [](const auto& user) { return user.IsInvalid(); })) {
+        LOG_DEBUG(Service_ACC, "-> ResultUnknown (all users invalid)");
         rb.Push(ResultUnknown); // TODO(ogniK): Find the correct error code
         rb.PushRaw(Common::InvalidUUID);
         return;
     }
 
     // Select the first user we have
+    LOG_DEBUG(Service_ACC, "-> ResultSuccess uuid=0x{}", profile_manager->GetUser(0)->RawString());
     rb.Push(ResultSuccess);
     rb.PushRaw(profile_manager->GetUser(0)->uuid);
 }

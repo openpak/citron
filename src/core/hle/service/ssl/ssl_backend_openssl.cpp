@@ -13,6 +13,7 @@
 #include "common/hex_util.h"
 #include "common/string_util.h"
 
+#include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
@@ -60,6 +61,11 @@ public:
 
         SSL_set_connect_state(ssl);
 
+        // [OpenPak] NEX (MK8/Splatoon 2) uses PRUDP over WebSocket which requires HTTP/1.1 Upgrade.
+        // Force ALPN to http/1.1 only so HTTP/2 is never negotiated.
+        const unsigned char alpn_protos[] = "\x08http/1.1";
+        SSL_set_alpn_protos(ssl, alpn_protos, sizeof(alpn_protos) - 1);
+
         bio = BIO_new(bio_meth);
         if (!bio) {
             LOG_ERROR(Service_SSL, "BIO_new failed");
@@ -78,53 +84,73 @@ public:
     }
 
     Result SetHostName(const std::string& hostname) override {
-        if (!SSL_set1_host(ssl, hostname.c_str())) { // hostname for verification
-            LOG_ERROR(Service_SSL, "SSL_set1_host({}) failed", hostname);
-            return CheckOpenSSLErrors();
+        std::string effective_host = hostname;
+        auto pos = effective_host.find('%');
+        if (pos != std::string::npos) {
+            effective_host.replace(pos, 1, "lp1");
         }
-        if (!SSL_set_tlsext_host_name(ssl, hostname.c_str())) { // hostname for SNI
-            LOG_ERROR(Service_SSL, "SSL_set_tlsext_host_name({}) failed", hostname);
-            return CheckOpenSSLErrors();
+        if (socket) {
+            auto [peer_addr, err] = socket->GetPeerName();
+            if (err == Network::Errno::SUCCESS) {
+                std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
+                // Some titles pass the redirected IP itself instead of leaving this empty.
+                if (effective_host.empty() || effective_host == ip_str) {
+                    std::string last_host = Service::Sockets::GetLastHostForIp(ip_str);
+                    if (!last_host.empty()) {
+                        effective_host = last_host;
+                        auto pos2 = effective_host.find('%');
+                        if (pos2 != std::string::npos) {
+                            effective_host.replace(pos2, 1, "lp1");
+                        }
+                        LOG_INFO(Service_SSL, "[OpenPak] Recovered host '{}' for IP {}", effective_host, ip_str);
+                    }
+                }
+            }
+        }
+        if (!effective_host.empty()) {
+            if (!SSL_set1_host(ssl, effective_host.c_str())) {
+                LOG_ERROR(Service_SSL, "SSL_set1_host({}) failed", effective_host);
+                return CheckOpenSSLErrors();
+            }
+            if (!SSL_set_tlsext_host_name(ssl, effective_host.c_str())) {
+                LOG_ERROR(Service_SSL, "SSL_set_tlsext_host_name({}) failed", effective_host);
+                return CheckOpenSSLErrors();
+            }
         }
         return ResultSuccess;
     }
 
     Result SetVerifyOption(u32 verify_option) override {
-        // verify_option is a bitfield:
-        // Bit 0: PeerCa - verify peer certificate
-        // Bit 1: HostName - verify hostname matches certificate
-        // Bit 2: DateCheck - verify certificate date
-        // Bit 3: EvPolicyOid - verify EV policy OID
-        // Bit 4: ChainSignature - verify chain signatures
-        // Bit 5 and above: Reserved
-        // When verify_option is 0, skip all verification
-        skip_cert_verification = (verify_option == 0);
-        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, skip_verification={}", verify_option,
-                  skip_cert_verification);
-
-        if (skip_cert_verification) {
-            // Disable certificate verification
-            SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
-        } else {
-            // Enable certificate verification
-            SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
-        }
+        // [OpenPak] Always bypass certificate verification for self-hosted/redirected servers
+        skip_cert_verification = true;
+        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, bypassing cert verification for OpenPak", verify_option);
+        SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
         return ResultSuccess;
     }
 
     Result DoHandshake() override {
-        SSL_set_verify_result(ssl, X509_V_OK);
-        const int ret = SSL_do_handshake(ssl);
-
-        // Only check verification result if verification is enabled
-        if (!skip_cert_verification) {
-            const long verify_result = SSL_get_verify_result(ssl);
-            if (verify_result != X509_V_OK) {
-                LOG_ERROR(Service_SSL, "SSL cert verification failed because: {}",
-                          X509_verify_cert_error_string(verify_result));
-                return CheckOpenSSLErrors();
+        // If SNI host is not set, try recovering host from peer IP
+        if (socket && !SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)) {
+            auto [peer_addr, err] = socket->GetPeerName();
+            if (err == Network::Errno::SUCCESS) {
+                std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
+                std::string last_host = Service::Sockets::GetLastHostForIp(ip_str);
+                if (!last_host.empty()) {
+                    auto pos = last_host.find('%');
+                    if (pos != std::string::npos) {
+                        last_host.replace(pos, 1, "lp1");
+                    }
+                    LOG_INFO(Service_SSL, "[OpenPak] DoHandshake SNI injection host '{}' for IP {}", last_host, ip_str);
+                    SSL_set1_host(ssl, last_host.c_str());
+                    SSL_set_tlsext_host_name(ssl, last_host.c_str());
+                }
             }
         }
+
+        // Bypassing verification for OpenPak compatibility
+        SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
+        SSL_set_verify_result(ssl, X509_V_OK);
+        const int ret = SSL_do_handshake(ssl);
 
         if (ret <= 0) {
             const int ssl_err = SSL_get_error(ssl, ret);

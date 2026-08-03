@@ -28,11 +28,15 @@ private:
     void GetDnsAddressList(HLERequestContext& ctx);
     void GetHostByAddrRequest(HLERequestContext& ctx);
     void GetHostStringError(HLERequestContext& ctx);
+    void GetCancelHandleRequest(HLERequestContext& ctx);
     void CancelRequest(HLERequestContext& ctx);
     void GetOptions(HLERequestContext& ctx);
     void GetAddrInfoRequestRaw(HLERequestContext& ctx);
     void GetNameInfoRequest(HLERequestContext& ctx);
     void GetNameInfoRequestWithOptions(HLERequestContext& ctx);
 };
+
+void SetLastHostForIp(const std::string& ip, const std::string& host);
+std::string GetLastHostForIp(const std::string& ip);
 
 } // namespace Service::Sockets

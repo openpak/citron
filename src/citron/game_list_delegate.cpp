@@ -36,8 +36,11 @@
 #include "citron/game_list.h"
 #include "citron/game_list_delegate.h"
 #include "citron/game_list_p.h"
+#include "citron/legacy_compatible_titles.h"
+#include "citron/legacy_online_counts.h"
 #include "citron/uisettings.h"
 #include "citron/util/image_cache.h"
+#include "common/legacy_account.h"
 
 namespace {
 void DrawShadowedText(QPainter* painter, const QRect& rect, int flags, const QString& text,
@@ -296,6 +299,9 @@ void GameListDelegate::paint(QPainter* painter, const QStyleOptionViewItem& opti
             break;
         case GameList::COLUMN_PLAY_TIME:
             PaintPlayTime(painter, rect, option, index);
+            break;
+        case GameList::COLUMN_ONLINE:
+            PaintOnline(painter, rect, option, index);
             break;
         default:
             PaintDefault(painter, rect, option, index);
@@ -834,6 +840,78 @@ void GameListDelegate::PaintCompatibility(QPainter* painter, const QRect& rect,
     painter->setFont(f);
 
     DrawShadowedText(painter, badge, Qt::AlignCenter, status_text, color);
+}
+
+void GameListDelegate::PaintOnline(QPainter* painter, const QRect& rect,
+                                   const QStyleOptionViewItem& option,
+                                   const QModelIndex& index) const {
+    if (!Common::OpenPakAccount::IsLinked()) {
+        PaintDefault(painter, rect, option, index);
+        return;
+    }
+
+    const QModelIndex name_index = index.sibling(index.row(), GameList::COLUMN_NAME);
+    const u64 program_id = name_index.data(GameListItemPath::ProgramIdRole).toULongLong();
+    const auto& table = OpenPak::CompatibleTitles::Table();
+    const bool tracked = table.find(program_id) != table.end();
+
+    if (!tracked) {
+        // Not a OpenPak title: nothing to add, keep the plain LDN text exactly as before.
+        PaintDefault(painter, rect, option, index);
+        return;
+    }
+
+    const std::string installed_version =
+        name_index.data(GameListItemPath::VersionRole).toString().toStdString();
+    const int players = OpenPak::OnlineCounts::For(program_id);
+    const bool needs_update =
+        !OpenPak::CompatibleTitles::IsVersionOk(program_id, installed_version);
+
+    const int margin = 10;
+    const int pill_h = 20;
+    const int gap = 4;
+    const int block_h = pill_h * 2 + gap;
+    const int pill_y = rect.top() + std::max(0, (rect.height() - block_h) / 2);
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing);
+
+    auto draw_pill = [&](int x, int y, const QString& text, const QColor& color) -> int {
+        QFont f = option.font;
+        f.setPointSize(std::max(f.pointSize() - 1, 7));
+        f.setBold(true);
+        const QFontMetrics fm(f);
+        const int w = fm.horizontalAdvance(text) + 16;
+        const QRect pill(x, y, w, pill_h);
+
+        QPainterPath path;
+        path.addRoundedRect(pill, pill_h / 2.0, pill_h / 2.0);
+        QColor fill = color;
+        fill.setAlpha(38);
+        painter->fillPath(path, fill);
+        painter->setPen(QPen(color, 1.2));
+        painter->drawPath(path);
+        painter->setFont(f);
+        painter->setPen(color);
+        painter->drawText(pill, Qt::AlignCenter, text);
+        return pill.right() + 6;
+    };
+
+    int x = rect.left() + margin;
+    x = draw_pill(x, pill_y, tr("OpenPak: %1 online").arg(players), QColor(50, 195, 85));
+    if (needs_update) {
+        const QString required_version = QString::fromStdString(table.at(program_id));
+        draw_pill(x, pill_y, tr("Requires %1").arg(required_version), QColor(0, 190, 255));
+    }
+
+    const int ldn_y = pill_y + pill_h + gap;
+    const int ldn_label_right = draw_pill(rect.left() + margin, ldn_y, tr("LDN"), DimColor());
+
+    painter->restore();
+
+    const QRect ldn_rect(ldn_label_right - margin, ldn_y, rect.right() - ldn_label_right + margin,
+                         pill_h);
+    PaintDefault(painter, ldn_rect, option, index);
 }
 
 void GameListDelegate::PaintDefault(QPainter* painter, const QRect& rect,

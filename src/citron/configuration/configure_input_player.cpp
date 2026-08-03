@@ -3,11 +3,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <utility>
 #include <QApplication>
+#include <QComboBox>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QInputDialog>
+#include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -832,6 +836,27 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
     connect(ui->buttonProfilesSave, &QPushButton::clicked, this,
             &ConfigureInputPlayer::SaveProfile);
 
+    // Switch 2 back buttons GL/GR: each additively triggers the chosen Switch button
+    {
+        static const std::array<std::pair<const char*, int>, 13> back_targets = {{
+            {"None", -1}, {"A", 0}, {"B", 1}, {"X", 2}, {"Y", 3}, {"L", 6}, {"R", 7},
+            {"ZL", 8}, {"ZR", 9}, {"L3", 4}, {"R3", 5}, {"Plus", 10}, {"Minus", 11},
+        }};
+        auto* row = new QWidget(this);
+        auto* layout = new QHBoxLayout(row);
+        layout->addWidget(new QLabel(tr("Back Button GL →"), row));
+        back_gl_combo = new QComboBox(row);
+        layout->addWidget(back_gl_combo);
+        layout->addWidget(new QLabel(tr("GR →"), row));
+        back_gr_combo = new QComboBox(row);
+        layout->addWidget(back_gr_combo);
+        for (const auto& [name, idx] : back_targets) {
+            back_gl_combo->addItem(tr(name), idx);
+            back_gr_combo->addItem(tr(name), idx);
+        }
+        ui->main->addWidget(row);
+    }
+
     LoadConfiguration();
 }
 
@@ -849,6 +874,11 @@ ConfigureInputPlayer::~ConfigureInputPlayer() {
 }
 
 void ConfigureInputPlayer::ApplyConfiguration() {
+    if (back_gl_combo && back_gr_combo) {
+        auto& players = Settings::values.players.GetValue();
+        players[player_index].back_button_gl = back_gl_combo->currentData().toInt();
+        players[player_index].back_button_gr = back_gr_combo->currentData().toInt();
+    }
     if (player_index == 0) {
         auto* emulated_controller_p1 =
             hid_core.GetEmulatedController(Core::HID::NpadIdType::Player1);
@@ -893,6 +923,12 @@ void ConfigureInputPlayer::LoadConfiguration() {
 
     UpdateUI();
     UpdateInputDeviceCombobox();
+
+    if (back_gl_combo && back_gr_combo) {
+        const auto& p = Settings::values.players.GetValue()[player_index];
+        back_gl_combo->setCurrentIndex(std::max(0, back_gl_combo->findData(p.back_button_gl)));
+        back_gr_combo->setCurrentIndex(std::max(0, back_gr_combo->findData(p.back_button_gr)));
+    }
 
     if (debug) {
         return;

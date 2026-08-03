@@ -1,257 +1,110 @@
-# Citron Neo
+# Citron Neo — Reference Network / NZ:P Edition
 
-![what](./dist/citron.svg)
+A fork of the [Citron](https://git.citron-emu.org/citron/emu) with two
+purposes:
 
-Feel free to open issues and PRs to the repository.
+1. **Reference Network online play** — connect a Reference Network account and play supported titles
+   online from Citron, without hosts-file edits, external DNS, or manual SSL bypass.
+2. **Nazi Zombies: Portable (Emulator Edition)** — the emulator-side fixes this fork was
+   originally created for, and still carries.
 
-- Development & maintanance: https://discord.gg/7bdSQgQZfu
+> [!WARNING]
+> **This is a work in progress. Expect bugs.**
+>
+> Online support is new, incomplete, and only lightly tested — largely by one person, on one
+> machine, against one game. Things will break. If you hit a problem, please
+> **[open an issue](../../issues)** and include:
+>
+> - your `citron_log.txt` (Linux: `~/.local/share/citron/log/citron_log.txt`)
+> - the exact error code the game showed, if any (e.g. `2306-0802`)
+> - the game, its version, and what you were doing when it failed
+>
+> A log makes the difference between a fixable report and a guess. For network problems, set the
+> log filter to `*:Info Service:Debug Service.SSL:Debug WebService:Debug` before reproducing.
 
-Enjoy!
+---
 
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
-<br>
+## Status
 
-# Abstract
+Verified working: All officially supported titles.
 
-Citron
-is a specialized research software designed to orchestrate high-fidelity virtual environments. Unlike general-purpose tools, it focuses on the intersection of containerization and deep-system virtualization to provide researchers with granular control over network behavior and resource management.
-Core Capabilities
+| | |
+| --- | --- |
+| Account sign-in | Browser-based, OAuth loopback + PKCE — the emulator never sees your password |
+| Hostname redirection | Nintendo online hostnames resolve to the configured Reference servers |
+| TLS | Handshake with recovered SNI, ALPN pinned to HTTP/1.1 |
+| Auth + secure server | Kerberos ticket, matchmaking, session entry |
+| NAT check | Both vantage points, sub-second |
+| Peer-to-peer | Hole-punching, races completed |
+| Play-time sync | Pushed to your Reference profile on game exit |
+| Presence | Published on sign-in and game start/stop |
+| Profile name | Local Switch profile renamed to your account nickname |
 
-    High-Fidelity Networking: Citron creates Docker container environments where network accuracy is the priority. It ensures that latency, throughput, and topology mirror real-world conditions with high precision, making it ideal for testing distributed systems or network protocols.
-    Hybrid Orchestration: Beyond containers, it can spawn and manage multiple Virtual Machines (VMs) simultaneously. This allows for heterogeneous testing environments where containers and VMs interact seamlessly.
-    Kernel Addressing: The software utilizes advanced kernel addressing techniques for resource management. By interacting closely with the host and guest kernels, Citron achieves low-overhead monitoring and advanced control over virtualized assets that standard management layers often miss.
+## Setup
 
-Summary
-Citron is a technical powerhouse for researchers who need more than just "standard" virtualization. It bridges the gap between the lightweight agility of Docker and the robust isolation of VMs, all while maintaining a rigorous, high-fidelity network layer managed through direct kernel-level operations.
-Would you like to draft a README file or a technical abstract for a research paper based on this?
+1. Build as you would upstream Citron (see `docs/`), or use a release build.
+2. Open the **OpenPak** menu and click **Enable Network Redirection**. It's off by default; the
+   server addresses are already filled in, so there's nothing to type.
+3. Still in the **OpenPak** menu, click **Sign In** and complete sign-in in your browser.
+4. Launch a supported game and enter its online mode.
 
-Citron functions as a
-high-fidelity hardware-software co-design platform that bridges the gap between high-level container orchestration and low-level embedded hardware constraints. By integrating specialized architectures like Xtensa cores, Citron allows researchers to simulate and manage complex system-on-chip (SoC) behaviors within a virtualized framework.
-1. Integration with Specialized Hardware (Xtensa Cores)
-Citron addresses the unique constraints of Xtensa processors, which are modular, extensible 32-bit RISC architectures often used in networking and audio processing. 
+`OPENPAK_LEGACY_SERVER_IP`, `OPENPAK_LEGACY_NAT_IP` and `OPENPAK_LEGACY_API` are honoured as environment overrides
+if you need to point at something other than the default servers; the API override only accepts
+loopback or HTTPS on the Reference domain, because those requests carry your account token.
 
-    Custom Instruction Support: Citron can leverage the Tensilica Instruction Extension (TIE) language to simulate custom datapath elements and instructions within the virtualized environment.
-    Protocol-Specific Optimization: Because Xtensa cores excel at processing packet headers and rule-based checks, Citron uses them to maintain network fidelity—ensuring that simulated network stacks perform with the same cycle-accurate behavior as physical networking chips. 
+**Friends, requests, and recently played** live under **OpenPak → Open Account Page** — add by
+friend code, accept or decline requests, see who's online.
 
-2. High-Fidelity Computing Devices
-To achieve "high fidelity," Citron must manage the deterministic performance of computing devices, ensuring that virtualized sensors and actuators respond within real-world timing constraints. 
+> [!CAUTION]
+> Your Network ID (PID) is effectively a credential on this network: the service accepts a bare PID
+> as an identity. This fork deliberately never displays or logs it. Don't paste it anywhere, and
+> don't ship `legacy_account.txt` — it holds your session token — inside a build or archive.
 
-    Cycle-Accurate Modeling: It utilizes an Instruction Set Simulator (ISS) to provide instant feedback on how software interacts with the underlying hardware pipeline, preventing the "timing drift" common in standard VMs.
-    Resource Determinism: Citron mitigates hardware constraints—such as limited memory and power—by tailoring the virtual environment to match the specific cache sizes and memory hierarchies of the target device. 
+## Credits and how this was built
 
-3. Advanced Kernel Addressing and Management
-Citron’s specialization in kernel addressing allows it to bypass traditional virtualization overhead:
+This is [Citron](https://git.citron-emu.org/citron/emu), itself derived from
+[yuzu](https://github.com/yuzu-emu/yuzu). All emulation — CPU, GPU, audio, input, filesystem — is
+theirs. This fork's changes are confined to the networking and account layers plus the surrounding
+UI.
 
-    Direct Register Access: By interacting with the Application Binary Interface (ABI), Citron manages how programs interact with the kernel, allowing for precise debugging and resource allocation across multiple spawned VMs.
-    Kernel-Level Hypervisors: It functions similarly to a KVM (Kernel-based Virtual Machine), turning the host Linux system into a high-performance hypervisor that provides near-native execution of privileged instructions.
-    Memory Lookup Interfaces: Citron can connect directly to arbitrary-width memories or RTL (Register Transfer Level) blocks for low-latency data transfers, effectively treating virtualized memory as if it were a direct point-to-point hardware connection. 
+The Reference Network client behaviour was worked out by **studying the reference implementation**,
+Ryujinx-Reference (archived source record), together with the
+published server sources (archived source record) — which document the protocol, the
+endpoints, and the reasons behind a number of non-obvious decisions far better than black-box
+guessing ever would. Credit where it is due: several fixes here exist because their comments
+explained *why* something was necessary.
 
-4. Technical Constraints & Architecture
-Feature 	Implementation in Citron
-Processor Type	Supports 32-bit configurable RISC/Xtensa architectures.
-Virtualization Method	Hardware-assisted virtualization using extensions like Intel VT-x or AMD-V for direct execution.
-Networking Layer	High-fidelity emulation that avoids standard I/O bottlenecks by using custom processor interfaces.
-Management	Centralized synchronization controller for container scheduling and I/O compensation.
-Would you like to explore how Citron handles specific network protocols like CoAP or MQTT on these virtualized Xtensa cores?
+**No code from that project is copied into this one.** It could not be: it is licensed under
+PolyForm Shield 1.0.0, which is incompatible with Citron's GPL. Everything here is an independent
+C++ implementation written against Citron's own IPC, socket, TLS and configuration layers, which
+differ substantially from Ryujinx's. Where the two diverge, it is deliberate:
+
+Also referenced: [Kinnay's NintendoClients](https://github.com/kinnay/NintendoClients) for NEX and
+error-code documentation, and [switchbrew](https://switchbrew.org) for service definitions.
+
+## Security
+
+- **Sign-in never touches your password.** It's browser-based OAuth loopback + PKCE — the
+  emulator only ever sees a short-lived session token, never your credentials.
+- **Your Network ID (PID) is never displayed or logged.** It functions as a bearer credential on
+  this network, so this fork deliberately keeps it out of the UI and out of `citron_log.txt`.
+- **Peer IP addresses are redacted in logs.** Connection logs (socket bind/connect/send/receive,
+  and room join/leave/kick/ban events) mask the address before it's written, so a log file pasted
+  into a bug report or Discord doesn't hand out another player's IP.
+- **Redirection is off by default.** It only activates once you explicitly enable it from the
+  OpenPak menu — an unconfigured toggle behaves like stock Citron.
+- **The API override is restricted to loopback or HTTPS on the Reference domain**, since that
+  request carries your account token.
+- Your session token lives in `legacy_account.txt` — don't share it or ship it inside a build or
+  archive.
+
+## Legal
+
+Licensed **GPL-3.0-or-later**, as required by Citron. See [LICENSE](LICENSE).
+
+This project ships no Nintendo code, keys, firmware or games, and is not affiliated with, endorsed
+by, or associated with Nintendo. You must supply your own legally dumped games and system files,
+exactly as with upstream Citron. "Nintendo Switch" and all game titles are trademarks of their
+respective owners.
+
+Reference Network is a community-run service, independent of this fork and of Nintendo.

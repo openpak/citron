@@ -629,6 +629,11 @@ private:
     OutputParams output_params;
 
     ButtonDevices button_devices;
+    // Switch 2 back buttons (GL/GR): physical inputs + the NativeButton each additively fires
+    std::unique_ptr<Common::Input::InputDevice> back_gl_device;
+    std::unique_ptr<Common::Input::InputDevice> back_gr_device;
+    int back_gl_target{-1};
+    int back_gr_target{-1};
     StickDevices stick_devices;
     ControllerMotionDevices motion_devices;
     TriggerDevices trigger_devices;

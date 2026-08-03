@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "common/error.h"
 
 #ifdef _WIN32
@@ -588,6 +590,10 @@ std::string IPv4AddressToString(IPv4Address ip_addr) {
     std::array<char, INET_ADDRSTRLEN> buf = {};
     ASSERT(inet_ntop(AF_INET, &ip_addr, buf.data(), sizeof(buf)) == buf.data());
     return std::string(buf.data());
+}
+
+std::string IPv4AddressToRedactedString(IPv4Address ip_addr) {
+    return fmt::format("{}.{}.x.x", ip_addr[0], ip_addr[1]);
 }
 
 u32 IPv4AddressToInteger(IPv4Address ip_addr) {

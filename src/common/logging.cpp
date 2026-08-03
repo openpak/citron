@@ -147,6 +147,18 @@ bool ParseFilterRule(Filter& instance, Iterator begin, Iterator end) noexcept {
         return false;
     }
     instance.SetClassLevel(log_class, level);
+
+    // Subclasses (e.g. Service.NIFM) are distinct Class enum values from their parent
+    // (Service), so a rule naming the parent must also cascade to every child whose name
+    // starts with "<parent>." or it silently only ever affects the bare parent class.
+    const std::string_view parent_name = GetLogClassName(log_class);
+    const std::string prefix = std::string(parent_name) + ".";
+    for (u32 i = 0; i < u32(Class::Count); ++i) {
+        const std::string_view child_name = GetLogClassName(Class(i));
+        if (child_name.size() > prefix.size() && child_name.substr(0, prefix.size()) == prefix) {
+            instance.SetClassLevel(Class(i), level);
+        }
+    }
     return true;
 }
 } // Anonymous namespace

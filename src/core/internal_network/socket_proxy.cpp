@@ -151,7 +151,8 @@ std::pair<s32, Errno> ProxySocket::Recv(int flags, std::span<u8> message) {
 }
 
 std::pair<s32, Errno> ProxySocket::RecvFrom(int flags, std::span<u8> message, SockAddrIn* addr) {
-    ASSERT(flags == 0);
+    // MSG_PEEK is honored by ReceivePacket; any other flag is unsupported here.
+    ASSERT((static_cast<u32>(flags) & ~FLAG_MSG_PEEK) == 0);
     ASSERT(message.size() < static_cast<size_t>(std::numeric_limits<int>::max()));
 
     // TODO (flTobi): Verify the timeout behavior and break when connection is lost

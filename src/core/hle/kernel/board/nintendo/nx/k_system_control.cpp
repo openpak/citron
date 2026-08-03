@@ -241,8 +241,9 @@ size_t KSystemControl::CalculateRequiredSecureMemorySize(size_t size, u32 pool) 
 
 Result KSystemControl::AllocateSecureMemory(KernelCore& kernel, KVirtualAddress* out, size_t size,
                                             u32 pool) {
-    // Applet secure memory is handled separately.
-    UNIMPLEMENTED_IF(pool == static_cast<u32>(KMemoryManager::Pool::Applet));
+    // Applet pool memory isn't tracked against the secure resource limit (see
+    // CalculateRequiredSecureMemorySize returning 0 for it above), but it still needs to be
+    // physically allocated the same way as every other pool.
 
     // Ensure the size is aligned.
     const size_t alignment =
@@ -269,9 +270,6 @@ Result KSystemControl::AllocateSecureMemory(KernelCore& kernel, KVirtualAddress*
 
 void KSystemControl::FreeSecureMemory(KernelCore& kernel, KVirtualAddress address, size_t size,
                                       u32 pool) {
-    // Applet secure memory is handled separately.
-    UNIMPLEMENTED_IF(pool == static_cast<u32>(KMemoryManager::Pool::Applet));
-
     // Ensure the size is aligned.
     const size_t alignment =
         (pool == static_cast<u32>(KMemoryManager::Pool::System) ? PageSize : SecureAlignment);

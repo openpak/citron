@@ -279,9 +279,12 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     code_size += patch_ctx.GetTotalPatchSize();
 
     // Setup the process code layout
+    LOG_INFO(Loader, "Calling process.LoadFromMetadata, code_size={:#x}", code_size);
     if (process.LoadFromMetadata(metadata, code_size, fastmem_base, is_hbl).IsError()) {
+        LOG_ERROR(Loader, "process.LoadFromMetadata failed");
         return {ResultStatus::ErrorUnableToParseKernelMetadata, {}};
     }
+    LOG_INFO(Loader, "process.LoadFromMetadata succeeded");
 
     // Load NSO modules
     modules.clear();
@@ -294,19 +297,23 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
             continue;
         }
 
+        LOG_INFO(Loader, "  (2nd pass) loading module '{}'", module);
         const VAddr load_addr{next_load_addr};
         const bool should_pass_arguments = std::strcmp(module, "rtld") == 0;
         const auto tentative_next_load_addr = AppLoader_NSO::LoadModule(
             process, system, *module_file, load_addr, should_pass_arguments, true, pm,
             patch_ctx.GetPatchers(), patch_ctx.GetIndex(i));
         if (!tentative_next_load_addr) {
+            LOG_ERROR(Loader, "  (2nd pass) failed to load module '{}'", module);
             return {ResultStatus::ErrorLoadingNSO, {}};
         }
 
         next_load_addr = *tentative_next_load_addr;
         modules.insert_or_assign(load_addr, module);
-        LOG_DEBUG(Loader, "loaded module {} @ {:#X}", module, load_addr);
+        LOG_INFO(Loader, "  (2nd pass) loaded module {} @ {:#X}", module, load_addr);
     }
+    LOG_INFO(Loader, "Second pass complete, returning LoadParameters priority={} stack_size={:#x}",
+             metadata.GetMainThreadPriority(), metadata.GetMainThreadStackSize());
 
     is_loaded = true;
     return {ResultStatus::Success,

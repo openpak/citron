@@ -21,6 +21,10 @@ constexpr Common::UUID TAS_UUID =
     Common::UUID{{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x7, 0xA5, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}};
 constexpr Common::UUID VIRTUAL_UUID =
     Common::UUID{{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x7, 0xFF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}};
+constexpr Common::UUID BACK_GL_UUID =
+    Common::UUID{{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x6, 0x10, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}};
+constexpr Common::UUID BACK_GR_UUID =
+    Common::UUID{{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x6, 0x20, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}};
 
 EmulatedController::EmulatedController(NpadIdType npad_id_type_) : npad_id_type(npad_id_type_) {}
 
@@ -363,6 +367,51 @@ void EmulatedController::ReloadInput() {
         button_devices[index]->ForceUpdate();
     }
 
+    // Switch 2 back buttons GL/GR: same physical device as the face buttons, joystick
+    // buttons 14 (GL) / 13 (GR), each additively driving a chosen NativeButton.
+    {
+        const auto player_index = Service::HID::NpadIdTypeToIndex(npad_id_type);
+        const auto& player = Settings::values.players.GetValue()[player_index];
+        back_gl_target = player.back_button_gl;
+        back_gr_target = player.back_button_gr;
+        Common::ParamPackage gl_param = button_params[Settings::NativeButton::A];
+        Common::ParamPackage gr_param = button_params[Settings::NativeButton::A];
+        if (gl_param.Has("engine") && back_gl_target >= 0 &&
+            back_gl_target < static_cast<int>(Settings::NativeButton::NumButtons)) {
+            gl_param.Set("button", 14);
+            back_gl_device = Common::Input::CreateInputDevice(gl_param);
+        } else {
+            back_gl_device.reset();
+        }
+        if (gr_param.Has("engine") && back_gr_target >= 0 &&
+            back_gr_target < static_cast<int>(Settings::NativeButton::NumButtons)) {
+            gr_param.Set("button", 13);
+            back_gr_device = Common::Input::CreateInputDevice(gr_param);
+        } else {
+            back_gr_device.reset();
+        }
+        if (back_gl_device) {
+            const int target = back_gl_target;
+            back_gl_device->SetCallback({
+                .on_change =
+                    [this, target](const Common::Input::CallbackStatus& callback) {
+                        SetButton(callback, static_cast<std::size_t>(target), BACK_GL_UUID);
+                    },
+            });
+            back_gl_device->ForceUpdate();
+        }
+        if (back_gr_device) {
+            const int target = back_gr_target;
+            back_gr_device->SetCallback({
+                .on_change =
+                    [this, target](const Common::Input::CallbackStatus& callback) {
+                        SetButton(callback, static_cast<std::size_t>(target), BACK_GR_UUID);
+                    },
+            });
+            back_gr_device->ForceUpdate();
+        }
+    }
+
     for (std::size_t index = 0; index < stick_devices.size(); ++index) {
         if (!stick_devices[index]) {
             continue;
@@ -544,6 +593,8 @@ void EmulatedController::UnloadInput() {
     for (auto& button : button_devices) {
         button.reset();
     }
+    back_gl_device.reset();
+    back_gr_device.reset();
     for (auto& stick : stick_devices) {
         stick.reset();
     }

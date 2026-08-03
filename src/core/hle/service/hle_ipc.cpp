@@ -397,7 +397,7 @@ std::span<const u8> HLERequestContext::ReadBuffer(std::size_t buffer_index) cons
 std::size_t HLERequestContext::WriteBuffer(const void* buffer, std::size_t size,
                                            std::size_t buffer_index) const {
     if (size == 0) {
-        LOG_WARNING(Core, "skip empty buffer write");
+        LOG_DEBUG(Core, "skip empty buffer write");
         return 0;
     }
 

@@ -9,6 +9,7 @@
 #include "common/hex_util.h"
 #include "common/string_util.h"
 
+#include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
@@ -83,19 +84,32 @@ public:
     }
 
     Result SetHostName(const std::string& hostname_in) override {
-        hostname = hostname_in;
+        std::string effective_host = hostname_in;
+        if (socket) {
+            auto [peer_addr, err] = socket->GetPeerName();
+            if (err == Network::Errno::SUCCESS) {
+                std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
+                // Some titles pass the redirected IP itself instead of leaving this empty.
+                if (effective_host.empty() || effective_host == ip_str) {
+                    std::string last_host = Service::Sockets::GetLastHostForIp(ip_str);
+                    if (!last_host.empty()) {
+                        effective_host = last_host;
+                        LOG_INFO(Service_SSL, "[OpenPak] Recovered host '{}' for IP {}",
+                                 effective_host, ip_str);
+                    }
+                }
+            }
+        }
+        hostname = effective_host;
         return ResultSuccess;
     }
 
     Result SetVerifyOption(u32 verify_option) override {
-        // verify_option is a bitfield:
-        // Bit 0: PeerCa - verify peer certificate
-        // Bit 1: HostName - verify hostname matches certificate
-        // Bit 2: DateCheck - verify certificate date
-        // When verify_option is 0, skip all verification
-        skip_cert_verification = (verify_option == 0);
-        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, skip_verification={}", verify_option,
-                  skip_cert_verification);
+        // [OpenPak] Always bypass, matching the OpenSSL backend; a title requesting real
+        // verification would otherwise fail the self-signed cert against the Windows trust store.
+        skip_cert_verification = true;
+        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, bypassing cert verification for OpenPak",
+                  verify_option);
         return ResultSuccess;
     }
 

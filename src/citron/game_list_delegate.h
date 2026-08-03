@@ -68,6 +68,10 @@ private:
                             const QStyleOptionViewItem& option, const QModelIndex& index) const;
     void PaintDefault(QPainter* painter, const QRect& rect, const QStyleOptionViewItem& option,
                       const QModelIndex& index) const;
+    // OpenPak online-count pill above the existing LDN text; falls through to PaintDefault when
+    // signed out or the title isn't OpenPak-tracked.
+    void PaintOnline(QPainter* painter, const QRect& rect, const QStyleOptionViewItem& option,
+                     const QModelIndex& index) const;
 
     // ---- Color helpers ----
     QColor CardBg() const;

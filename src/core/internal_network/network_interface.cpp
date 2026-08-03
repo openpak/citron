@@ -206,15 +206,14 @@ std::optional<NetworkInterface> GetSelectedNetworkInterface() {
         });
 
     if (res == network_interfaces.end()) {
-        // Only print the error once to avoid log spam
         static bool print_error = true;
         if (print_error) {
-            LOG_ERROR(Network, "Couldn't find selected interface \"{}\"",
-                      selected_network_interface);
+            LOG_INFO(Network, "Selected interface \"{}\" not explicitly set or found; using primary interface \"{}\"",
+                      selected_network_interface, network_interfaces.front().name);
             print_error = false;
         }
 
-        return std::nullopt;
+        return network_interfaces.front();
     }
 
     return *res;

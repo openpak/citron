@@ -126,11 +126,20 @@ NSD::NSD(Core::System& system_, const char* name) : ServiceFramework{system_, na
 }
 
 static std::string ResolveImpl(const std::string& fqdn_in) {
-    // The real implementation makes various substitutions.
-    // For now we just return the string as-is, which is good enough when not
-    // connecting to real Nintendo servers.
-    LOG_WARNING(Service, "(STUBBED) called, fqdn_in={}", fqdn_in);
-    return fqdn_in;
+    std::string fqdn = fqdn_in;
+    if (fqdn == "api.accounts.nintendo.com" || fqdn == "accounts.nintendo.com") {
+        fqdn = "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
+    } else if (fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb-api.accounts.nintendo.com" ||
+               fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb.accounts.nintendo.com") {
+        fqdn = "e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com";
+    } else {
+        auto pos = fqdn.find('%');
+        if (pos != std::string::npos) {
+            fqdn.replace(pos, 1, "lp1");
+        }
+    }
+    LOG_INFO(Service, "[NSD] ResolveImpl: fqdn_in='{}' -> fqdn_out='{}'", fqdn_in, fqdn);
+    return fqdn;
 }
 
 static Result ResolveCommon(const std::string& fqdn_in, std::array<char, 0x100>& fqdn_out) {
@@ -156,7 +165,7 @@ void NSD::Resolve(HLERequestContext& ctx) {
 void NSD::ResolveEx(HLERequestContext& ctx) {
     const std::string fqdn_in = Common::StringFromBuffer(ctx.ReadBuffer(0));
 
-    std::array<char, 0x100> fqdn_out;
+    std::array<char, 0x100> fqdn_out{};
     const Result res = ResolveCommon(fqdn_in, fqdn_out);
 
     if (res.IsError()) {
@@ -278,24 +287,20 @@ void NSD::GetNasServiceSettingEx(HLERequestContext& ctx) {
 }
 
 void NSD::GetNasRequestFqdn(HLERequestContext& ctx) {
-    [[maybe_unused]] const auto service_name_buffer = ctx.ReadBuffer(0); // Type-0x9 input buffer for NasServiceName
-
     LOG_WARNING(Service, "(STUBBED) GetNasRequestFqdn called");
 
-    FqdnStruct fqdn{};                       // Zero-initialize
-    ctx.WriteBuffer(fqdn); // Type-0x16 output buffer
+    FqdnStruct fqdn{};
+    ctx.WriteBuffer(fqdn);
 
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
 }
 
 void NSD::GetNasRequestFqdnEx(HLERequestContext& ctx) {
-    [[maybe_unused]] const auto service_name_buffer = ctx.ReadBuffer(0); // Type-0x9 input buffer for NasServiceName
-
     LOG_WARNING(Service, "(STUBBED) GetNasRequestFqdnEx called");
 
-    FqdnStruct fqdn{};                       // Zero-initialize
-    ctx.WriteBuffer(fqdn); // Type-0x16 output buffer
+    FqdnStruct fqdn{};
+    ctx.WriteBuffer(fqdn);
 
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);         // Outer Result
@@ -305,8 +310,8 @@ void NSD::GetNasRequestFqdnEx(HLERequestContext& ctx) {
 void NSD::GetNasApiFqdn(HLERequestContext& ctx) {
     LOG_WARNING(Service, "(STUBBED) GetNasApiFqdn called");
 
-    FqdnStruct fqdn{};                       // Zero-initialize
-    ctx.WriteBuffer(fqdn); // Type-0x16 output buffer
+    FqdnStruct fqdn{};
+    ctx.WriteBuffer(fqdn);
 
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
@@ -315,8 +320,8 @@ void NSD::GetNasApiFqdn(HLERequestContext& ctx) {
 void NSD::GetNasApiFqdnEx(HLERequestContext& ctx) {
     LOG_WARNING(Service, "(STUBBED) GetNasApiFqdnEx called");
 
-    FqdnStruct fqdn{};                       // Zero-initialize
-    ctx.WriteBuffer(fqdn); // Type-0x16 output buffer
+    FqdnStruct fqdn{};
+    ctx.WriteBuffer(fqdn);
 
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);         // Outer Result

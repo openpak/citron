@@ -152,6 +152,7 @@ private:
     SerialNumber serial_number{};        // Serial number reported by controller
     SerialNumber handle_serial_number{}; // Serial number type reported by hidapi
     SupportedFeatures supported_features{};
+    bool is_usb{};
 
     /// Queue of vibration request to controllers
     Common::Input::DriverResult last_vibration_result{Common::Input::DriverResult::Success};

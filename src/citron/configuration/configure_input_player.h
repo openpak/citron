@@ -19,6 +19,7 @@
 #include "ui_configure_input.h"
 
 class QCheckBox;
+class QComboBox;
 class QKeyEvent;
 class QLabel;
 class QPushButton;
@@ -237,6 +238,10 @@ private:
     /// ConfigureInput widget. On show, add this widget to the main layout. This will change the
     /// parent of the widget to this widget (but that's fine).
     QWidget* bottom_row;
+
+    // Switch 2 back-button (GL/GR) remap dropdowns
+    QComboBox* back_gl_combo{};
+    QComboBox* back_gr_combo{};
 
     Core::HID::HIDCore& hid_core;
 };

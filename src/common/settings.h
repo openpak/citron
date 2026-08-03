@@ -158,7 +158,7 @@ struct Values {
                                          Category::LibraryApplet};
     Setting<AppletMode> photo_viewer_applet_mode{
         linkage, AppletMode::LLE, "photo_viewer_applet_mode", Category::LibraryApplet};
-    Setting<AppletMode> offline_web_applet_mode{linkage, AppletMode::LLE, "offline_web_applet_mode",
+    Setting<AppletMode> offline_web_applet_mode{linkage, AppletMode::HLE, "offline_web_applet_mode",
                                                 Category::LibraryApplet};
     Setting<AppletMode> login_share_applet_mode{linkage, AppletMode::HLE, "login_share_applet_mode",
                                                 Category::LibraryApplet};
@@ -730,6 +730,12 @@ struct Values {
                                            Category::Network};
     Setting<std::string> lobby_api_url{linkage, "api.ynet-fun.xyz", "lobby_api_url",
                                        Category::Network};
+    Setting<bool> enable_legacy{linkage, false, "enable_legacy", Category::Network};
+    Setting<std::string> legacy_server_ip{linkage, "51.178.29.194", "legacy_server_ip",
+                                            Category::Network};
+    Setting<std::string> legacy_nat_ip{linkage, "164.132.111.120", "legacy_nat_ip",
+                                         Category::Network};
+    Setting<std::string> legacy_pid{linkage, "", "legacy_pid", Category::Network};
 
     // WebService
     Setting<bool> enable_telemetry{linkage, false, "enable_telemetry", Category::WebService};

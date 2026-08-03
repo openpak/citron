@@ -173,6 +173,11 @@ void Config::ReadPlayerValues(const std::size_t player_index) {
         player.vibration_strength = static_cast<int>(
             ReadIntegerSetting(std::string(player_prefix).append("vibration_strength"), 100));
 
+        player.back_button_gl = static_cast<int>(
+            ReadIntegerSetting(std::string(player_prefix).append("back_button_gl"), -1));
+        player.back_button_gr = static_cast<int>(
+            ReadIntegerSetting(std::string(player_prefix).append("back_button_gr"), -1));
+
         player.body_color_left = static_cast<u32>(ReadIntegerSetting(
             std::string(player_prefix).append("body_color_left"), Settings::JOYCON_BODY_NEON_BLUE));
         player.body_color_right = static_cast<u32>(ReadIntegerSetting(
@@ -511,6 +516,10 @@ void Config::SavePlayerValues(const std::size_t player_index) {
                             player.vibration_enabled, std::make_optional(true));
         WriteIntegerSetting(std::string(player_prefix).append("vibration_strength"),
                             player.vibration_strength, std::make_optional(100));
+        WriteIntegerSetting(std::string(player_prefix).append("back_button_gl"),
+                            player.back_button_gl, std::make_optional(-1));
+        WriteIntegerSetting(std::string(player_prefix).append("back_button_gr"),
+                            player.back_button_gr, std::make_optional(-1));
         WriteIntegerSetting(std::string(player_prefix).append("body_color_left"),
                             player.body_color_left,
                             std::make_optional(Settings::JOYCON_BODY_NEON_BLUE));

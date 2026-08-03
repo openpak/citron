@@ -805,7 +805,8 @@ void GameList::OnItemExpanded(const QModelIndex& item) {
     const auto type = item.data(GameListItem::TypeRole).value<GameListItemType>();
     const bool is_dir = type == GameListItemType::CustomDir || type == GameListItemType::SdmcDir ||
                         type == GameListItemType::UserNandDir ||
-                        type == GameListItemType::SysNandDir;
+                        type == GameListItemType::SysNandDir ||
+                        type == GameListItemType::HomebrewDir;
     const bool is_fave = type == GameListItemType::Favorites;
     if (!is_dir && !is_fave) {
         return;
@@ -1071,6 +1072,9 @@ void GameList::OnUpdateThemedIcons() {
             break;
         case GameListItemType::SysNandDir:
             set_icon(child, QStringLiteral("chip"), icon_size);
+            break;
+        case GameListItemType::HomebrewDir:
+            set_icon(child, QStringLiteral("applications-games"), icon_size);
             break;
         case GameListItemType::CustomDir: {
             int dir_idx = child->data(GameListDir::GameDirRole).toInt();
@@ -2619,6 +2623,7 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
     m_is_launching = true;
 
     u64 program_id = item.data(GameListItemPath::ProgramIdRole).toULongLong();
+
     QStandardItem* original_item = nullptr;
     for (int folder_idx = 0; folder_idx < item_model->rowCount(); ++folder_idx) {
         QStandardItem* folder = item_model->item(folder_idx, 0);
@@ -2880,7 +2885,7 @@ bool GameList::IsEmpty() const {
 
         if (!child->hasChildren() &&
             (type == GameListItemType::SdmcDir || type == GameListItemType::UserNandDir ||
-             type == GameListItemType::SysNandDir)) {
+             type == GameListItemType::SysNandDir || type == GameListItemType::HomebrewDir)) {
             item_model->invisibleRootItem()->removeRow(child->row());
             i--;
             continue;
@@ -3118,6 +3123,7 @@ void GameList::PopupContextMenu(const QPoint& menu_location) {
     case GameListItemType::SdmcDir:
     case GameListItemType::UserNandDir:
     case GameListItemType::SysNandDir:
+    case GameListItemType::HomebrewDir:
         AddPermDirPopup(context_menu, selected);
         break;
     default:

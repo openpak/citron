@@ -26,6 +26,7 @@
 #include "citron/game_list.h"
 #include "citron/game_list_p.h"
 #include "citron/game_list_worker.h"
+#include "citron/legacy_compatible_titles.h"
 #include "citron/uisettings.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -487,10 +488,26 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
             QStringLiteral("Players: %1 | Servers: %2").arg(stats.first).arg(stats.second);
     }
 
-    QList<QStandardItem*> list{new GameListItemPath(FormatGameName(path), icon,
-                                                    QString::fromStdString(name),
-                                                    QString::fromStdString(original_name),
-                                                    file_type_string, program_id),
+    auto* path_item = new GameListItemPath(FormatGameName(path), icon, QString::fromStdString(name),
+                                           QString::fromStdString(original_name), file_type_string,
+                                           program_id);
+
+    const auto read_installed_version = [&patch] {
+        const auto [nacp, control_icon] = patch.GetControlMetadata();
+        return nacp ? QString::fromStdString(nacp->GetVersionString()) : QString{};
+    };
+    // OpenPak's compatible-version check needs the CURRENT version, not a cached one from
+    // before the user last installed an update -- the on-disk cache below is never invalidated
+    // by an update install, so a OpenPak-tracked title would otherwise show "update required"
+    // forever even after the update lands.
+    const QString installed_version =
+        OpenPak::CompatibleTitles::Table().contains(program_id)
+            ? read_installed_version()
+            : GetGameListCachedObject(fmt::format("{:016X}", program_id), "nx_version.txt",
+                                      read_installed_version);
+    path_item->setData(installed_version, GameListItemPath::VersionRole);
+
+    QList<QStandardItem*> list{path_item,
                                new GameListItemCompat(compatibility),
                                new GameListItem(file_type_string),
                                new GameListItemSize(size),
@@ -603,6 +620,102 @@ void GameListWorker::AddTitlesToGameList(const QString& parent_path,
                                        play_time_manager, patch, online_stats);
         emit EntryReady(entry, parent_path);
     }
+}
+
+void GameListWorker::AddHomebrewToGameList(const QString& parent_path,
+                                           const std::map<u64, std::pair<int, int>>& online_stats) {
+    // Get SDMC path and scan the switch folder for .nro homebrew files
+    const auto sdmc_path = Common::FS::GetCitronPath(Common::FS::CitronPath::SDMCDir);
+    const auto switch_folder = sdmc_path / "switch";
+
+    if (!Common::FS::IsDir(switch_folder)) {
+        LOG_INFO(Frontend, "Homebrew folder does not exist: {}",
+                 Common::FS::PathToUTF8String(switch_folder));
+        return;
+    }
+
+    LOG_INFO(Frontend, "Scanning for homebrew in: {}",
+             Common::FS::PathToUTF8String(switch_folder));
+
+    const auto scan_callback = [this, &parent_path,
+                                &online_stats](const std::filesystem::directory_entry& entry) -> bool {
+        if (stop_requested) {
+            return false;
+        }
+
+        if (entry.is_directory()) {
+            return true;  // Continue scanning subdirectories
+        }
+
+        const auto& path = entry.path();
+        const auto extension = path.extension().string();
+
+        // Only process .nro files
+        if (extension != ".nro" && extension != ".NRO") {
+            return true;
+        }
+
+        const std::string physical_name = Common::FS::PathToUTF8String(path);
+        LOG_DEBUG(Frontend, "Found homebrew: {}", physical_name);
+
+        // Open the file and create a loader
+        const auto file = vfs->OpenFile(physical_name, FileSys::OpenMode::Read);
+        if (!file) {
+            LOG_WARNING(Frontend, "Failed to open homebrew file: {}", physical_name);
+            return true;
+        }
+
+        auto loader = Loader::GetLoader(system, file);
+        if (!loader) {
+            LOG_WARNING(Frontend, "Failed to create loader for: {}", physical_name);
+            return true;
+        }
+
+        // Only process NRO files
+        if (loader->GetFileType() != Loader::FileType::NRO) {
+            return true;
+        }
+
+        // Read metadata from the NRO
+        std::vector<u8> icon;
+        std::string name;
+        u64 program_id = 0;
+
+        loader->ReadIcon(icon);
+        loader->ReadTitle(name);
+        loader->ReadProgramId(program_id);
+
+        // If no title found, use filename
+        if (name.empty()) {
+            name = path.stem().string();
+        }
+
+        // If no program_id, generate a fake one based on path hash
+        // This ensures each homebrew has a unique ID for the game list
+        if (program_id == 0) {
+            // Use a hash of the path as a fake program ID in the homebrew range
+            // Homebrew typically uses 0x05... range
+            std::hash<std::string> hasher;
+            program_id = 0x0500000000000000ULL | (hasher(physical_name) & 0x00FFFFFFFFFFFFFFULL);
+        }
+
+        const std::size_t file_size = Common::FS::GetSize(physical_name);
+
+        // Create a dummy patch manager (homebrew doesn't have patches)
+        const FileSys::PatchManager patch{program_id, system.GetFileSystemController(),
+                                          system.GetContentProvider()};
+
+        auto entry_item = MakeGameListEntry(physical_name, name, name, file_size, icon, *loader,
+                                            program_id, compatibility_list, play_time_manager,
+                                            patch, online_stats);
+        emit EntryReady(entry_item, parent_path);
+
+        return true;
+    };
+
+    // Recursively scan the switch folder
+    Common::FS::IterateDirEntriesRecursively(switch_folder, scan_callback,
+                                             Common::FS::DirEntryFilter::All);
 }
 
 void GameListWorker::ScanFileSystem(ScanTarget target, const std::string& dir_path, bool deep_scan,
@@ -874,6 +987,27 @@ void GameListWorker::run() {
 
         ScanFileSystem(ScanTarget::Both, game_dir.path, game_dir.deep_scan, dir_path_q,
                        online_stats, processed_files, total_files);
+    }
+
+    // NZP: Add Homebrew directory to scan SDMC/switch for .nro files
+    if (!stop_requested) {
+        // Check if SDMC/switch folder exists before creating the Homebrew entry
+        const auto sdmc_path = Common::FS::GetCitronPath(Common::FS::CitronPath::SDMCDir);
+        const auto switch_folder = sdmc_path / "switch";
+
+        if (Common::FS::IsDir(switch_folder)) {
+            // Create a dummy GameDir for the homebrew folder
+            UISettings::GameDir homebrew_dir;
+            homebrew_dir.path = "Homebrew";
+            homebrew_dir.expanded = true;
+
+            auto* const homebrew_list_dir =
+                new GameListDir(homebrew_dir, GameListItemType::HomebrewDir);
+            TriggerDirEntryReady(homebrew_list_dir);
+
+            // Scan and add homebrew entries
+            AddHomebrewToGameList(QObject::tr("Homebrew"), online_stats);
+        }
     }
 
     emit Finished(watch_list);

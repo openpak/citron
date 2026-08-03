@@ -1065,6 +1065,7 @@ build_common_cmake_args() {
         "-DCITRON_USE_FASTER_LD=OFF"
         "-DCITRON_USE_EXTERNAL_Vulkan_HEADERS=ON"
         "-DCITRON_USE_EXTERNAL_VULKAN_UTILITY_LIBRARIES=ON"
+        "-DCITRON_USE_AUTO_UPDATER=ON"
         "-DCITRON_BUILD_TYPE=Release"
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
         "-Wno-dev"

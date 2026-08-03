@@ -731,6 +731,16 @@ void Room::RoomImpl::SendCloseMessage() {
     }
 }
 
+namespace {
+std::string RedactIp(const std::string& ip) {
+    const auto second_dot = ip.find('.', ip.find('.') + 1);
+    if (second_dot == std::string::npos) {
+        return ip;
+    }
+    return ip.substr(0, second_dot) + ".x.x";
+}
+} // namespace
+
 void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::string& nickname,
                                        const std::string& username, const std::string& ip) {
     Packet packet;
@@ -753,16 +763,16 @@ void Room::RoomImpl::SendStatusMessage(StatusMessageTypes type, const std::strin
 
     switch (type) {
     case IdMemberJoin:
-        LOG_INFO(Network, "[{}] {} has joined.", ip, display_name);
+        LOG_INFO(Network, "[{}] {} has joined.", RedactIp(ip), display_name);
         break;
     case IdMemberLeave:
-        LOG_INFO(Network, "[{}] {} has left.", ip, display_name);
+        LOG_INFO(Network, "[{}] {} has left.", RedactIp(ip), display_name);
         break;
     case IdMemberKicked:
-        LOG_INFO(Network, "[{}] {} has been kicked.", ip, display_name);
+        LOG_INFO(Network, "[{}] {} has been kicked.", RedactIp(ip), display_name);
         break;
     case IdMemberBanned:
-        LOG_INFO(Network, "[{}] {} has been banned.", ip, display_name);
+        LOG_INFO(Network, "[{}] {} has been banned.", RedactIp(ip), display_name);
         break;
     case IdAddressUnbanned:
         LOG_INFO(Network, "{} has been unbanned.", display_name);

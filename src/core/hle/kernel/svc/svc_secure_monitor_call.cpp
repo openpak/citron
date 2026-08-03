@@ -8,7 +8,8 @@
 namespace Kernel::Svc {
 
 void CallSecureMonitor(Core::System& system, lp64::SecureMonitorArguments* args) {
-    UNIMPLEMENTED();
+    LOG_WARNING(Kernel_SVC, "(STUBBED) CallSecureMonitor called");
+    args->r[0] = 0;
 }
 
 void CallSecureMonitor64(Core::System& system, lp64::SecureMonitorArguments* args) {

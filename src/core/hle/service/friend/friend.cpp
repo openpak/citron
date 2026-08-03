@@ -2,12 +2,17 @@
 // SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <queue>
+#include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/uuid.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/errors.h"
+#include "common/legacy_account.h"
+#include "common/legacy_friends.h"
+#include "common/legacy_nat.h"
 #include "core/hle/service/friend/friend.h"
 #include "core/hle/service/friend/friend_interface.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -20,6 +25,115 @@
 #undef CreateSemaphore
 
 namespace Service::Friend {
+
+namespace {
+
+#pragma pack(push, 1)
+struct UserPresenceImpl {
+    Common::UUID user_id;                  // 0x00
+    s64 last_time_online_timestamp;        // 0x10
+    u32 status;                            // 0x18
+    u8 same_presence_group_application;    // 0x1C
+    std::array<u8, 3> unknown;             // 0x1D
+    std::array<u8, 0xC0> app_key_value;    // 0x20
+};
+static_assert(sizeof(UserPresenceImpl) == 0xE0, "UserPresenceImpl has the wrong size");
+
+struct FriendImpl {
+    Common::UUID user_id;         // 0x00
+    u64 network_user_id;          // 0x10
+    std::array<char, 0x21> nickname; // 0x18
+    std::array<u8, 7> nickname_pad;  // 0x39, aligns presence to 0x40
+    UserPresenceImpl presence;    // 0x40
+    u8 is_favourite;              // 0x120
+    u8 is_new;                    // 0x121
+    std::array<u8, 6> unknown;    // 0x122
+    u8 is_valid;                  // 0x128
+    std::array<u8, 0xD7> padding; // to 0x200
+};
+static_assert(sizeof(FriendImpl) == 0x200, "FriendImpl has the wrong size");
+static_assert(offsetof(FriendImpl, presence) == 0x40);
+static_assert(offsetof(FriendImpl, is_favourite) == 0x120);
+static_assert(offsetof(FriendImpl, is_valid) == 0x128);
+#pragma pack(pop)
+
+// [OpenPak] InGame never leaves "0" for a hosted private battle even once NAT resolution is
+// confirmed (legacy_nat_rewrite.h fixes the station data itself). Same-length in-place fix.
+bool FixupInGameFlag(std::string& app_field) {
+    if (!Common::OpenPakNat::GetObservedExternalIp()) {
+        return false;
+    }
+
+    struct Token {
+        size_t offset;
+        std::string text;
+    };
+    std::vector<Token> tokens;
+    size_t pos = 0;
+    while (pos < app_field.size()) {
+        const size_t end = app_field.find('\0', pos);
+        const size_t token_end = end == std::string::npos ? app_field.size() : end;
+        if (token_end == pos) {
+            break; // an empty token marks the start of the zero-padded tail
+        }
+        tokens.push_back({pos, app_field.substr(pos, token_end - pos)});
+        pos = token_end + 1;
+    }
+
+    std::optional<std::string> mode;
+    std::optional<size_t> in_game_value_offset;
+    std::optional<std::string> in_game_value;
+    for (size_t i = 0; i + 1 < tokens.size(); i += 2) {
+        if (tokens[i].text == "Mode") {
+            mode = tokens[i + 1].text;
+        } else if (tokens[i].text == "InGame") {
+            in_game_value_offset = tokens[i + 1].offset;
+            in_game_value = tokens[i + 1].text;
+        }
+    }
+
+    if (mode != "cPrivate" || !in_game_value_offset || in_game_value != "0") {
+        return false;
+    }
+
+    app_field[*in_game_value_offset] = '1';
+    return true;
+}
+
+// The account server hands out NEX PIDs; the guest wants a Uid. Derive one deterministically so a
+// friend keeps the same Uid across launches. The high half matches what Ryujinx uses.
+Common::UUID UidForPid(u64 pid) {
+    std::array<u8, 16> raw{};
+    std::memcpy(raw.data(), &pid, sizeof(pid));
+    const u64 high = 0x1100000000000000ULL;
+    std::memcpy(raw.data() + 8, &high, sizeof(high));
+    return Common::UUID{raw};
+}
+
+FriendImpl MakeFriend(const Common::OpenPakFriends::Entry& entry) {
+    FriendImpl out{};
+    out.user_id = UidForPid(entry.pid);
+    out.network_user_id = entry.pid;
+
+    const auto length = std::min(entry.name.size(), out.nickname.size() - 1);
+    std::memcpy(out.nickname.data(), entry.name.data(), length);
+
+    out.presence.user_id = out.user_id;
+    out.presence.status = static_cast<u32>(entry.status);
+    out.presence.last_time_online_timestamp = 0x7FFFFFFFFFFFFFFFLL;
+    // Marks the friend as being in THIS application, without which the game asks for zero friend
+    // PIDs and never queries their session.
+    out.presence.same_presence_group_application = 1;
+
+    const auto blob = std::min(entry.app_field.size(), out.presence.app_key_value.size());
+    std::memcpy(out.presence.app_key_value.data(), entry.app_field.data(), blob);
+
+    out.is_valid = 1;
+    return out;
+}
+
+} // Anonymous namespace
+
 
 class IFriendService final : public ServiceFramework<IFriendService> {
 public:
@@ -152,10 +266,30 @@ public:
     }
 
     void GetFriendListIds(HLERequestContext& ctx) {
-        LOG_WARNING(Service_Friend, "(STUBBED) GetFriendListIds called");
+        IPC::RequestParser rp{ctx};
+        const auto offset = rp.Pop<s32>();
+
+        u32 count = 0;
+        if (offset == 0 && ctx.CanWriteBuffer()) {
+            const auto entries = Common::OpenPakFriends::Get();
+            const auto capacity = ctx.GetWriteBufferNumElements<u64>();
+            std::vector<u64> ids;
+            for (const auto& entry : entries) {
+                if (ids.size() >= capacity) {
+                    break;
+                }
+                ids.push_back(entry.pid);
+            }
+            if (!ids.empty()) {
+                ctx.WriteBuffer(ids);
+            }
+            count = static_cast<u32>(ids.size());
+        }
+
+        LOG_INFO(Service_Friend, "[OpenPak] GetFriendListIds -> {}", count);
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push<u32>(0); // Friend count
+        rb.Push<u32>(count);
     }
 
     void GetReceivedFriendInvitationCountCache(HLERequestContext& ctx) {
@@ -457,11 +591,28 @@ void IFriendService::GetFriendList(HLERequestContext& ctx) {
     const auto uuid = rp.PopRaw<Common::UUID>();
     [[maybe_unused]] const auto filter = rp.PopRaw<IFriendService::SizedFriendFilter>();
     const auto pid = rp.Pop<u64>();
-    LOG_WARNING(Service_Friend, "(STUBBED) GetFriendList called, offset={}, uuid=0x{}, pid={}", friend_offset,
-                uuid.RawString(), pid);
+    u32 count = 0;
+    if (friend_offset == 0 && ctx.CanWriteBuffer()) {
+        const auto entries = Common::OpenPakFriends::Get();
+        const auto capacity = ctx.GetWriteBufferNumElements<FriendImpl>();
+        std::vector<FriendImpl> list;
+        for (const auto& entry : entries) {
+            if (list.size() >= capacity) {
+                break;
+            }
+            list.push_back(MakeFriend(entry));
+        }
+        if (!list.empty()) {
+            ctx.WriteBuffer(list);
+        }
+        count = static_cast<u32>(list.size());
+    }
+
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendList offset={} uuid=0x{} pid={} -> {}",
+             friend_offset, uuid.RawString(), pid, count);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Friend count
+    rb.Push<u32>(count);
 }
 
 void IFriendService::CheckFriendListAvailability(HLERequestContext& ctx) {
@@ -496,7 +647,34 @@ void IFriendService::DeclareCloseOnlinePlaySession(HLERequestContext& ctx) {
 }
 
 void IFriendService::UpdateUserPresence(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) UpdateUserPresence called");
+    if (ctx.CanReadBuffer() && ctx.GetReadBufferSize() >= sizeof(UserPresenceImpl)) {
+        UserPresenceImpl presence{};
+        std::memcpy(&presence, ctx.ReadBuffer().data(), sizeof(presence));
+        // A title can publish Offline while it is still running -- MK8D does, on leaving the
+        // online menu. Relaying that verbatim reports us offline mid-session, so floor it at
+        // Online: this handler only runs while a game is up. The app_field is taken as-is,
+        // since that is the title's own joinable-session data.
+        auto status = std::max<s32>(static_cast<s32>(presence.status),
+                                    Common::OpenPakFriends::PresenceOnline);
+        auto app_field =
+            std::string{reinterpret_cast<const char*>(presence.app_key_value.data()),
+                        presence.app_key_value.size()};
+        if (FixupInGameFlag(app_field)) {
+            status = std::max<s32>(status, Common::OpenPakFriends::PresenceOnlinePlay);
+            LOG_INFO(Service_Friend,
+                     "[OpenPak] Corrected InGame=0->1 in presence blob for a resolved private "
+                     "battle host (natf/natm confirmed via NAT-check)");
+        }
+        Common::OpenPakFriends::SetLocalPresence(status, app_field);
+        LOG_INFO(Service_Friend, "[OpenPak] UpdateUserPresence status={} -> {} app_field={}",
+                 presence.status, status,
+                 Common::HexToString(
+                     std::span{reinterpret_cast<const u8*>(app_field.data()), app_field.size()},
+                     false));
+    } else {
+        LOG_WARNING(Service_Friend, "UpdateUserPresence called with no presence buffer");
+    }
+
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
 }
@@ -512,10 +690,11 @@ void IFriendService::GetPlayHistoryRegistrationKey(HLERequestContext& ctx) {
 }
 
 void IFriendService::GetFriendCount(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_Friend, "(STUBBED) GetFriendCount called");
+    const auto count = static_cast<u32>(Common::OpenPakFriends::Get().size());
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendCount -> {}", count);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push(0);
+    rb.Push(count);
 }
 
 void IFriendService::GetNewlyFriendCount(HLERequestContext& ctx) {
@@ -667,10 +846,12 @@ void IFriendService::RequestSyncFriendList(HLERequestContext& ctx) {
 }
 
 void IFriendService::GetFriendListForViewer(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetFriendListForViewer called");
+    const auto count = static_cast<u32>(Common::OpenPakFriends::Get().size());
+    LOG_WARNING(Service_Friend, "(partially stubbed) GetFriendListForViewer called -> count={}",
+               count);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Friend count
+    rb.Push<u32>(count);
 }
 
 void IFriendService::UpdateFriendInfoForViewer(HLERequestContext& ctx) {

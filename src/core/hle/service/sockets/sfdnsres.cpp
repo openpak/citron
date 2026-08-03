@@ -2,10 +2,13 @@
 // SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "common/settings.h"
 #include "common/string_util.h"
 #include "common/swap.h"
 #include "core/core.h"
@@ -18,6 +21,60 @@
 
 namespace Service::Sockets {
 
+static std::mutex g_last_host_mutex;
+static std::unordered_map<std::string, std::string> g_last_host_for_ip;
+
+void SetLastHostForIp(const std::string& ip, const std::string& host) {
+    std::lock_guard lock(g_last_host_mutex);
+    g_last_host_for_ip[ip] = host;
+}
+
+std::string GetLastHostForIp(const std::string& ip) {
+    std::lock_guard lock(g_last_host_mutex);
+    auto it = g_last_host_for_ip.find(ip);
+    if (it != g_last_host_for_ip.end()) {
+        return it->second;
+    }
+    return "";
+}
+
+// No server address is baked in: unconfigured builds fall back to loopback and redirect nowhere.
+static std::string GetConfiguredIp(const std::string& setting, const char* env_var) {
+    if (!setting.empty()) {
+        return setting;
+    }
+    if (const char* env = std::getenv(env_var); env && *env) {
+        return env;
+    }
+    return "127.0.0.1";
+}
+
+static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) {
+    if (!Settings::values.enable_legacy.GetValue()) {
+        return std::nullopt;
+    }
+
+    const std::string server_ip =
+        GetConfiguredIp(Settings::values.legacy_server_ip.GetValue(), "OPENPAK_LEGACY_SERVER_IP");
+    const std::string nat_ip =
+        GetConfiguredIp(Settings::values.legacy_nat_ip.GetValue(), "OPENPAK_LEGACY_NAT_IP");
+
+    if (host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net")) {
+        LOG_INFO(Service, "[OpenPak] Redirecting NAT check host '{}' -> '{}'", host, nat_ip);
+        return nat_ip;
+    }
+
+    if (host == "nintendo.net" || host.ends_with(".nintendo.net") ||
+        host == "nintendo.com" || host.ends_with(".nintendo.com") ||
+        host == "nintendowifi.net" || host.ends_with(".nintendowifi.net") ||
+        host == "nintendo.co.jp" || host.ends_with(".nintendo.co.jp")) {
+        LOG_INFO(Service, "[OpenPak] Redirecting Nintendo host '{}' -> '{}'", host, server_ip);
+        return server_ip;
+    }
+
+    return std::nullopt;
+}
+
 enum class NetDbError : s32 {
     Internal = -1,
     Success = 0,
@@ -29,23 +86,22 @@ enum class NetDbError : s32 {
 
 SFDNSRES::SFDNSRES(Core::System& system_) : ServiceFramework{system_, "sfdnsres"} {
     static const FunctionInfo functions[] = {
-        // Switchbrew Cmd ID order
-        {0, &SFDNSRES::SetDnsAddresses, "SetDnsAddresses"},                          // Was SetDnsAddressesPrivateRequest (nullptr)
-        {1, &SFDNSRES::GetDnsAddressList, "GetDnsAddressList"},                      // Was GetDnsAddressPrivateRequest (nullptr)
-        {2, &SFDNSRES::GetAddrInfoRequest, "GetAddrInfoRequest"},                   // Existing, was Cmd 6 in code
-        {3, &SFDNSRES::GetHostByNameRequest, "GetHostByNameRequest"},               // Existing, was Cmd 2 in code
-        {4, &SFDNSRES::GetHostByAddrRequest, "GetHostByAddrRequest"},               // Was GetHostByAddrRequest (nullptr)
-        {5, &SFDNSRES::GetHostStringError, "GetHostStringError"},                   // Was GetHostStringErrorRequest (nullptr)
-        {6, &SFDNSRES::GetGaiStringErrorRequest, "GetGaiStringErrorRequest"},       // Existing (GetGaiStringError), was Cmd 5 in code
-        {7, &SFDNSRES::CancelRequest, "CancelRequest"},                             // Was CancelRequest (Cmd 9, nullptr)
-        {8, &SFDNSRES::ResolverSetOptionRequest, "SetOptions"},                     // Existing (ResolverSetOptionRequest for SetOptions), was Cmd 14
-        {9, &SFDNSRES::GetOptions, "GetOptions"},                                   // Was ResolverGetOptionRequest (Cmd 15, nullptr)
-        {10, &SFDNSRES::GetHostByNameRequestWithOptions, "RequestAddrInfo"},         // Existing (GetHostByNameRequestWithOptions for RequestAddrInfo), was Cmd 10
-        {11, &SFDNSRES::GetAddrInfoRequestRaw, "GetAddrInfoRequestRaw"},            // New
-        {12, &SFDNSRES::GetAddrInfoRequestWithOptions, "GetAddrInfo"},             // Existing (GetAddrInfoRequestWithOptions for GetAddrInfo), was Cmd 12
-        {100, &SFDNSRES::GetNameInfoRequest, "GetNameInfoRequest_DEPRECATED_ID"}, // Placeholder ID
-        {101, &SFDNSRES::GetNameInfoRequestWithOptions, "GetNameInfoRequestWithOptions_DEPRECATED_ID"} // Placeholder ID
-
+        {0, &SFDNSRES::SetDnsAddresses, "SetDnsAddressesPrivateRequest"},
+        {1, &SFDNSRES::GetDnsAddressList, "GetDnsAddressPrivateRequest"},
+        {2, &SFDNSRES::GetHostByNameRequest, "GetHostByNameRequest"},
+        {3, &SFDNSRES::GetHostByAddrRequest, "GetHostByAddrRequest"},
+        {4, &SFDNSRES::GetHostStringError, "GetHostStringErrorRequest"},
+        {5, &SFDNSRES::GetGaiStringErrorRequest, "GetGaiStringErrorRequest"},
+        {6, &SFDNSRES::GetAddrInfoRequest, "GetAddrInfoRequest"},
+        {7, &SFDNSRES::GetNameInfoRequest, "GetNameInfoRequest"},
+        {8, &SFDNSRES::GetCancelHandleRequest, "GetCancelHandleRequest"},
+        {9, &SFDNSRES::CancelRequest, "CancelRequest"},
+        {10, &SFDNSRES::GetHostByNameRequestWithOptions, "GetHostByNameRequestWithOptions"},
+        {11, &SFDNSRES::GetHostByAddrRequest, "GetHostByAddrRequestWithOptions"},
+        {12, &SFDNSRES::GetAddrInfoRequestWithOptions, "GetAddrInfoRequestWithOptions"},
+        {13, &SFDNSRES::GetNameInfoRequestWithOptions, "GetNameInfoRequestWithOptions"},
+        {14, &SFDNSRES::ResolverSetOptionRequest, "ResolverSetOptionRequest"},
+        {15, &SFDNSRES::GetOptions, "ResolverGetOptionRequest"},
     };
     RegisterHandlers(functions);
 }
@@ -131,7 +187,6 @@ static std::vector<u8> SerializeAddrInfoAsHostEnt(const std::vector<Network::Add
 }
 
 std::set<std::string> blocked_domains{
-    "srv.nintendo.net",
     // stupid hogwarts
     "phoenix-api.wbagora.com",
     // prevents various battle net games from crashing
@@ -160,18 +215,37 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
         parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
 
     const auto host_buffer = ctx.ReadBuffer(0);
-    const std::string host = Common::StringFromBuffer(host_buffer);
-    // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
+    std::string host = Common::StringFromBuffer(host_buffer);
 
-    // Prevent resolution of Nintendo servers
-    if (blocked_domains.find(host) != blocked_domains.end()) {
+    if (parameters.use_nsd_resolve || host.find('%') != std::string::npos) {
+        auto pos = host.find('%');
+        if (pos != std::string::npos) {
+            host.replace(pos, 1, "lp1");
+        }
+        if (host == "api.accounts.nintendo.com" || host == "accounts.nintendo.com") {
+            host = "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
+        }
+        LOG_INFO(Service, "[sfdnsres] NSD resolved host to '{}'", host);
+    }
+
+    std::string query_host = host;
+    auto redirect = GetOpenPakRedirectIp(host);
+    if (redirect.has_value()) {
+        query_host = *redirect;
+    } else if (blocked_domains.find(host) != blocked_domains.end()) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
     }
 
-    auto res = Network::GetAddressInfo(host, /*service*/ std::nullopt);
+    auto res = Network::GetAddressInfo(query_host, /*service*/ std::nullopt);
     if (!res.has_value()) {
         return {0, Translate(res.error())};
+    }
+
+    if (redirect.has_value()) {
+        for (const auto& addrinfo : res.value()) {
+            SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
+        }
     }
 
     const std::vector<u8> data = SerializeAddrInfoAsHostEnt(res.value(), host);
@@ -274,14 +348,25 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         "called with ignored parameters: use_nsd_resolve={}, cancel_handle={}, process_id={}",
         parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
 
-    // TODO: If use_nsd_resolve is true, pass the name through NSD::Resolve
-    // before looking up.
-
     const auto host_buffer = ctx.ReadBuffer(0);
-    const std::string host = Common::StringFromBuffer(host_buffer);
+    std::string host = Common::StringFromBuffer(host_buffer);
 
-    // Prevent resolution of Nintendo servers
-    if (blocked_domains.find(host) != blocked_domains.end()) {
+    if (parameters.use_nsd_resolve || host.find('%') != std::string::npos) {
+        auto pos = host.find('%');
+        if (pos != std::string::npos) {
+            host.replace(pos, 1, "lp1");
+        }
+        if (host == "api.accounts.nintendo.com" || host == "accounts.nintendo.com") {
+            host = "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
+        }
+        LOG_INFO(Service, "[sfdnsres] NSD resolved host to '{}'", host);
+    }
+
+    std::string query_host = host;
+    auto redirect = GetOpenPakRedirectIp(host);
+    if (redirect.has_value()) {
+        query_host = *redirect;
+    } else if (blocked_domains.find(host) != blocked_domains.end()) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
     }
@@ -292,11 +377,15 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         service = Common::StringFromBuffer(service_buffer);
     }
 
-    // Serialized hints are also passed in a buffer, but are ignored for now.
-
-    auto res = Network::GetAddressInfo(host, service);
+    auto res = Network::GetAddressInfo(query_host, service);
     if (!res.has_value()) {
         return {0, Translate(res.error())};
+    }
+
+    if (redirect.has_value()) {
+        for (const auto& addrinfo : res.value()) {
+            SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
+        }
     }
 
     const std::vector<u8> data = SerializeAddrInfo(res.value(), host);
@@ -409,6 +498,14 @@ void SFDNSRES::GetHostStringError(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push<u32>(0); // data_size
+}
+
+void SFDNSRES::GetCancelHandleRequest(HLERequestContext& ctx) {
+    LOG_WARNING(Service, "(STUBBED) sfdnsres::GetCancelHandleRequest called");
+    // GetCancelHandleRequest(u64 pid_placeholder, pid) -> u32 handle
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0);
 }
 
 void SFDNSRES::CancelRequest(HLERequestContext& ctx) {

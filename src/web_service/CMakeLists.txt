@@ -4,6 +4,8 @@
 add_library(web_service STATIC
     announce_room_json.cpp
     announce_room_json.h
+    legacy_api.cpp
+    legacy_api.h
     precompiled_headers.h
     verify_login.cpp
     verify_login.h

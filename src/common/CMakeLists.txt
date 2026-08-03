@@ -101,6 +101,12 @@ add_library(common STATIC
     scm_rev.h
     scope_exit.h
     scratch_buffer.h
+    legacy_account.cpp
+    legacy_account.h
+    legacy_friends.cpp
+    legacy_friends.h
+    legacy_nat.cpp
+    legacy_nat.h
     settings.cpp
     settings.h
     settings_common.cpp

@@ -4,6 +4,7 @@
 
 #include <cstring>
 
+#include "common/hex_util.h"
 #include "common/string_util.h"
 
 #include "core/core.h"
@@ -15,6 +16,7 @@
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/ssl/cert_store.h"
+#include "core/hle/service/ssl/legacy_nat_rewrite.h"
 #include "core/hle/service/ssl/ssl.h"
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/hle/service/ssl/ssl_types.h"
@@ -45,6 +47,8 @@ enum class IoMode : u32 {
 enum class OptionType : u32 {
     DoNotCloseSocket = 0,
     GetServerCertChain = 1,
+    SkipDefaultVerify = 2,
+    EnableAlpn = 3,
 };
 
 // This is nn::ssl::sf::SslVersion
@@ -253,15 +257,29 @@ private:
         size_t actual_size{};
         Result res = backend->Read(&actual_size, *out_data);
         if (res != ResultSuccess) {
+            LOG_DEBUG(Service_SSL, "Read failed, res={}", res.raw);
             return res;
         }
         out_data->resize(actual_size);
+        LOG_DEBUG(Service_SSL, "Read {} bytes: {}", actual_size,
+                  Common::HexToString(*out_data, false));
         return res;
     }
 
     Result WriteImpl(size_t* out_size, std::span<const u8> data) {
         ASSERT_OR_EXECUTE(did_handshake, { return ResultInternalError; });
-        return backend->Write(out_size, data);
+
+        std::vector<u8> rewritten;
+        const bool did_rewrite = Service::SSL::TryFixupStationAddress(data, rewritten);
+        const std::span<const u8> send_data = did_rewrite ? std::span<const u8>(rewritten) : data;
+
+        const Result res = backend->Write(out_size, send_data);
+        if (did_rewrite && res.IsSuccess()) {
+            *out_size = data.size();
+        }
+        LOG_DEBUG(Service_SSL, "Write {} bytes, res={}: {}", *out_size, res.raw,
+                  Common::HexToString(send_data.subspan(0, send_data.size()), false));
+        return res;
     }
 
     Result PendingImpl(s32* out_pending) {
@@ -421,8 +439,12 @@ private:
         case OptionType::GetServerCertChain:
             get_server_cert_chain = static_cast<bool>(parameters.value);
             break;
+        case OptionType::SkipDefaultVerify:
+        case OptionType::EnableAlpn:
+            LOG_DEBUG(Service_SSL, "OptionType option={} set to {}", static_cast<u32>(parameters.option), parameters.value);
+            break;
         default:
-            LOG_WARNING(Service_SSL, "Unknown option={}, value={}", parameters.option,
+            LOG_WARNING(Service_SSL, "Unknown option={}, value={}", static_cast<u32>(parameters.option),
                         parameters.value);
         }
 
@@ -431,11 +453,10 @@ private:
     }
 
     void Peek(HLERequestContext& ctx) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called");
-
-        IPC::ResponseBuilder rb{ctx, 3};
-        rb.Push(ResultSuccess);
-        rb.Push<s32>(0); // Stub: no data available to peek
+        // [OpenPak] Nintendo's libcurl checks connection liveness via Peek.
+        // Returning ResultWouldBlock tells libcurl the connection is open and active.
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultWouldBlock);
     }
 
     void Poll(HLERequestContext& ctx) {

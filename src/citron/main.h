@@ -45,6 +45,9 @@ class ProfilerWidget;
 class ControllerDialog;
 class QLabel;
 class MultiplayerState;
+class OpenPakAccountDialog;
+class OpenPakController;
+class OpenPakToast;
 class QPushButton;
 class QProgressDialog;
 class QSlider;
@@ -62,6 +65,9 @@ class QtControllerSelectorDialog;
 class QtProfileSelectionDialog;
 class QtSoftwareKeyboardDialog;
 class QtNXWebEngineView;
+namespace Updater {
+class UpdaterDialog;
+}
 
 enum class StartGameType { Normal, Global };
 
@@ -330,6 +336,7 @@ private slots:
                                const std::filesystem::path& extract_path);
     void OnInstallDecryptionKeys();
     void OnAbout();
+    void OnCheckForUpdates();
     void OnToggleFilterBar();
     void OnToggleGridView();
     void OnToggleStatusBar();
@@ -433,6 +440,10 @@ private:
     QHBoxLayout* unified_top_bar_layout = nullptr;
     LoadingScreen* loading_screen;
     QTimer shutdown_timer;
+    QTimer legacy_presence_timer;
+    std::string legacy_last_pushed_app_id;
+    OpenPakController* legacy_controller = nullptr;
+    OpenPakToast* legacy_toast = nullptr;
     OverlayDialog* shutdown_dialog{};
     PerformanceOverlay* performance_overlay{};
     MultiplayerRoomOverlay* multiplayer_room_overlay{};
@@ -463,6 +474,10 @@ private:
     bool main_window_is_closing = false;
     std::unique_ptr<EmuThread> emu_thread;
     QString current_game_path;
+    std::string current_game_name;
+
+    void SyncOpenPakHistory();
+
     bool user_flag_cmd_line = false;
     bool auto_paused = false;
     bool auto_muted = false;

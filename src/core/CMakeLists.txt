@@ -1133,6 +1133,8 @@ add_library(core STATIC
     hle/service/spl/spl_types.h
     hle/service/ssl/cert_store.cpp
     hle/service/ssl/cert_store.h
+    hle/service/ssl/legacy_nat_rewrite.cpp
+    hle/service/ssl/legacy_nat_rewrite.h
     hle/service/ssl/ssl.cpp
     hle/service/ssl/ssl.h
     hle/service/ssl/ssl_backend.h

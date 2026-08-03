@@ -79,6 +79,8 @@ option(CITRON_USE_QT_MULTIMEDIA "Use QtMultimedia for Camera" OFF)
 
 option(CITRON_USE_QT_WEB_ENGINE "Use QtWebEngine for web applet implementation" OFF)
 
+option(CITRON_USE_AUTO_UPDATER "Enable automatic updater functionality" OFF)
+
 option(ENABLE_UNITY_BUILD "Enables the unity build" OFF)
 
 option(ENABLE_CUBEB "Enables the cubeb audio backend" ON)
@@ -434,6 +436,9 @@ endif()
 if (NOT TARGET zstd::zstd)
     find_package(zstd 1.5 REQUIRED)
 endif()
+if (NOT TARGET LibArchive::LibArchive)
+    find_package(LibArchive)
+endif()
 
 if (NOT CITRON_USE_EXTERNAL_VULKAN_HEADERS)
     find_package(VulkanHeaders 1.3.274 REQUIRED)
@@ -670,10 +675,15 @@ list(APPEND CITRON_QT_COMPONENTS2 Multimedia)
     set(CITRON_QT_COMPONENTS ${CITRON_QT_COMPONENTS2} PARENT_SCOPE)
     endfunction(set_citron_qt_components)
 
-# find SDL2 exports a bunch of variables that are needed, so its easier to do this outside of the citron_find_package
+# SDL3 — using externals/SDL (SDL3 submodule) or system SDL3.
+# CITRON_USE_EXTERNAL_SDL2=ON  → SDL3 submodule in externals/SDL (preferred)
+# CITRON_USE_EXTERNAL_SDL2=OFF → find system SDL3
 if (ENABLE_SDL2)
     if (CITRON_USE_BUNDLED_SDL2)
-        # Detect toolchain and platform
+        # Legacy MSVC path: SDL2 pre-built binaries. Kept for compatibility but
+        # using CITRON_USE_EXTERNAL_SDL2=ON with the SDL3 submodule is preferred.
+        message(WARNING "CITRON_USE_BUNDLED_SDL2 downloads SDL2 2.28.2 (legacy). "
+                        "Set CITRON_USE_EXTERNAL_SDL2=ON to use the SDL3 submodule instead.")
         if (MSVC_VERSION GREATER_EQUAL 1920 AND ARCHITECTURE_x86_64)
             set(SDL2_VER "SDL2-2.28.2")
             set(SDL2_ARCH_DIR "x64")
@@ -681,7 +691,7 @@ if (ENABLE_SDL2)
             set(SDL2_VER "SDL2-2.28.2")
             set(SDL2_ARCH_DIR "arm64")
         else()
-            message(FATAL_ERROR "No bundled SDL2 binaries for your toolchain. Disable CITRON_USE_BUNDLED_SDL2 and provide your own.")
+            message(FATAL_ERROR "No bundled SDL2 binaries for your toolchain. Use CITRON_USE_EXTERNAL_SDL2=ON instead.")
         endif()
 
         if (DEFINED SDL2_VER)
@@ -698,11 +708,24 @@ if (ENABLE_SDL2)
         target_link_libraries(SDL2::SDL2 INTERFACE "${SDL2_LIBRARY}" "${SDL2MAIN_LIBRARY}")
         target_include_directories(SDL2::SDL2 INTERFACE "${SDL2_INCLUDE_DIR}")
     elseif (CITRON_USE_EXTERNAL_SDL2)
-        message(STATUS "Using SDL2 from externals.")
+        # SDL3 submodule — configured in externals/CMakeLists.txt.
+        # The SDL2::SDL2 alias is created there after add_subdirectory(SDL).
+        message(STATUS "Using SDL3 from externals submodule.")
     else()
-        find_package(SDL2 2.26.4 REQUIRED)
+        # System SDL3 fallback (non-MSVC non-submodule builds).
+        find_package(SDL3 QUIET)
+        if (SDL3_FOUND)
+            message(STATUS "Using system SDL3.")
+            if (NOT TARGET SDL2::SDL2)
+                add_library(SDL2::SDL2 ALIAS SDL3::SDL3)
+            endif()
+        else()
+            # Last resort: try legacy system SDL2.
+            find_package(SDL2 2.26.4 REQUIRED)
+        endif()
     endif()
 endif()
+
 
 # List of all FFmpeg components required
 set(FFmpeg_COMPONENTS

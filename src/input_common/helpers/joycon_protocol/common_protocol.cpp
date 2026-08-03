@@ -44,8 +44,7 @@ Common::Input::DriverResult JoyconCommonProtocol::CheckDeviceAccess(
         return Common::Input::DriverResult::UnsupportedControllerType;
     }
 
-    hidapi_handle->handle =
-        SDL_hid_open(device_info->vendor_id, device_info->product_id, device_info->serial_number);
+    hidapi_handle->handle = SDL_hid_open_path(device_info->path);
 
     if (!hidapi_handle->handle) {
         LOG_ERROR(Input, "Citron can't gain access to this device: ID {:04X}:{:04X}.",

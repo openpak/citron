@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/logging.h"
 #include "common/scope_exit.h"
 
 #include "core/hle/kernel/k_process.h"
@@ -85,7 +86,12 @@ bool Process::Run() {
 
     // Start.
     if (m_process) {
+        LOG_INFO(Service, "Calling KProcess::Run, priority={} stack_size={:#x}",
+                 m_main_thread_priority, m_main_thread_stack_size);
         m_process->Run(m_main_thread_priority, m_main_thread_stack_size);
+        LOG_INFO(Service, "KProcess::Run returned");
+    } else {
+        LOG_WARNING(Service, "Process::Run called with no underlying KProcess");
     }
 
     // Mark as started.

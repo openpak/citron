@@ -260,6 +260,24 @@ add_executable(citron
     multiplayer/validation.h
     play_time_manager.cpp
     play_time_manager.h
+    legacy_account_dialog.cpp
+    legacy_account_dialog.h
+    legacy_account_page_p.h
+    legacy_avatar_cache.cpp
+    legacy_avatar_cache.h
+    legacy_controller.cpp
+    legacy_controller.h
+    legacy_friend_delegate.cpp
+    legacy_friend_delegate.h
+    legacy_compatible_titles.h
+    legacy_history_delegate.cpp
+    legacy_history_delegate.h
+    legacy_network_probe.cpp
+    legacy_network_probe.h
+    legacy_online_counts.cpp
+    legacy_online_counts.h
+    legacy_toast.cpp
+    legacy_toast.h
     precompiled_headers.h
     qt_common.cpp
     qt_common.h
@@ -328,6 +346,24 @@ if (CITRON_CRASH_DUMPS)
         unordered_dense::unordered_dense
     )
     target_compile_definitions(citron PRIVATE CITRON_CRASH_DUMPS)
+endif()
+
+if (CITRON_USE_AUTO_UPDATER)
+    target_sources(citron PRIVATE
+        updater/updater_service.cpp
+        updater/updater_service.h
+        updater/updater_dialog.cpp
+        updater/updater_dialog.h
+        updater/updater_dialog.ui
+    )
+
+    target_compile_definitions(citron PRIVATE
+        # Ensure _WIN32 is defined for moc processing on Windows
+        $<$<BOOL:${WIN32}>:_WIN32>
+        CITRON_USE_AUTO_UPDATER
+    )
+
+    target_link_libraries(citron PRIVATE Qt6::Network)
 endif()
 
 # Mod Manager functionality for downloading patches

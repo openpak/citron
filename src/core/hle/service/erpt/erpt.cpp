@@ -19,25 +19,31 @@ public:
         static const FunctionInfo functions[] = {
             {0, C<&ErrorReportContext::SubmitContext>, "SubmitContext"},
             {1, C<&ErrorReportContext::CreateReportV0>, "CreateReportV0"},
-            {2, nullptr, "SetInitialLaunchSettingsCompletionTime"},
-            {3, nullptr, "ClearInitialLaunchSettingsCompletionTime"},
-            {4, nullptr, "UpdatePowerOnTime"},
-            {5, nullptr, "UpdateAwakeTime"},
-            {6, nullptr, "SubmitMultipleCategoryContext"},
-            {7, nullptr, "UpdateApplicationLaunchTime"},
-            {8, nullptr, "ClearApplicationLaunchTime"},
-            {9, nullptr, "SubmitAttachment"},
-            {10, nullptr, "CreateReportWithAttachments"},
+            {2, C<&ErrorReportContext::GenericStub>, "SetInitialLaunchSettingsCompletionTime"},
+            {3, C<&ErrorReportContext::GenericStub>, "ClearInitialLaunchSettingsCompletionTime"},
+            {4, C<&ErrorReportContext::GenericStub>, "UpdatePowerOnTime"},
+            {5, C<&ErrorReportContext::GenericStub>, "UpdateAwakeTime"},
+            {6, C<&ErrorReportContext::GenericStub>, "SubmitMultipleCategoryContext"},
+            {7, C<&ErrorReportContext::GenericStub>, "UpdateApplicationLaunchTime"},
+            {8, C<&ErrorReportContext::GenericStub>, "ClearApplicationLaunchTime"},
+            {9, C<&ErrorReportContext::GenericStub>, "SubmitAttachment"},
+            {10, C<&ErrorReportContext::GenericStub>, "CreateReportWithAttachments"},
             {11, C<&ErrorReportContext::CreateReportV1>, "CreateReportV1"},
             {12, C<&ErrorReportContext::CreateReport>, "CreateReport"},
-            {20, nullptr, "RegisterRunningApplet"},
-            {21, nullptr, "UnregisterRunningApplet"},
-            {22, nullptr, "UpdateAppletSuspendedDuration"},
-            {30, nullptr, "InvalidateForcedShutdownDetection"},
+            {20, C<&ErrorReportContext::GenericStub>, "RegisterRunningApplet"},
+            {21, C<&ErrorReportContext::GenericStub>, "UnregisterRunningApplet"},
+            {22, C<&ErrorReportContext::GenericStub>, "UpdateAppletSuspendedDuration"},
+            {30, C<&ErrorReportContext::GenericStub>, "InvalidateForcedShutdownDetection"},
         };
         // clang-format on
 
         RegisterHandlers(functions);
+    }
+
+private:
+    Result GenericStub() {
+        LOG_WARNING(Service_SET, "(STUBBED) erpt called");
+        R_SUCCEED();
     }
 
 private:

@@ -33,7 +33,7 @@ IAppletCommonFunctions::IAppletCommonFunctions(Core::System& system_,
         {82, nullptr, "SetBlockingCaptureButtonInEntireSystem"},
         {90, nullptr, "OpenNamedChannelAsParent"},
         {91, nullptr, "OpenNamedChannelAsChild"},
-        {100, nullptr, "SetApplicationCoreUsageMode"},
+        {100, D<&IAppletCommonFunctions::SetApplicationCoreUsageMode>, "SetApplicationCoreUsageMode"},
         {160, nullptr, "GetNotificationReceiverService"},
         {161, nullptr, "GetNotificationSenderService"},
         {300, D<&IAppletCommonFunctions::GetCurrentApplicationId>, "GetCurrentApplicationId"},
@@ -81,6 +81,13 @@ Result IAppletCommonFunctions::SetCpuBoostRequestPriority(s32 priority) {
     LOG_WARNING(Service_AM, "(STUBBED) called");
     std::scoped_lock lk{applet->lock};
     applet->cpu_boost_request_priority = priority;
+    R_SUCCEED();
+}
+
+Result IAppletCommonFunctions::SetApplicationCoreUsageMode(u32 core_usage_mode) {
+    LOG_WARNING(Service_AM, "(STUBBED) called, core_usage_mode={}", core_usage_mode);
+    std::scoped_lock lk{applet->lock};
+    applet->application_core_usage_mode = core_usage_mode;
     R_SUCCEED();
 }
 

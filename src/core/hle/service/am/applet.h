@@ -5,6 +5,7 @@
 
 #include <deque>
 #include <mutex>
+#include <optional>
 
 #include "common/math_util.h"
 #include "core/hle/service/apm/apm_controller.h"
@@ -92,6 +93,9 @@ struct Applet {
     // Channels
     std::deque<std::vector<u8>> user_channel_launch_parameter{};
     std::deque<std::vector<u8>> preselected_user_launch_parameter{};
+
+    // Process winding context (IProcessWindingController::PushContext/PopContext)
+    std::optional<std::vector<u8>> wound_context{};
 
     // Caller applet
     std::weak_ptr<Applet> caller_applet{};

@@ -38,9 +38,10 @@ Common::Input::DriverResult JoyconDriver::RequestDeviceAccess(SDL_hid_device_inf
         return Common::Input::DriverResult::UnsupportedControllerType;
     }
 
-    hidapi_handle->handle =
-        SDL_hid_open(device_info->vendor_id, device_info->product_id, device_info->serial_number);
-    std::memcpy(&handle_serial_number, device_info->serial_number, 15);
+    hidapi_handle->handle = SDL_hid_open_path(device_info->path);
+    GetSerialNumber(device_info, handle_serial_number);
+    is_usb = (device_info->bus_type == SDL_HID_API_BUS_USB) ||
+             (device_info->product_id == 0x200e || device_info->product_id == 0x206e);
     if (!hidapi_handle->handle) {
         LOG_ERROR(Input, "Citron can't gain access to this device: ID {:04X}:{:04X}.",
                   device_info->vendor_id, device_info->product_id);
@@ -56,6 +57,41 @@ Common::Input::DriverResult JoyconDriver::InitializeDevice() {
     }
     std::scoped_lock lock{mutex};
     disable_input_thread = true;
+
+    if (is_usb) {
+        auto send_usb_cmd = [this](u8 cmd, bool wait_reply) -> bool {
+            std::array<u8, 64> buffer{};
+            buffer[0] = 0x80; // USB_CMD
+            buffer[1] = cmd;
+            
+            if (SDL_hid_write(hidapi_handle->handle, buffer.data(), buffer.size()) < 0) {
+                return false;
+            }
+            
+            if (!wait_reply) {
+                return true;
+            }
+            
+            // Wait for reply: report ID 0x81, byte 1 is cmd
+            for (int i = 0; i < 100; ++i) {
+                std::array<u8, 64> read_buf{};
+                int res = SDL_hid_read_timeout(hidapi_handle->handle, read_buf.data(), read_buf.size(), 10);
+                if (res > 1 && read_buf[0] == 0x81 && read_buf[1] == cmd) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // 1. Handshake
+        send_usb_cmd(0x02, true);
+        // 2. High Speed (Baudrate)
+        send_usb_cmd(0x03, true);
+        // 3. Handshake again
+        send_usb_cmd(0x02, true);
+        // 4. Force USB / No Timeout
+        send_usb_cmd(0x04, false);
+    }
 
     // Reset Counters
     error_counter = 0;
@@ -692,7 +728,7 @@ void JoyconDriver::SetCallbacks(const JoyconCallbacks& callbacks) {
 
 Common::Input::DriverResult JoyconDriver::GetDeviceType(SDL_hid_device_info* device_info,
                                                         ControllerType& controller_type) {
-    static constexpr std::array<std::pair<u32, ControllerType>, 6> supported_devices{
+    static constexpr std::array<std::pair<u32, ControllerType>, 3> supported_devices{
         std::pair<u32, ControllerType>{0x2006, ControllerType::Left},
         {0x2007, ControllerType::Right},
         {0x2009, ControllerType::Pro},
@@ -702,6 +738,15 @@ Common::Input::DriverResult JoyconDriver::GetDeviceType(SDL_hid_device_info* dev
     controller_type = ControllerType::None;
     if (device_info->vendor_id != nintendo_vendor_id) {
         return Common::Input::DriverResult::UnsupportedControllerType;
+    }
+
+    if (device_info->product_id == 0x200e || device_info->product_id == 0x206e) {
+        if (device_info->interface_number == 1) {
+            controller_type = ControllerType::Left;
+        } else {
+            controller_type = ControllerType::Right;
+        }
+        return Common::Input::DriverResult::Success;
     }
 
     for (const auto& [product_id, type] : supported_devices) {
@@ -715,10 +760,23 @@ Common::Input::DriverResult JoyconDriver::GetDeviceType(SDL_hid_device_info* dev
 
 Common::Input::DriverResult JoyconDriver::GetSerialNumber(SDL_hid_device_info* device_info,
                                                           SerialNumber& serial_number) {
+    std::memset(serial_number.data(), 0, serial_number.size());
     if (device_info->serial_number == nullptr) {
+        if (device_info->path != nullptr) {
+            size_t len = 0;
+            while (device_info->path[len] != '\0' && len < serial_number.size() - 1) {
+                serial_number[len] = static_cast<u8>(device_info->path[len]);
+                len++;
+            }
+            return Common::Input::DriverResult::Success;
+        }
         return Common::Input::DriverResult::Unknown;
     }
-    std::memcpy(&serial_number, device_info->serial_number, 15);
+    size_t len = 0;
+    while (device_info->serial_number[len] != L'\0' && len < serial_number.size()) {
+        serial_number[len] = static_cast<u8>(device_info->serial_number[len]);
+        len++;
+    }
     return Common::Input::DriverResult::Success;
 }
 

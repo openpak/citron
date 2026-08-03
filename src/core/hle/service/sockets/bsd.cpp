@@ -3,18 +3,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <chrono>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <fmt/format.h>
 
+#include "common/hex_util.h"
+#include "common/legacy_nat.h"
 #include "common/settings.h"
 #include "common/socket_types.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/bsd.h"
+#include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
@@ -27,6 +33,172 @@ using Common::Unexpected;
 namespace Service::Sockets {
 
 namespace {
+
+struct ParkedUdpSocket {
+    std::shared_ptr<Network::SocketBase> socket;
+    u16 port;
+    std::chrono::steady_clock::time_point park_time;
+};
+
+static std::mutex g_parked_udp_mutex;
+static std::vector<ParkedUdpSocket> g_parked_udp_sockets;
+
+// A parked socket still owns its port, so hold few and briefly.
+constexpr std::size_t MAX_PARKED_UDP_SOCKETS = 8;
+constexpr auto PARK_DURATION = std::chrono::seconds{5};
+
+// Caller holds g_parked_udp_mutex.
+static void DropExpiredParkedUdpSockets(std::chrono::steady_clock::time_point now) {
+    std::erase_if(g_parked_udp_sockets, [now](const ParkedUdpSocket& p) {
+        if (now - p.park_time <= PARK_DURATION) {
+            return false;
+        }
+        p.socket->Close();
+        return true;
+    });
+}
+
+static bool ParkUdpSocket(std::shared_ptr<Network::SocketBase> socket, u16 port) {
+    if (!socket || port == 0) {
+        return false;
+    }
+
+    std::lock_guard lock(g_parked_udp_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    DropExpiredParkedUdpSockets(now);
+
+    // Keep the newer socket: it carries the mapping the guest was last using.
+    const auto existing = std::ranges::find_if(
+        g_parked_udp_sockets, [port](const ParkedUdpSocket& p) { return p.port == port; });
+    if (existing != g_parked_udp_sockets.end()) {
+        existing->socket->Close();
+        g_parked_udp_sockets.erase(existing);
+    } else if (g_parked_udp_sockets.size() >= MAX_PARKED_UDP_SOCKETS) {
+        return false;
+    }
+
+    g_parked_udp_sockets.push_back({std::move(socket), port, now});
+    return true;
+}
+
+static std::shared_ptr<Network::SocketBase> TakeParkedUdpSocket(u16 port) {
+    if (port == 0) {
+        return nullptr;
+    }
+
+    std::lock_guard lock(g_parked_udp_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    DropExpiredParkedUdpSockets(now);
+
+    const auto it = std::ranges::find_if(
+        g_parked_udp_sockets, [port](const ParkedUdpSocket& p) { return p.port == port; });
+    if (it == g_parked_udp_sockets.end()) {
+        return nullptr;
+    }
+
+    auto socket = it->socket;
+    g_parked_udp_sockets.erase(it);
+    return socket;
+}
+
+void ClearParkedUdpSockets() {
+    std::lock_guard lock(g_parked_udp_mutex);
+    for (auto& parked : g_parked_udp_sockets) {
+        parked.socket->Close();
+    }
+    g_parked_udp_sockets.clear();
+}
+
+// Best-effort PRUDP-Lite header decode for P2P match traffic (SYN/CONNECT/DATA/DISCONNECT/PING +
+// flags). Only the header is plaintext; the RMC payload inside stays opaque. Returns empty for
+// anything that isn't a PRUDP-Lite packet (magic 0x80, >=12 bytes) so callers can skip it.
+std::string DescribePrudpLite(std::span<const u8> data) {
+    static constexpr std::array<const char*, 5> type_names{"SYN", "CONNECT", "DATA", "DISCONNECT",
+                                                            "PING"};
+    if (data.size() < 12 || data[0] != 0x80) {
+        const auto head = data.subspan(0, std::min<size_t>(data.size(), 16));
+        return fmt::format("raw[{}]={}", data.size(), Common::HexToString(head, false));
+    }
+    const u16 type_flags = static_cast<u16>(data[8] | (data[9] << 8));
+    const u8 type = type_flags & 0xF;
+    const u16 flags = type_flags >> 4;
+    std::string out = fmt::format("prudp type={}", type < type_names.size() ? type_names[type]
+                                                                            : std::to_string(type));
+    if (flags & 0x001) out += "|ACK";
+    if (flags & 0x002) out += "|Reliable";
+    if (flags & 0x004) out += "|NeedACK";
+    if (flags & 0x200) out += "|MultiACK";
+    out += fmt::format(" id={}", static_cast<u16>(data[10] | (data[11] << 8)));
+    return out;
+}
+
+static bool TryInjectTlsSni(std::span<const u8> input, const std::string& host_name, std::vector<u8>& output) {
+    if (input.size() < 43 || input[0] != 0x16) return false;
+    size_t recordLen = (static_cast<size_t>(input[3]) << 8) | input[4];
+    if (5 + recordLen > input.size()) return false;
+    if (input[5] != 0x01) return false; // ClientHello
+
+    size_t p = 5 + 4 + 2 + 32; // record header (5) + handshake header (4) + version (2) + random (32)
+    if (p >= input.size()) return false;
+    size_t sidLen = input[p]; p += 1 + sidLen;
+    if (p + 2 > input.size()) return false;
+    size_t csLen = (static_cast<size_t>(input[p]) << 8) | input[p + 1]; p += 2 + csLen;
+    if (p + 1 > input.size()) return false;
+    size_t cmLen = input[p]; p += 1 + cmLen;
+    if (p + 2 > input.size()) return false;
+
+    size_t extTotalLen = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
+    size_t extLenPos = p;
+    size_t extStart = p + 2;
+    size_t extEnd = extStart + extTotalLen;
+    if (extEnd > input.size()) return false;
+
+    // Check if server_name (0x0000) extension already exists
+    size_t q = extStart;
+    while (q + 4 <= extEnd) {
+        u16 etype = static_cast<u16>((input[q] << 8) | input[q + 1]);
+        u16 elen = static_cast<u16>((input[q + 2] << 8) | input[q + 3]);
+        if (etype == 0x0000) return false; // already has SNI
+        q += 4 + elen;
+    }
+
+    // Build SNI extension bytes
+    const size_t nameLen = host_name.size();
+    const size_t listLen = 1 + 2 + nameLen;
+    const size_t extDataLen = 2 + listLen;
+    const size_t sniExtLen = 4 + extDataLen;
+
+    std::vector<u8> sni(sniExtLen);
+    size_t i = 0;
+    sni[i++] = 0x00; sni[i++] = 0x00;
+    sni[i++] = static_cast<u8>(extDataLen >> 8); sni[i++] = static_cast<u8>(extDataLen);
+    sni[i++] = static_cast<u8>(listLen >> 8); sni[i++] = static_cast<u8>(listLen);
+    sni[i++] = 0x00;
+    sni[i++] = static_cast<u8>(nameLen >> 8); sni[i++] = static_cast<u8>(nameLen);
+    std::memcpy(sni.data() + i, host_name.data(), nameLen);
+
+    output.resize(input.size() + sniExtLen);
+    std::memcpy(output.data(), input.data(), extStart);
+    std::memcpy(output.data() + extStart, sni.data(), sniExtLen);
+    std::memcpy(output.data() + extStart + sniExtLen, input.data() + extStart, input.size() - extStart);
+
+    size_t newExtLen = extTotalLen + sniExtLen;
+    output[extLenPos] = static_cast<u8>(newExtLen >> 8);
+    output[extLenPos + 1] = static_cast<u8>(newExtLen);
+
+    size_t hsLen = ((input[6] << 16) | (input[7] << 8) | input[8]) + sniExtLen;
+    output[6] = static_cast<u8>(hsLen >> 16); output[7] = static_cast<u8>(hsLen >> 8); output[8] = static_cast<u8>(hsLen);
+
+    size_t newRecLen = recordLen + sniExtLen;
+    output[3] = static_cast<u8>(newRecLen >> 8); output[4] = static_cast<u8>(newRecLen);
+
+    return true;
+}
+
+// Queued from an earlier send's ICMP error, not from this receive.
+bool IsTransientDatagramError(Errno bsd_errno) {
+    return bsd_errno == Errno::CONNREFUSED || bsd_errno == Errno::CONNRESET;
+}
 
 bool IsConnectionBased(Type type) {
     switch (type) {
@@ -182,6 +354,28 @@ void BSD::PollWork::Response(HLERequestContext& ctx) {
     rb.PushEnum(bsd_errno);
 }
 
+void BSD::SelectWork::Execute(BSD* bsd) {
+    std::tie(ret, bsd_errno) =
+        bsd->SelectImpl(nfds, timeout, read_in, write_in, error_in, read_out, write_out, error_out);
+}
+
+void BSD::SelectWork::Response(HLERequestContext& ctx) {
+    if (read_out.size() > 0) {
+        ctx.WriteBuffer(read_out, 0);
+    }
+    if (write_out.size() > 0) {
+        ctx.WriteBuffer(write_out, 1);
+    }
+    if (error_out.size() > 0) {
+        ctx.WriteBuffer(error_out, 2);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
+}
+
 void BSD::AcceptWork::Execute(BSD* bsd) {
     std::tie(ret, bsd_errno) = bsd->AcceptImpl(fd, write_buffer);
 }
@@ -322,13 +516,22 @@ void BSD::Socket(HLERequestContext& ctx) {
 }
 
 void BSD::Select(HLERequestContext& ctx) {
-    LOG_DEBUG(Service, "(STUBBED) called");
+    IPC::RequestParser rp{ctx};
+    const s32 nfds = rp.Pop<s32>();
+    const s32 timeout = rp.Pop<s32>();
 
-    IPC::ResponseBuilder rb{ctx, 4};
+    LOG_DEBUG(Service, "called. nfds={} timeout={}", nfds, timeout);
 
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // ret
-    rb.Push<u32>(0); // bsd errno
+    ExecuteWork(ctx, SelectWork{
+                         .nfds = nfds,
+                         .timeout = timeout,
+                         .read_in = ctx.CanReadBuffer(0) ? ctx.ReadBuffer(0) : std::span<const u8>{},
+                         .write_in = ctx.CanReadBuffer(1) ? ctx.ReadBuffer(1) : std::span<const u8>{},
+                         .error_in = ctx.CanReadBuffer(2) ? ctx.ReadBuffer(2) : std::span<const u8>{},
+                         .read_out = std::vector<u8>(ctx.GetWriteBufferSize(0)),
+                         .write_out = std::vector<u8>(ctx.GetWriteBufferSize(1)),
+                         .error_out = std::vector<u8>(ctx.GetWriteBufferSize(2)),
+                     });
 }
 
 void BSD::Poll(HLERequestContext& ctx) {
@@ -614,9 +817,73 @@ void BSD::EventFd(HLERequestContext& ctx) {
     const u64 initval = rp.Pop<u64>();
     const u32 flags = rp.Pop<u32>();
 
-    LOG_WARNING(Service, "(STUBBED) called. initval={}, flags={}", initval, flags);
+    LOG_DEBUG(Service, "called. initval={} flags={}", initval, flags);
 
-    BuildErrnoResponse(ctx, Errno::SUCCESS);
+    // Real eventfd semantics, built out of a UDP socket connected to itself over loopback:
+    // Write() adds a datagram (readable/poll-worthy immediately), Read() drains the next one.
+    // Games use this as a self-pipe to wake a blocked Poll/Select from another thread (e.g. to
+    // interrupt a host's listen loop) -- without a real, pollable fd behind it, that signal goes
+    // nowhere and the listener never wakes for anything but its own socket traffic.
+    const s32 fd = FindFreeFileDescriptorHandle();
+    if (fd < 0) {
+        LOG_ERROR(Service, "No more file descriptors available");
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push<s32>(-1);
+        rb.PushEnum(Errno::MFILE);
+        return;
+    }
+
+    auto socket = std::make_shared<Network::Socket>();
+    Network::Errno net_err = socket->Initialize(Network::Domain::INET, Network::Type::DGRAM,
+                                                Network::Protocol::UDP);
+    const Network::SockAddrIn loopback{
+        .family = Network::Domain::INET,
+        .ip = {127, 0, 0, 1},
+        .portno = 0,
+    };
+    if (net_err == Network::Errno::SUCCESS) {
+        net_err = socket->Bind(loopback);
+    }
+    Network::SockAddrIn bound{};
+    if (net_err == Network::Errno::SUCCESS) {
+        std::tie(bound, net_err) = socket->GetSockName();
+    }
+    if (net_err == Network::Errno::SUCCESS) {
+        bound.ip = loopback.ip;
+        net_err = socket->Connect(bound);
+    }
+    if (net_err != Network::Errno::SUCCESS) {
+        LOG_ERROR(Service, "Failed to create eventfd backing socket, errno={}",
+                  static_cast<int>(net_err));
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push<s32>(-1);
+        rb.PushEnum(Translate(net_err));
+        return;
+    }
+
+    file_descriptors[fd] = FileDescriptor{};
+    FileDescriptor& descriptor = *file_descriptors[fd];
+    descriptor.socket = std::move(socket);
+    descriptor.domain = Network::Domain::INET;
+    descriptor.type = Network::Type::DGRAM;
+    descriptor.protocol = Network::Protocol::UDP;
+    descriptor.is_connection_based = true; // enables Write()/Send() without an explicit dest
+    descriptor.connected = true;
+
+    if (initval > 0) {
+        const u64 seed = initval;
+        descriptor.socket->Send(
+            std::span<const u8>{reinterpret_cast<const u8*>(&seed), sizeof(seed)}, 0);
+    }
+
+    LOG_INFO(Service, "[OpenPak] New eventfd fd={} initval={}", fd, initval);
+
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<s32>(fd);
+    rb.PushEnum(Errno::SUCCESS);
 }
 
 void BSD::RegisterClientShared(HLERequestContext& ctx) {
@@ -685,6 +952,13 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
 std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
                                     s32 nfds, s32 timeout) {
     if (nfds <= 0) {
+        // poll(NULL, 0, timeout) is a portable sleep idiom titles use for pacing/backoff
+        // between retries. Real poll() actually blocks for the requested duration; honor
+        // that here instead of returning instantly, or a title's own retry-count budget
+        // burns through in microseconds instead of the real time it was paced for.
+        if (timeout > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
+        }
         // When no entries are provided, -1 is returned with errno zero
         return {-1, Errno::SUCCESS};
     }
@@ -754,6 +1028,121 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
     return Translate(result);
 }
 
+namespace {
+// fd_set is a plain byte array, bit i (LSB-first within each byte) == fd i.
+void ExtractFdsFromMask(std::span<const u8> mask, std::vector<s32>& out) {
+    for (size_t byte_idx = 0; byte_idx < mask.size(); ++byte_idx) {
+        const u8 current = mask[byte_idx];
+        for (int bit = 0; bit < 8; ++bit) {
+            if (current & (1u << bit)) {
+                out.push_back(static_cast<s32>(byte_idx * 8 + bit));
+            }
+        }
+    }
+}
+
+void SetFdInMask(std::vector<u8>& mask, s32 fd) {
+    const size_t byte_idx = static_cast<size_t>(fd) / 8;
+    if (byte_idx < mask.size()) {
+        mask[byte_idx] |= static_cast<u8>(1u << (fd % 8));
+    }
+}
+} // Anonymous namespace
+
+std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8> read_in,
+                                      std::span<const u8> write_in, std::span<const u8> error_in,
+                                      std::vector<u8>& read_out, std::vector<u8>& write_out,
+                                      std::vector<u8>& error_out) {
+    std::ranges::fill(read_out, 0);
+    std::ranges::fill(write_out, 0);
+    std::ranges::fill(error_out, 0);
+
+    std::vector<s32> read_fds;
+    std::vector<s32> write_fds;
+    std::vector<s32> error_fds;
+    ExtractFdsFromMask(read_in, read_fds);
+    ExtractFdsFromMask(write_in, write_fds);
+    ExtractFdsFromMask(error_in, error_fds);
+
+    if (nfds <= 0 || (read_fds.empty() && write_fds.empty() && error_fds.empty())) {
+        return {0, Errno::SUCCESS};
+    }
+
+    // One poll entry per unique fd, requesting whichever of In/Out it was asked about.
+    // Err/Hup/Nval come back from the host poll() unconditionally, regardless of what
+    // was requested, matching POSIX poll() semantics.
+    struct Entry {
+        s32 fd;
+        Network::PollEvents requested{};
+    };
+    std::vector<Entry> entries;
+    const auto add = [&](const std::vector<s32>& fds, Network::PollEvents event) {
+        for (const s32 fd : fds) {
+            const auto it =
+                std::ranges::find_if(entries, [fd](const Entry& e) { return e.fd == fd; });
+            if (it != entries.end()) {
+                it->requested |= event;
+            } else {
+                entries.push_back({fd, event});
+            }
+        }
+    };
+    add(read_fds, Network::PollEvents::In);
+    add(write_fds, Network::PollEvents::Out);
+
+    std::vector<s32> polled_fds;
+    std::vector<Network::PollFD> host_pollfds;
+    polled_fds.reserve(entries.size());
+    host_pollfds.reserve(entries.size());
+    for (const Entry& entry : entries) {
+        if (entry.fd < 0 || entry.fd >= static_cast<s32>(MAX_FD) || !file_descriptors[entry.fd] ||
+            !file_descriptors[entry.fd]->socket) {
+            continue;
+        }
+        polled_fds.push_back(entry.fd);
+        host_pollfds.push_back(Network::PollFD{
+            .socket = file_descriptors[entry.fd]->socket.get(),
+            .events = entry.requested,
+            .revents = Network::PollEvents{},
+        });
+    }
+
+    const auto [poll_ret, poll_errno] = Translate(Network::Poll(host_pollfds, timeout));
+    if (poll_errno != Errno::SUCCESS) {
+        return {poll_ret, poll_errno};
+    }
+
+    // error_fds only ever reports out-of-band/exceptional conditions; a plain closed/errored
+    // socket surfaces through the read or write set it was asked about, same as real select().
+    constexpr auto err_like =
+        Network::PollEvents::Err | Network::PollEvents::Hup | Network::PollEvents::Nval;
+    s32 ready = 0;
+    for (size_t i = 0; i < host_pollfds.size(); ++i) {
+        const s32 fd = polled_fds[i];
+        const Network::PollEvents revents = host_pollfds[i].revents;
+        bool counted = false;
+        if (True(host_pollfds[i].events & Network::PollEvents::In) &&
+            True(revents & (Network::PollEvents::In | err_like))) {
+            SetFdInMask(read_out, fd);
+            counted = true;
+        }
+        if (True(host_pollfds[i].events & Network::PollEvents::Out) &&
+            True(revents & (Network::PollEvents::Out | err_like))) {
+            SetFdInMask(write_out, fd);
+            counted = true;
+        }
+        if (True(revents & (Network::PollEvents::Err | Network::PollEvents::Hup))) {
+            SetFdInMask(error_out, fd);
+            counted = true;
+        }
+        if (counted) {
+            ++ready;
+        }
+    }
+
+    return {ready, Errno::SUCCESS};
+}
+
 std::pair<s32, Errno> BSD::AcceptImpl(s32 fd, std::vector<u8>& write_buffer) {
     if (!IsFileDescriptorValid(fd)) {
         return {-1, Errno::BADF};
@@ -793,8 +1182,24 @@ Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
     ASSERT(addr.size() == sizeof(SockAddrIn));
     auto addr_in = GetValue<SockAddrIn>(addr);
 
-    LOG_INFO(Service, "Bind fd={} to {}:{}", fd, Network::IPv4AddressToString(addr_in.ip),
+    LOG_INFO(Service, "Bind fd={} to {}:{}", fd, Network::IPv4AddressToRedactedString(addr_in.ip),
              addr_in.portno);
+
+    FileDescriptor& descriptor = *file_descriptors[fd];
+    if (descriptor.type == Network::Type::DGRAM && addr_in.portno > 0) {
+        auto parked = TakeParkedUdpSocket(addr_in.portno);
+        if (parked) {
+            LOG_INFO(Service, "[OpenPak] Reusing parked UDP socket for port {}", addr_in.portno);
+            // Close the displaced socket, or every adopt leaks a host descriptor.
+            if (descriptor.socket) {
+                descriptor.socket->Close();
+            }
+            descriptor.socket = std::move(parked);
+            descriptor.bound_port = addr_in.portno;
+            return Errno::SUCCESS;
+        }
+        descriptor.bound_port = addr_in.portno;
+    }
 
     const auto result = Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
     if (result != Errno::SUCCESS) {
@@ -816,11 +1221,15 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
 
     UNIMPLEMENTED_IF(addr.size() != sizeof(SockAddrIn));
     auto addr_in = GetValue<SockAddrIn>(addr);
+    const auto translated_addr = Translate(addr_in);
 
-    LOG_INFO(Service, "Connect fd={} to {}:{}", fd, Network::IPv4AddressToString(addr_in.ip),
-             addr_in.portno);
+    LOG_INFO(Service, "Connect fd={} to {}:{}", fd,
+             Network::IPv4AddressToRedactedString(addr_in.ip), translated_addr.portno);
 
-    const auto result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
+    const auto result = Translate(file_descriptors[fd]->socket->Connect(translated_addr));
+    if (result == Errno::SUCCESS || result == Errno::INPROGRESS) {
+        file_descriptors[fd]->connected = true;
+    }
     if (result != Errno::SUCCESS) {
         LOG_ERROR(Service, "Connect fd={} failed with errno={}", fd, static_cast<int>(result));
     } else {
@@ -945,8 +1354,8 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
         return Errno::BADF;
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
-        LOG_WARNING(Service, "(STUBBED) Unknown setsockopt level={}, returning INVAL", level);
-        return Errno::INVAL;
+        LOG_WARNING(Service, "(STUBBED) Unknown setsockopt level={}, returning SUCCESS for compatibility", level);
+        return Errno::SUCCESS;
     }
 
     Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
@@ -1003,9 +1412,9 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
         LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
         return Errno::SUCCESS;
     default:
-        LOG_WARNING(Service, "(STUBBED) Unimplemented optname={} (0x{:x}), returning INVAL",
+        LOG_WARNING(Service, "(STUBBED) Unimplemented optname={} (0x{:x}), returning SUCCESS for compatibility",
                     static_cast<u32>(optname), static_cast<u32>(optname));
-        return Errno::INVAL;
+        return Errno::SUCCESS;
     }
 }
 
@@ -1063,10 +1472,6 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         addr.clear();
         return {-1, Errno::AGAIN};
     }
-    if (!descriptor.is_connection_based) {
-        addr.clear();
-        return {-1, Errno::AGAIN};
-    }
 
     Network::SockAddrIn addr_in{};
     Network::SockAddrIn* p_addr_in = nullptr;
@@ -1074,6 +1479,8 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         // Connection based file descriptors (e.g. TCP) zero addr
         addr.clear();
     } else {
+        // Datagram (UDP): receive the sender's address. (Previously this path returned
+        // AGAIN unconditionally, which silently broke all UDP recvfrom/MSG_PEEK.)
         p_addr_in = &addr_in;
     }
 
@@ -1087,7 +1494,23 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         }
     }
 
-    const auto [ret, bsd_errno] = Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
+    auto [ret, bsd_errno] = Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
+
+    // P2P shares one socket across every peer, so one unreachable peer must not read as the
+    // network dropping. The failed call consumed the queued error; take the next datagram.
+    if (!descriptor.is_connection_based) {
+        for (int attempt = 0; attempt < 16 && IsTransientDatagramError(bsd_errno); ++attempt) {
+            LOG_WARNING(Service, "Discarding queued ICMP error on fd={} errno={}", fd,
+                        static_cast<int>(bsd_errno));
+            std::tie(ret, bsd_errno) =
+                Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
+        }
+    }
+
+    if (bsd_errno != Errno::SUCCESS && bsd_errno != Errno::AGAIN) {
+        LOG_WARNING(Service, "RecvFrom fd={} failed with errno={}", fd,
+                    static_cast<int>(bsd_errno));
+    }
 
     // Restore original state
     if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
@@ -1101,6 +1524,17 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
             ASSERT(addr.size() == sizeof(SockAddrIn));
             const SockAddrIn result = Translate(addr_in);
             PutValue(addr, result);
+            LOG_DEBUG(Service, "RecvFrom fd={} <- {}:{} len={} {}", fd,
+                      Network::IPv4AddressToRedactedString(addr_in.ip), addr_in.portno, ret,
+                      DescribePrudpLite(std::span<const u8>{message.data(),
+                                                            static_cast<size_t>(std::max(ret, 0))}));
+
+            // nncs reply is 4x u32 BE: [type][ext port][ext ip][server ip]. Remember the ext
+            // ip so legacy_nat_rewrite.cpp can fix up ReplaceURL's stale station address.
+            if (ret == 16 && (addr_in.portno == 10025 || addr_in.portno == 10125)) {
+                Common::OpenPakNat::SetObservedExternalIp(
+                    {message[8], message[9], message[10], message[11]});
+            }
         }
     }
 
@@ -1121,7 +1555,29 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
         LOG_DEBUG(Service, "Dropping datagram send without destination fd={}", fd);
         return {static_cast<s32>(message.size()), Errno::SUCCESS};
     }
-    return Translate(descriptor.socket->Send(message, flags));
+
+    std::span<const u8> send_buf = message;
+    std::vector<u8> injected_buf;
+    // First ClientHello only; a later handshake record must not be rewritten mid-stream.
+    if (!descriptor.sni_injected && message.size() > 5 && message[0] == 0x16 &&
+        message[5] == 0x01) {
+        descriptor.sni_injected = true;
+        auto [peer_addr, err] = descriptor.socket->GetPeerName();
+        if (err == Network::Errno::SUCCESS) {
+            std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
+            std::string host = Service::Sockets::GetLastHostForIp(ip_str);
+            if (!host.empty() && TryInjectTlsSni(message, host, injected_buf)) {
+                LOG_INFO(Service, "[OpenPak] Injected SNI extension '{}' into TLS ClientHello for BSD socket fd={}", host, fd);
+                send_buf = injected_buf;
+            }
+        }
+    }
+
+    auto [sent_bytes, err] = descriptor.socket->Send(send_buf, flags);
+    if (err == Network::Errno::SUCCESS && !injected_buf.empty()) {
+        sent_bytes = static_cast<s32>(message.size());
+    }
+    return Translate(std::make_pair(sent_bytes, err));
 }
 
 std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
@@ -1152,6 +1608,12 @@ std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> mes
         p_addr_in = &addr_in;
     }
 
+    if (!descriptor.is_connection_based && p_addr_in) {
+        LOG_DEBUG(Service, "SendTo fd={} -> {}:{} len={} {}", fd,
+                  Network::IPv4AddressToRedactedString(p_addr_in->ip), p_addr_in->portno,
+                  message.size(), DescribePrudpLite(message));
+    }
+
     return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
 }
 
@@ -1161,13 +1623,28 @@ Errno BSD::CloseImpl(s32 fd) {
     }
 
     std::shared_ptr<Network::SocketBase> socket_to_close;
+    u16 bound_port = 0;
+    bool is_udp = false;
+    bool was_connected = false;
 
     {
         std::lock_guard lock(fd_table_mutex);
         if (!file_descriptors[fd]->socket)
             return Errno::BADF;
         socket_to_close = file_descriptors[fd]->socket;
+        bound_port = file_descriptors[fd]->bound_port;
+        is_udp = (file_descriptors[fd]->type == Network::Type::DGRAM);
+        was_connected = file_descriptors[fd]->connected;
         file_descriptors[fd].reset();
+    }
+
+    // Connected means one peer, so closing it is a real teardown, not the probe/play port swap.
+    if (is_udp && bound_port > 0 && !was_connected) {
+        if (ParkUdpSocket(socket_to_close, bound_port)) {
+            LOG_INFO(Service, "[OpenPak] Parking UDP socket fd={} bound to port {}", fd,
+                     bound_port);
+            return Errno::SUCCESS;
+        }
     }
 
     const Errno bsd_errno = Translate(socket_to_close->Close());
@@ -1311,6 +1788,8 @@ BSD::~BSD() {
     if (auto room_member = room_network.GetRoomMember().lock()) {
         room_member->Unbind(proxy_packet_received);
     }
+
+    ClearParkedUdpSockets();
 }
 
 std::unique_lock<std::mutex> BSD::LockService() {

@@ -20,6 +20,7 @@ private:
     Result GetHomeButtonDoubleClickEnabled(Out<bool> out_home_button_double_click_enabled);
     Result SetDisplayMagnification(f32 x, f32 y, f32 width, f32 height);
     Result SetCpuBoostRequestPriority(s32 priority);
+    Result SetApplicationCoreUsageMode(u32 core_usage_mode);
     Result GetCurrentApplicationId(Out<u64> out_application_id);
     Result IsSystemAppletHomeMenu(Out<bool> out_is_home_menu);
     Result Cmd311();

@@ -19,10 +19,11 @@ struct ErrorCode {
     u32 error_category{};
     u32 error_number{};
 
+    // nn::err::ErrorCode is { u32 module; u32 description; }: module is the low word.
     static constexpr ErrorCode FromU64(u64 error_code) {
         return {
-            .error_category{static_cast<u32>(error_code >> 32)},
-            .error_number{static_cast<u32>(error_code & 0xFFFFFFFF)},
+            .error_category{static_cast<u32>(error_code & 0xFFFFFFFF)},
+            .error_number{static_cast<u32>(error_code >> 32)},
         };
     }
 
@@ -151,6 +152,10 @@ void Error::Initialize() {
         UNIMPLEMENTED_MSG("Unimplemented LibAppletError mode={:02X}!", mode);
         break;
     }
+
+    LOG_ERROR(Service_AM, "Error applet: {:04}-{:04} (raw=0x{:08X}) mode={:02X}",
+              static_cast<u32>(error_code.GetModule()) + 2000, error_code.GetDescription(),
+              error_code.raw, static_cast<u8>(mode));
 }
 
 Result Error::GetStatus() const {
