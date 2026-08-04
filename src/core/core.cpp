@@ -455,6 +455,7 @@ struct System::Impl {
 
         if (gpu_core) {
             gpu_core->NotifyShutdown();
+            gpu_core->ShutdownThread();
         }
 
         stop_event.request_stop();

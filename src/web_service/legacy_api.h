@@ -60,6 +60,7 @@ struct Friend {
     s32 presence_status = 0; // 0 offline, 1 online, 2 in a game
     std::string app_field;   // opaque per-title presence blob
     std::string app_id;      // running title id, 16 hex digits; empty when nothing is running
+    std::string app_name;    // display name the playing client already resolved; may be empty
     std::string image_base64; // profile picture, base64 JPEG; empty if none set
 };
 
@@ -82,8 +83,11 @@ std::string RemoveFriend(u64 pid);
 void PushProfileName(const std::string& name);
 
 // Publishes this player's presence so friends see them online and, for titles that use it,
-// joinable. app_id is the running title id; empty when nothing is running.
-void PushPresence(s32 status, const std::string& app_field, const std::string& app_id);
+// joinable. app_id is the running title id; empty when nothing is running. app_name is the
+// display name already resolved locally (e.g. from NACP) so a friend can show it even without
+// that title in their own library; empty when nothing is running or the name couldn't be resolved.
+void PushPresence(s32 status, const std::string& app_field, const std::string& app_id,
+                  const std::string& app_name);
 
 // Downloads the BCAT schedule seed (a zip of vsdata/coopdata/fesdata) for titles that need one
 // locally to go online (Splatoon 2). title_id_hex is 16 uppercase hex digits. Empty on failure.

@@ -40,7 +40,8 @@ bool OpenPakController::IsLinked() const {
     return Common::OpenPakAccount::IsLinked();
 }
 
-QString OpenPakController::ResolveGameName(const std::string& app_id_hex) const {
+QString OpenPakController::ResolveGameName(const std::string& app_id_hex,
+                                            const std::string& hint_name) const {
     if (app_id_hex.empty()) {
         return {};
     }
@@ -63,6 +64,9 @@ QString OpenPakController::ResolveGameName(const std::string& app_id_hex) const 
         if (!name.empty()) {
             return QString::fromStdString(name);
         }
+    }
+    if (!hint_name.empty()) {
+        return QString::fromStdString(hint_name);
     }
     return tr("a game");
 }
@@ -218,7 +222,7 @@ void OpenPakController::PollFriends() {
                     }
                     if (was_offline && entry.presence_status != 0) {
                         emit FriendCameOnline(entry.pid, QString::fromStdString(entry.name),
-                                              ResolveGameName(entry.app_id),
+                                              ResolveGameName(entry.app_id, entry.app_name),
                                               QString::fromStdString(entry.image_base64));
                     } else if (was_online && entry.presence_status == 0) {
                         emit FriendWentOffline(entry.pid, QString::fromStdString(entry.name),

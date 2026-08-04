@@ -1205,6 +1205,34 @@ GameList::GameList(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
     tree_view = new GameTreeView(this);
     grid_view = new GameGridView(this);
     carousel_view = new GameCarouselView(this);
+    switch (UISettings::values.carousel_backdrop_theme.GetValue()) {
+    case 1:
+        carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Wave);
+        break;
+    case 2:
+        carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::None);
+        break;
+    default:
+        carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Gradient);
+        break;
+    }
+    connect(carousel_view, &GameCarouselView::ProfileClicked, this,
+            &GameList::OpenOpenPakAccountRequested);
+
+    connect(carousel_view, &GameCarouselView::BackdropThemeChanged, this, [this](int theme) {
+        UISettings::values.carousel_backdrop_theme.SetValue(theme);
+        switch (theme) {
+        case 1:
+            carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Wave);
+            break;
+        case 2:
+            carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::None);
+            break;
+        default:
+            carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Gradient);
+            break;
+        }
+    });
 
     main_stack->addWidget(tree_view);     // Index 0: List
     main_stack->addWidget(grid_view);     // Index 1: Grid

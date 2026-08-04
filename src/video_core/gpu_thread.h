@@ -127,6 +127,9 @@ public:
     /// Wait until all commands queued before this call have been processed by the GPU thread.
     void Synchronize();
 
+    /// Requests the GPU thread to stop and blocks until it has fully exited.
+    void Stop();
+
 private:
     /// Pushes a command to be executed by the GPU thread
     u64 PushCommand(CommandData&& command_data, bool block = false);

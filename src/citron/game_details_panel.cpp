@@ -121,7 +121,7 @@ void GameDetailsPanel::setupUI() {
     m_actions_layout = new QVBoxLayout(m_actions_container);
     m_actions_layout->addStretch(1);
     m_actions_layout->setContentsMargins(25, 10, 25, 10);
-    m_actions_layout->setSpacing(0);
+    m_actions_layout->setSpacing(10);
     m_scroll_area->setWidget(m_actions_container);
     content_layout->addWidget(m_scroll_area);
 
@@ -329,43 +329,58 @@ void GameDetailsPanel::applyDetails(const QModelIndex& index) {
     m_current_program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
     m_current_path = index.data(GameListItemPath::FullPathRole).toString();
 
-    // Priority 1: Load directly from disk (High-Res) if a custom icon exists
-    QPixmap pixmap;
-    auto custom_icon_path =
-        Citron::CustomMetadata::GetInstance().GetCustomIconPath(m_current_program_id);
-if (custom_icon_path) {
-    pixmap.load(QString::fromStdString(*custom_icon_path));
-}
-
-// Priority 2: Fallback to model data
-if (pixmap.isNull()) {
-    pixmap = index.data(GameListItemPath::HighResIconRole).value<QPixmap>();
-}
-if (pixmap.isNull()) {
-    pixmap = index.data(Qt::DecorationRole).value<QPixmap>();
-}
-
-if (!pixmap.isNull()) {
     const int is = m_icon_label->width();
+    const u64 cache_key = m_current_program_id;
+    auto cached = m_icon_cache.find(cache_key);
+    auto cached_bg = m_bg_cache.find(cache_key);
+    if (cached != m_icon_cache.end() && cached->size() == QSize(is, is) &&
+        cached_bg != m_bg_cache.end()) {
+        m_icon_label->setPixmap(*cached);
+        m_bg_pixmap = *cached_bg;
+        m_bg_label->setPixmap(m_bg_pixmap);
+    } else {
+        // Priority 1: Load directly from disk (High-Res) if a custom icon exists
+        QPixmap pixmap;
+        auto custom_icon_path =
+            Citron::CustomMetadata::GetInstance().GetCustomIconPath(m_current_program_id);
+        if (custom_icon_path) {
+            pixmap.load(QString::fromStdString(*custom_icon_path));
+        }
 
-    QPixmap rounded(is, is);
-    rounded.fill(Qt::transparent);
-    {
-        QPainter painter(&rounded);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        QPainterPath path;
-        path.addRoundedRect(0, 0, is, is, 32, 32);
-        painter.setClipPath(path);
+        // Priority 2: Fallback to model data
+        if (pixmap.isNull()) {
+            pixmap = index.data(GameListItemPath::HighResIconRole).value<QPixmap>();
+        }
+        if (pixmap.isNull()) {
+            pixmap = index.data(Qt::DecorationRole).value<QPixmap>();
+        }
 
-        painter.drawPixmap(
-            0, 0, is, is,
-            pixmap.scaled(is, is, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+        if (!pixmap.isNull()) {
+            QPixmap rounded(is, is);
+            rounded.fill(Qt::transparent);
+            {
+                QPainter painter(&rounded);
+                painter.setRenderHint(QPainter::Antialiasing);
+                painter.setRenderHint(QPainter::SmoothPixmapTransform);
+                QPainterPath path;
+                path.addRoundedRect(0, 0, is, is, 32, 32);
+                painter.setClipPath(path);
+
+                painter.drawPixmap(
+                    0, 0, is, is,
+                    pixmap.scaled(is, is, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+            }
+            if (m_icon_cache.size() > 256) {
+                m_icon_cache.clear();
+                m_bg_cache.clear();
+            }
+            m_icon_cache.insert(cache_key, rounded);
+            m_bg_cache.insert(cache_key, pixmap);
+            m_icon_label->setPixmap(rounded);
+            m_bg_pixmap = pixmap;
+            m_bg_label->setPixmap(m_bg_pixmap);
+        }
     }
-    m_icon_label->setPixmap(rounded);
-    m_bg_pixmap = pixmap;
-    m_bg_label->setPixmap(m_bg_pixmap);
-}
 
 QString title = index.data(Qt::DisplayRole).toString();
 if (title.contains(QLatin1Char('\n')))
@@ -405,27 +420,24 @@ m_title_label->setMinimumHeight(static_cast<int>(doc.size().height()) + 4);
 m_id_label->setText(
     QStringLiteral("0x%1").arg(m_current_program_id, 16, 16, QLatin1Char('0')).toUpper());
 
-clearActions();
-
-addAction(tr("Launch Game"), QStringLiteral("start"));
-m_actions_layout->addSpacing(10);
-addAction(tr("Favorite"), QStringLiteral("favorite"));
-m_actions_layout->addSpacing(10);
-addAction(tr("Properties"), QStringLiteral("properties"));
-m_actions_layout->addSpacing(10);
-addAction(tr("Open Save Data"), QStringLiteral("save_data"));
-m_actions_layout->addSpacing(10);
-addAction(tr("Open Mod Location"), QStringLiteral("mod_data"));
-m_actions_layout->addSpacing(10);
-addAction(tr("Download Icon..."), QStringLiteral("download_icon"));
-
-auto* game_list = qobject_cast<GameList*>(parent());
-if (game_list && game_list->GetViewMode() == GameList::ViewMode::Grid) {
-    m_actions_layout->addSpacing(10);
+if (!m_actions_built) {
+    clearActions();
+    addAction(tr("Launch Game"), QStringLiteral("start"));
+    addAction(tr("Favorite"), QStringLiteral("favorite"));
+    addAction(tr("Properties"), QStringLiteral("properties"));
+    addAction(tr("Open Save Data"), QStringLiteral("save_data"));
+    addAction(tr("Open Mod Location"), QStringLiteral("mod_data"));
+    addAction(tr("Download Icon..."), QStringLiteral("download_icon"));
     addAction(tr("Download Poster..."), QStringLiteral("download_poster"));
+    m_actions_layout->addStretch(1);
+    m_actions_built = true;
 }
 
-m_actions_layout->addStretch(1);
+auto* game_list = qobject_cast<GameList*>(parent());
+const bool show_poster = game_list && game_list->GetViewMode() == GameList::ViewMode::Grid;
+if (m_action_buttons.size() >= 7) {
+    m_action_buttons[6]->setVisible(show_poster);
+}
 }
 
 void GameDetailsPanel::clearActions() {

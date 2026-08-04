@@ -1772,6 +1772,8 @@ void GMainWindow::OnAppFocusStateChanged(Qt::ApplicationState state) {
 void GMainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::BootGame, this, &GMainWindow::BootGameFromList);
     connect(game_list, &GameList::GameChosen, this, &GMainWindow::OnGameListLoadFile);
+    connect(game_list, &GameList::OpenOpenPakAccountRequested, this,
+            [this] { ui->action_OpenPak_Open_Account->trigger(); });
     connect(game_list, &GameList::OpenDirectory, this, &GMainWindow::OnGameListOpenDirectory);
     connect(game_list, &GameList::OpenFolderRequested, this, &GMainWindow::OnGameListOpenFolder);
     connect(game_list, &GameList::OpenTransferableShaderCacheRequested, this,
@@ -1923,6 +1925,7 @@ void GMainWindow::ConnectMenuEvents() {
         const std::string app_id =
             emulation_running ? fmt::format("{:016X}", play_time_manager->GetProgramId())
                               : std::string{};
+        const std::string app_name = emulation_running ? current_game_name : std::string{};
         const bool app_id_changed = app_id != legacy_last_pushed_app_id;
 
         s32 status = 0;
@@ -1937,8 +1940,8 @@ void GMainWindow::ConnectMenuEvents() {
         }
 
         legacy_last_pushed_app_id = app_id;
-        std::thread{[status, app_field, app_id] {
-            WebService::OpenPakApi::PushPresence(status, app_field, app_id);
+        std::thread{[status, app_field, app_id, app_name] {
+            WebService::OpenPakApi::PushPresence(status, app_field, app_id, app_name);
         }}.detach();
 #endif
     });
@@ -5486,7 +5489,12 @@ void GMainWindow::OnAbout() {
 }
 
 void GMainWindow::OnCheckForUpdates() {
-#ifdef CITRON_USE_AUTO_UPDATER
+#ifdef _WIN32
+    // The in-app updater is broken for multiple Windows users right now — point them at the
+    // CI releases page instead until it's fixed. See Updater::UpdaterDialog/UpdaterService for
+    // the disabled flow.
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/CollectingW/CI/releases")));
+#elif defined(CITRON_USE_AUTO_UPDATER)
     auto* updater_dialog = new Updater::UpdaterDialog(this);
     updater_dialog->setAttribute(Qt::WA_DeleteOnClose);
     updater_dialog->show();

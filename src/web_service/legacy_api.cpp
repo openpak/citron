@@ -222,12 +222,23 @@ std::optional<std::string> SanitizeBaseUrl(std::string raw) {
     return raw;
 }
 
+httplib::Client& SharedClient() {
+    static httplib::Client client = [] {
+        httplib::Client c{BaseUrl()};
+        c.set_connection_timeout(TimeoutSeconds);
+        c.set_read_timeout(TimeoutSeconds);
+        c.set_follow_location(true);
+        c.set_keep_alive(true);
+        return c;
+    }();
+    return client;
+}
+
 httplib::Result Send(const std::string& method, const std::string& path, const std::string& body,
                      const std::string& bearer) {
-    httplib::Client client{BaseUrl()};
-    client.set_connection_timeout(TimeoutSeconds);
-    client.set_read_timeout(TimeoutSeconds);
-    client.set_follow_location(true);
+    static std::mutex client_mutex;
+    std::lock_guard lock{client_mutex};
+    httplib::Client& client = SharedClient();
 
     httplib::Headers headers{{"User-Agent", "citron"}};
     if (!bearer.empty()) {
@@ -644,6 +655,7 @@ Friend ParseFriend(const nlohmann::json& json) {
         const auto decoded = Base64StdDecode(app_field_b64);
         out.app_field = std::string{reinterpret_cast<const char*>(decoded.data()), decoded.size()};
         out.app_id = presence->value("app_id", std::string{});
+        out.app_name = presence->value("app_name", std::string{});
         LOG_DEBUG(WebService, "[OpenPak] ParseFriend pid={} status={} app_field={}", out.pid,
                  out.presence_status, Common::HexToString(decoded, false));
     }
@@ -758,7 +770,8 @@ void PushProfileName(const std::string& name) {
     }
 }
 
-void PushPresence(s32 status, const std::string& app_field, const std::string& app_id) {
+void PushPresence(s32 status, const std::string& app_field, const std::string& app_id,
+                  const std::string& app_name) {
     const std::string token = Common::OpenPakAccount::GetToken();
     if (token.empty()) {
         return;
@@ -773,6 +786,7 @@ void PushPresence(s32 status, const std::string& app_field, const std::string& a
     const std::string body = nlohmann::json{{"status", status},
                                             {"app_field", encoded_app_field},
                                             {"app_id", app_id},
+                                            {"app_name", app_name},
                                             {"app_detail", ""}}
                                  .dump();
     const auto result = Send("POST", "/api/presence", body, token);

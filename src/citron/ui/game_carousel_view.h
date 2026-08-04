@@ -4,20 +4,59 @@
 #include <QPropertyAnimation>
 #include <QWidget>
 #include <QPainter>
+#include <QPixmap>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QVBoxLayout>
 #include <QSpacerItem>
+#include <QHash>
+
+class OpenPakProfileChip;
+class OpenPakStatusCluster;
+class QLabel;
+class QToolButton;
+
+class OpenPakBackdropPicker : public QWidget {
+    Q_OBJECT
+
+public:
+    explicit OpenPakBackdropPicker(QWidget* parent = nullptr);
+
+    void SetScale(qreal scale);
+    void SetCurrent(int index) { m_current = index; update(); }
+    void PopupAt(const QPoint& global_top_left);
+
+signals:
+    void ThemeSelected(int index);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
+private:
+    int RowAt(const QPoint& pos) const;
+
+    int m_current = 0;
+    int m_hover = -1;
+    qreal m_scale = 1.0;
+};
 
 class CinematicCarousel : public QWidget {
     Q_OBJECT
     Q_PROPERTY(qreal focalIndex READ focalIndex WRITE setFocalIndex)
 
 public:
+    enum class BackdropTheme { Gradient, Wave, None };
+
     explicit CinematicCarousel(QWidget* parent = nullptr);
 
     void setModel(QAbstractItemModel* model);
+    void SetBackdropTheme(BackdropTheme theme) { m_backdrop_theme = theme; update(); }
     qreal focalIndex() const { return m_focal_index; }
     void setFocalIndex(qreal index);
 
@@ -34,7 +73,7 @@ public:
 
     void setControllerFocus(bool focus);
     bool hasControllerFocus() const { return m_has_focus; }
-    
+
 public slots:
     void onNavigated(int dx, int dy);
     void onActivated();
@@ -43,6 +82,8 @@ public slots:
 signals:
     void focalItemChanged(const QModelIndex& index);
     void itemActivated(const QModelIndex& index);
+    void ProfileClicked();
+    void BackdropThemeChanged(int theme);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -60,35 +101,49 @@ private:
     void startSnapAnimation(qreal target);
     void updateFocalItem();
     QModelIndex iconAt(const QPoint& point) const;
+    qreal HeroSize() const;
+    qreal Stride() const;
+    QRectF CardGeometry(int index, bool with_bob) const;
+    void DrawBackdrop(QPainter& p, const QRectF& bg_rect) const;
+    void RefreshBackdropCache(const QSize& logical_size);
+    QPixmap RoundedIcon(const QPixmap& source) const;
 
+    BackdropTheme m_backdrop_theme = BackdropTheme::Gradient;
+    QPixmap m_backdrop_cache;
+    QSize m_backdrop_cache_logical_size;
+    qint64 m_backdrop_cache_tick = -1000;
+    QColor m_backdrop_cache_accent;
+    BackdropTheme m_backdrop_cache_theme = BackdropTheme::None;
     QAbstractItemModel* m_model = nullptr;
     qreal m_focal_index = 0.0;
     QPropertyAnimation* m_snap_animation = nullptr;
-    
+
     QTimer* m_pulse_timer = nullptr;
-    QTimer* m_scroll_timer = nullptr;
     qint64 m_pulse_tick = 0;
 
     QPoint m_last_mouse_pos;
     QPoint m_drag_start_pos;
     bool m_is_dragging = false;
 
-    bool m_left_arrow_hover = false;
-    bool m_right_arrow_hover = false;
-    int m_hover_icon_index = -1;
-
     QColor CardBg() const;
     QColor TextColor() const;
     QColor AccentColor() const;
 
     bool m_has_focus = false;
-    
+    OpenPakProfileChip* m_profile_chip = nullptr;
+    OpenPakStatusCluster* m_status_cluster = nullptr;
+    QToolButton* m_backdrop_btn = nullptr;
+    OpenPakBackdropPicker* m_backdrop_picker = nullptr;
+    QLabel* m_top_hint = nullptr;
+    QLabel* m_bottom_hint = nullptr;
+
     // Momentum / Physics members
     QTimer* m_momentum_timer = nullptr;
     qreal m_velocity = 0.0;
     qint64 m_last_move_timestamp = 0;
 
     mutable QMap<QPersistentModelIndex, qreal> m_entry_animations;
+    mutable QHash<qint64, QPixmap> m_rounded_icon_cache;
 };
 
 class GameCarouselView : public QWidget {
@@ -99,7 +154,10 @@ public:
 
     void setModel(QAbstractItemModel* model);
     void ApplyTheme();
-    
+    void SetBackdropTheme(CinematicCarousel::BackdropTheme theme) {
+        m_carousel->SetBackdropTheme(theme);
+    }
+
     CinematicCarousel* view() const { return m_carousel; }
     QAbstractItemModel* model() const { return m_carousel->model(); }
 
@@ -115,13 +173,10 @@ signals:
     void itemActivated(const QModelIndex& index);
     void itemSelectionChanged(const QModelIndex& index);
     void focusReturned();
-
-protected:
-    void resizeEvent(QResizeEvent* event) override;
+    void ProfileClicked();
+    void BackdropThemeChanged(int theme);
 
 private:
     CinematicCarousel* m_carousel = nullptr;
     QVBoxLayout* m_layout = nullptr;
-    QLabel* m_top_hint = nullptr;
-    QLabel* m_bottom_hint = nullptr;
 };

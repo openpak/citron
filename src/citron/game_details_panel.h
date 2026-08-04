@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QModelIndex>
 #include <QPersistentModelIndex>
+#include <QHash>
 
 #include "common/common_types.h"
 
@@ -63,8 +64,11 @@ private:
     QPixmap m_bg_pixmap;
 
     QList<QPushButton*> m_action_buttons;
+    bool m_actions_built = false;
     int m_focused_button_index = -1;
     bool m_has_focus = false;
     QTimer* m_debounce_timer;
     QPersistentModelIndex m_pending_index;
+    QHash<u64, QPixmap> m_icon_cache;
+    QHash<u64, QPixmap> m_bg_cache;
 };

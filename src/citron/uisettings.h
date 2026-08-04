@@ -169,6 +169,9 @@ namespace UISettings {
                                     // 0 = top-right, 1 = top-left, 2 = bottom-right, 3 = bottom-left. See OpenPakToast::Corner.
                                     Setting<int> legacy_notification_corner{linkage, 0, "legacy/notificationCorner", Category::Ui};
 
+                                    // 0 = Gradient, 1 = Wave, 2 = None. See CinematicCarousel::BackdropTheme.
+                                    Setting<int> carousel_backdrop_theme{linkage, 0, "carouselBackdropTheme", Category::Ui};
+
                                     // logging
                                     Setting<bool> show_console{linkage, false, "showConsole", Category::Ui};
 

@@ -233,6 +233,10 @@ struct GPU::Impl {
         gpu_thread.StartThread(*renderer, renderer->Context(), *scheduler);
     }
 
+    void ShutdownThread() {
+        gpu_thread.Stop();
+    }
+
     void NotifyShutdown() {
         std::unique_lock lk{sync_mutex};
         shutting_down.store(true, std::memory_order::relaxed);
@@ -553,6 +557,10 @@ void GPU::Start() {
 
 void GPU::NotifyShutdown() {
     impl->NotifyShutdown();
+}
+
+void GPU::ShutdownThread() {
+    impl->ShutdownThread();
 }
 
 void GPU::ObtainContext() {

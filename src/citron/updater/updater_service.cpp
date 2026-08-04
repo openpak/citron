@@ -152,6 +152,7 @@ void UpdaterService::CheckForUpdates() {
     request.setRawHeader("Accept", QByteArrayLiteral("application/json"));
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setTransferTimeout(30000);
     QNetworkReply* reply = network_manager->get(request);
     current_reply = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply, channel]() {
@@ -205,6 +206,7 @@ void UpdaterService::DownloadAndInstallUpdate(const std::string& download_url) {
     request.setRawHeader("User-Agent", QByteArrayLiteral("Citron-Updater/1.0"));
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setTransferTimeout(30000);
     ConfigureSSLForRequest(request);
     current_reply = network_manager->get(request);
     connect(current_reply, &QNetworkReply::downloadProgress, this,

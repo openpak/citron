@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <cmath>
 #include <QApplication>
 #include <QEasingCurve>
 #include <QPainterPath>
+#include <QLinearGradient>
+#include <QRadialGradient>
 #include <QDateTime>
 #include <QKeyEvent>
 #include <QResizeEvent>
@@ -10,24 +13,151 @@
 #include <QLabel>
 #include <QPropertyAnimation>
 #include <QTimer>
+#include <QToolButton>
 
 #include "citron/ui/game_carousel_view.h"
+#include "citron/ui/legacy_profile_chip.h"
+#include "citron/ui/legacy_status_cluster.h"
 #include "citron/game_list_p.h"
 #include "citron/uisettings.h"
 #include "citron/theme.h"
 #include "citron/custom_metadata.h"
 #include "citron/util/image_cache.h"
 
+namespace {
+constexpr int kBackdropPickerRowH = 40;
+constexpr int kBackdropPickerWidth = 168;
+const QStringList& BackdropOptionLabels() {
+    static const QStringList labels{QObject::tr("Gradient"), QObject::tr("Wave"), QObject::tr("None")};
+    return labels;
+}
+}
+
+OpenPakBackdropPicker::OpenPakBackdropPicker(QWidget* parent) : QWidget(parent) {
+    setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+    setAttribute(Qt::WA_TranslucentBackground);
+    setMouseTracking(true);
+    SetScale(1.0);
+}
+
+void OpenPakBackdropPicker::SetScale(qreal scale) {
+    m_scale = std::clamp(scale, 1.0, 1.6);
+    const int row_h = static_cast<int>(kBackdropPickerRowH * m_scale);
+    setFixedSize(static_cast<int>(kBackdropPickerWidth * m_scale), row_h * BackdropOptionLabels().size() + 8);
+}
+
+void OpenPakBackdropPicker::PopupAt(const QPoint& global_top_left) {
+    move(global_top_left);
+    m_hover = -1;
+    show();
+    // Qt::Popup's implicit "outside click closes it" isn't reliable here — CinematicCarousel
+    // does its own mouse handling (drag-scroll, tile clicks) that can eat the event before Qt's
+    // popup-grab logic sees it. Watch application-wide instead, and close only for a press that
+    // truly lands outside our own rect; a click that came from mousePressEvent (a row, or padding)
+    // stays open per that handler's own logic.
+    qApp->installEventFilter(this);
+}
+
+void OpenPakBackdropPicker::hideEvent(QHideEvent* event) {
+    qApp->removeEventFilter(this);
+    QWidget::hideEvent(event);
+}
+
+bool OpenPakBackdropPicker::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::MouseButtonPress) {
+        auto* mouse_event = static_cast<QMouseEvent*>(event);
+        if (!rect().contains(mapFromGlobal(mouse_event->globalPosition().toPoint()))) {
+            hide();
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+int OpenPakBackdropPicker::RowAt(const QPoint& pos) const {
+    if (pos.x() < 4 || pos.x() >= width() - 4) return -1;
+    const int row_h = static_cast<int>(kBackdropPickerRowH * m_scale);
+    const int row = (pos.y() - 4) / row_h;
+    if (pos.y() < 4 || row < 0 || row >= BackdropOptionLabels().size()) return -1;
+    return row;
+}
+
+void OpenPakBackdropPicker::mouseMoveEvent(QMouseEvent* event) {
+    const int row = RowAt(event->pos());
+    if (row != m_hover) { m_hover = row; update(); }
+}
+
+void OpenPakBackdropPicker::leaveEvent(QEvent*) {
+    m_hover = -1;
+    update();
+}
+
+void OpenPakBackdropPicker::mousePressEvent(QMouseEvent* event) {
+    const int row = RowAt(event->pos());
+    if (row >= 0) {
+        m_current = row;
+        emit ThemeSelected(row);
+        update();
+        return;
+    }
+    // Qt::Popup already closes this on any click outside its own geometry; a press that
+    // lands inside the popup but not on a row (e.g. the padding) shouldn't dismiss it either.
+}
+
+void OpenPakBackdropPicker::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+
+    QPainterPath bg;
+    bg.addRoundedRect(rect().adjusted(0, 0, -1, -1), 12, 12);
+    p.fillPath(bg, QColor(16, 16, 22, 240));
+    p.setPen(QPen(QColor(255, 255, 255, 45), 1.0));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(bg);
+
+    const auto& labels = BackdropOptionLabels();
+    const int row_h = static_cast<int>(kBackdropPickerRowH * m_scale);
+    QFont f = font();
+    f.setPointSizeF(10 * m_scale);
+    p.setFont(f);
+
+    const QColor accent(Theme::GetAccentColor());
+
+    for (int i = 0; i < labels.size(); ++i) {
+        const QRect row(4, 4 + i * row_h, width() - 8, row_h);
+        if (i == m_current) {
+            QPainterPath sel;
+            sel.addRoundedRect(row, 8, 8);
+            QColor sel_fill = accent;
+            sel_fill.setAlpha(60);
+            p.fillPath(sel, sel_fill);
+        } else if (i == m_hover) {
+            QPainterPath hov;
+            hov.addRoundedRect(row, 8, 8);
+            p.fillPath(hov, QColor(255, 255, 255, 18));
+        }
+
+        const int dot_x = row.left() + static_cast<int>(16 * m_scale);
+        p.setPen(Qt::NoPen);
+        p.setBrush(i == m_current ? accent : QColor(255, 255, 255, 70));
+        p.drawEllipse(QPointF(dot_x, row.center().y()), 4 * m_scale, 4 * m_scale);
+
+        p.setPen(i == m_current ? Qt::white : QColor(255, 255, 255, 190));
+        p.drawText(QRect(dot_x + static_cast<int>(14 * m_scale), row.top(),
+                         row.width() - static_cast<int>(30 * m_scale), row.height()),
+                   Qt::AlignVCenter | Qt::AlignLeft, labels[i]);
+    }
+}
+
 CinematicCarousel::CinematicCarousel(QWidget* parent) : QWidget(parent) {
     m_snap_animation = new QPropertyAnimation(this, "focalIndex");
     m_snap_animation->setDuration(350);
     m_snap_animation->setEasingCurve(QEasingCurve::OutCubic);
-    
+
     m_pulse_timer = new QTimer(this);
-    connect(m_pulse_timer, &QTimer::timeout, this, [this]{ 
+    connect(m_pulse_timer, &QTimer::timeout, this, [this]{
         bool needs_update = false;
-        m_pulse_tick++; 
-        if (m_has_focus) needs_update = true; // Pulse effect for focused item
+        m_pulse_tick++;
+        needs_update = true; // idle bob animation runs continuously
 
         // Advance entry animations
         auto it = m_entry_animations.begin();
@@ -45,16 +175,9 @@ CinematicCarousel::CinematicCarousel(QWidget* parent) : QWidget(parent) {
                 it = m_entry_animations.erase(it);
             }
         }
-        if (needs_update) update(); 
+        if (needs_update) update();
     });
     m_pulse_timer->start(32);
-    
-    m_scroll_timer = new QTimer(this);
-    m_scroll_timer->setInterval(16);
-    connect(m_scroll_timer, &QTimer::timeout, this, [this]{
-        if (m_left_arrow_hover) setFocalIndex(m_focal_index - 0.1);
-        else if (m_right_arrow_hover) setFocalIndex(m_focal_index + 0.1);
-    });
 
     setMouseTracking(true);
     setCursor(Qt::ArrowCursor);
@@ -73,6 +196,54 @@ CinematicCarousel::CinematicCarousel(QWidget* parent) : QWidget(parent) {
         setFocalIndex(m_focal_index + m_velocity);
         m_velocity *= 0.92; // Friction factor
     });
+
+    m_profile_chip = new OpenPakProfileChip(this);
+    connect(m_profile_chip, &OpenPakProfileChip::Clicked, this, &CinematicCarousel::ProfileClicked);
+    m_status_cluster = new OpenPakStatusCluster(this);
+
+    m_backdrop_btn = new QToolButton(this);
+    m_backdrop_btn->setText(QStringLiteral("◐"));
+    m_backdrop_btn->setToolTip(tr("Backdrop Theme"));
+    m_backdrop_btn->setCursor(Qt::PointingHandCursor);
+    m_backdrop_btn->setAutoRaise(true);
+    m_backdrop_btn->setStyleSheet(QStringLiteral(
+        "QToolButton {"
+        "  border: 1px solid rgba(255, 255, 255, 60);"
+        "  border-radius: 18px;"
+        "  background: rgba(255, 255, 255, 20);"
+        "  color: white;"
+        "  font-size: 15px;"
+        "}"
+        "QToolButton:hover {"
+        "  background: rgba(255, 255, 255, 45);"
+        "  border-color: rgba(255, 255, 255, 120);"
+        "}"));
+    m_backdrop_picker = new OpenPakBackdropPicker(this);
+    connect(m_backdrop_picker, &OpenPakBackdropPicker::ThemeSelected, this, [this](int index) {
+        const auto theme = static_cast<BackdropTheme>(index);
+        SetBackdropTheme(theme);
+        emit BackdropThemeChanged(index);
+    });
+    connect(m_backdrop_btn, &QToolButton::clicked, this, [this] {
+        m_backdrop_picker->SetCurrent(static_cast<int>(m_backdrop_theme));
+        m_backdrop_picker->PopupAt(m_backdrop_btn->mapToGlobal(QPoint(0, m_backdrop_btn->height() + 6)));
+    });
+
+    m_top_hint = new QLabel(this);
+    m_top_hint->setText(tr("if using controller* Press X for Next Alphabetical Letter | Press -/R/ZR for Details Tab | Press B for Back to List"));
+    m_top_hint->setAlignment(Qt::AlignCenter);
+    m_top_hint->setWordWrap(true);
+
+    m_bottom_hint = new QLabel(this);
+    m_bottom_hint->setText(tr("*You can Drag to Scroll, or Click on Game Icons manually, you can also use your mouse wheel!*"));
+    m_bottom_hint->setAlignment(Qt::AlignCenter);
+    m_bottom_hint->setWordWrap(true);
+
+    m_profile_chip->raise();
+    m_backdrop_btn->raise();
+    m_status_cluster->raise();
+    m_top_hint->raise();
+    m_bottom_hint->raise();
 }
 
 QModelIndex CinematicCarousel::currentIndex() const {
@@ -80,33 +251,47 @@ QModelIndex CinematicCarousel::currentIndex() const {
     return m_model->index(std::round(m_focal_index), 0);
 }
 
+qreal CinematicCarousel::HeroSize() const {
+    const int is = UISettings::values.game_icon_size.GetValue();
+    return is + 60.0;
+}
+
+qreal CinematicCarousel::Stride() const {
+    return HeroSize() + std::clamp(width() * 0.012, 10.0, 22.0);
+}
+
+// The NeXium carousel_view() layout formula: cards fan out from the focal item with distance-based
+// scale/vertical arc, plus a slow idle bob so the whole row feels alive rather than static.
+QRectF CinematicCarousel::CardGeometry(int index, bool with_bob) const {
+    const qreal hero_size = HeroSize();
+    const qreal stride = Stride();
+    const qreal cx0 = width() * 0.32; // off-center like NeXium, so the next games peek in on the right
+    const qreal cy0 = height() / 2.0;
+
+    const qreal diff = index - m_focal_index;
+    const qreal abs_diff = std::abs(diff);
+    const qreal scale = std::max(1.0 - abs_diff * 0.05, 0.82);
+    const qreal sz = hero_size * scale;
+    const qreal cx = cx0 + diff * stride;
+    qreal cy = cy0 + abs_diff * 6.0;
+    if (with_bob) {
+        const qreal t = m_pulse_tick * 0.032;
+        cy += std::sin(t * 1.25 + index * 0.9) * 2.6 * scale;
+    }
+    return QRectF(cx - sz / 2.0, cy - sz / 2.0, sz, sz);
+}
+
 QModelIndex CinematicCarousel::indexAt(const QPoint& point) const {
     if (!m_model) return QModelIndex();
-    const qreal vcx = width() / 2.0;
-    const int is = UISettings::values.game_icon_size.GetValue();
-    const qreal bs = is + 35.0;
-    const qreal th = is * 2.0;
     for (int i = 0; i < m_model->rowCount(); ++i) {
-        const qreal d = i - m_focal_index;
-        qreal x = vcx + (d * bs);
-        const qreal dist = std::abs(d * bs);
-        if (dist < th) x += d * (is / 2.0) * (1.0 - (dist / th));
-        if (std::abs(point.x() - x) < (is * 0.7)) return m_model->index(i, 0);
+        if (CardGeometry(i, false).contains(point)) return m_model->index(i, 0);
     }
     return QModelIndex();
 }
 
 QRect CinematicCarousel::visualRect(const QModelIndex& index) const {
     if (!m_model || !index.isValid()) return QRect();
-    const int i = index.row();
-    const qreal vcx = width() / 2.0; const qreal vcy = height() / 2.0;
-    const int is = UISettings::values.game_icon_size.GetValue();
-    const qreal bs = is + 35.0; const qreal th = is * 2.0;
-    const qreal d = i - m_focal_index; const qreal dist = std::abs(d * bs);
-    qreal s = 1.0; qreal dx = 0.0;
-    if (dist < th) { qreal f = 1.0 - (dist / th); s = 1.0 + (f * 0.40); dx = d * (is / 2.0) * f; }
-    const qreal x = vcx + (d * bs) + dx; const int cs = is + 60;
-    return QRect(x - (cs * s) / 2.0, vcy - (cs * s) / 2.0, cs * s, cs * s);
+    return CardGeometry(index.row(), false).toRect();
 }
 
 void CinematicCarousel::setModel(QAbstractItemModel* model) {
@@ -144,7 +329,20 @@ void CinematicCarousel::scrollToLetter(QChar letter) {
     }
 }
 
-void CinematicCarousel::ApplyTheme() { update(); }
+void CinematicCarousel::ApplyTheme() {
+    const bool dark = Theme::IsDarkMode();
+    if (m_top_hint) {
+        m_top_hint->setStyleSheet(QStringLiteral(
+            "QLabel { color: %1; font-weight: bold; font-family: 'Outfit', 'Inter', sans-serif; font-size: 14px; background: transparent; }"
+        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 140)") : QStringLiteral("rgba(30, 30, 35, 180)")));
+    }
+    if (m_bottom_hint) {
+        m_bottom_hint->setStyleSheet(QStringLiteral(
+            "QLabel { color: %1; font-style: italic; font-size: 13px; background: transparent; }"
+        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 100)") : QStringLiteral("rgba(30, 30, 35, 120)")));
+    }
+    update();
+}
 
 void CinematicCarousel::setControllerFocus(bool focus) { m_has_focus = focus; update(); }
 
@@ -154,153 +352,217 @@ void CinematicCarousel::onActivated() { if (!m_has_focus) return; QModelIndex id
 
 void CinematicCarousel::onCancelled() {}
 
-void CinematicCarousel::paintEvent(QPaintEvent* event) {
-    if (!m_model || m_model->rowCount() == 0) return;
-    QPainter p(this); p.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
-    const int count = m_model->rowCount(); const qreal vcx = width() / 2.0; const qreal vcy = height() / 2.0;
-    const int is = UISettings::values.game_icon_size.GetValue();
-    const float raw_scale = static_cast<float>(is) / 128.0f;
-    const float scale = std::max(0.1f, raw_scale);
-    const qreal bs = is + (35.0f * scale);
-    const qreal arrow_ay = std::max(80.0 * scale, vcy - (1.4 * ((is + static_cast<int>(25 * scale)) / 2.0)) - (28.0f * scale));
+// Ported from nexium-live's draw_gradient_backdrop()/draw_wave_background().
+void CinematicCarousel::DrawBackdrop(QPainter& p, const QRectF& bg_rect) const {
+    p.fillRect(bg_rect, CardBg());
+    if (m_backdrop_theme == BackdropTheme::None) {
+        return;
+    }
 
-    // Only sort and render items near the focal index to save CPU cycles
+    const QColor acc = AccentColor();
+    if (m_backdrop_theme == BackdropTheme::Gradient) {
+        const qreal top_y = bg_rect.top();
+        const qreal bot_y = bg_rect.bottom();
+        constexpr int kCols = 96;
+        const qreal col_w = bg_rect.width() / kCols;
+        for (int c = 0; c < kCols; ++c) {
+            const qreal nx = (c + 0.5) / kCols;
+            const qreal x = bg_rect.left() + nx * bg_rect.width();
+            const qreal d = std::abs(nx - 0.5) * 2.0;
+            const qreal horiz = std::max(1.0 - d * d, 0.0);
+            const int bottom_alpha = static_cast<int>(std::clamp(225.0 * horiz, 0.0, 255.0));
+
+            QLinearGradient col_grad(QPointF(x, top_y), QPointF(x, bot_y));
+            QColor top_col = acc; top_col.setAlpha(0);
+            QColor mid_col = acc; mid_col.setAlpha(static_cast<int>(bottom_alpha * 0.22));
+            QColor bot_col = acc; bot_col.setAlpha(bottom_alpha);
+            col_grad.setColorAt(0.0, top_col);
+            col_grad.setColorAt(0.45, mid_col);
+            col_grad.setColorAt(1.0, bot_col);
+            p.fillRect(QRectF(x - col_w / 2.0 - 0.5, top_y, col_w + 1.0, bot_y - top_y), col_grad);
+        }
+        return;
+    }
+
+    QColor wash = acc;
+    wash.setAlpha(14);
+    p.fillRect(bg_rect, wash);
+
+    struct WaveBand { qreal base_frac, amp_frac, phase_off, speed, shade; int alpha; };
+    static constexpr WaveBand kBands[] = {
+        {0.50, 0.05, 0.0, 1.5, 0.25, 60},
+        {0.36, 0.07, 1.1, 1.2, -0.30, 50},
+        {0.62, 0.035, 2.3, 0.9, 0.45, 42},
+        {0.24, 0.09, 0.6, 1.7, -0.40, 34},
+        {0.10, 0.045, 4.0, 0.6, 0.55, 22},
+    };
+    const qreal t = m_pulse_tick * 0.032;
+    const auto shade = [](QColor c, qreal f) {
+        const auto adj = [f](int v) {
+            return f >= 0.0 ? static_cast<int>(v + (255 - v) * f) : static_cast<int>(v * (1.0 + f));
+        };
+        return QColor(adj(c.red()), adj(c.green()), adj(c.blue()));
+    };
+    constexpr int kSteps = 48;
+    for (const auto& band : kBands) {
+        const qreal base_y = bg_rect.top() + bg_rect.height() * band.base_frac;
+        const qreal amp = bg_rect.height() * band.amp_frac;
+        const qreal ph = t * band.speed + band.phase_off;
+
+        QPainterPath fill;
+        fill.moveTo(bg_rect.left(), bg_rect.bottom());
+        for (int s = 0; s <= kSteps; ++s) {
+            const qreal nx = static_cast<qreal>(s) / kSteps;
+            const qreal x = bg_rect.left() + nx * bg_rect.width();
+            const qreal y = base_y + std::sin(nx * 2 * M_PI + ph) * amp +
+                           std::cos(nx * 2 * M_PI * 1.7 + ph * 0.8) * amp * 0.4;
+            fill.lineTo(x, y);
+        }
+        fill.lineTo(bg_rect.right(), bg_rect.bottom());
+        fill.closeSubpath();
+
+        QColor band_color = shade(acc, band.shade);
+        band_color.setAlpha(band.alpha);
+        p.fillPath(fill, band_color);
+    }
+}
+
+void CinematicCarousel::RefreshBackdropCache(const QSize& logical_size) {
+    if (logical_size.isEmpty()) return;
+    constexpr qreal kMaxDim = 420.0;
+    const qreal scale = std::min(1.0, kMaxDim / std::max(logical_size.width(), logical_size.height()));
+    QSize render_size(std::max(32, static_cast<int>(logical_size.width() * scale)),
+                      std::max(32, static_cast<int>(logical_size.height() * scale)));
+
+    m_backdrop_cache = QPixmap(render_size);
+    m_backdrop_cache.fill(Qt::transparent);
+    QPainter cp(&m_backdrop_cache);
+    cp.setRenderHint(QPainter::Antialiasing);
+    DrawBackdrop(cp, QRectF(QPointF(0, 0), render_size));
+    m_backdrop_cache_logical_size = logical_size;
+    m_backdrop_cache_tick = m_pulse_tick;
+    m_backdrop_cache_accent = AccentColor();
+    m_backdrop_cache_theme = m_backdrop_theme;
+}
+
+void CinematicCarousel::paintEvent(QPaintEvent* event) {
+    QPainter p(this);
+    p.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
+
+    const QRectF bg_rect = rect();
+    const QColor acc = AccentColor();
+
+    const bool animated = m_backdrop_theme == BackdropTheme::Wave;
+    const qint64 stale_after = animated ? 1 : 1000000;
+    if (m_backdrop_cache_logical_size != bg_rect.size().toSize() || m_backdrop_cache_accent != acc ||
+        m_backdrop_cache_theme != m_backdrop_theme || m_pulse_tick - m_backdrop_cache_tick >= stale_after) {
+        RefreshBackdropCache(bg_rect.size().toSize());
+    }
+    p.drawPixmap(bg_rect, m_backdrop_cache, m_backdrop_cache.rect());
+
+    if (!m_model || m_model->rowCount() == 0) return;
+
+    const int count = m_model->rowCount();
+    const qreal stride = Stride();
+    const qreal cull_max = std::max(((width() / 2.0) / stride) + 1.6, 4.6);
+    const qreal fade_start = cull_max - 1.6;
+
     const int focal_idx = std::round(m_focal_index);
-    const int range = std::max(5, static_cast<int>((width() / bs) + 2));
+    const int range = std::max(5, static_cast<int>(cull_max) + 1);
     const int start_idx = std::max(0, focal_idx - range);
     const int end_idx = std::min(count - 1, focal_idx + range);
 
     QVector<int> order;
     for (int i = start_idx; i <= end_idx; ++i) order << i;
     std::sort(order.begin(), order.end(), [this](int a, int b) { return std::abs(a - m_focal_index) > std::abs(b - m_focal_index); });
-    for (int i : order) {
-        const qreal d = i - m_focal_index; const qreal dist = std::abs(d * bs);
-        if (dist > width() / 2.0 + bs) continue;
-        qreal s = 1.0; qreal dx = 0.0;
-        const qreal x = vcx + (d * bs) + dx; const qreal y = vcy;
-        p.save(); p.translate(x, y);
 
-        // Apply Entry Animation (discovery "pop" effect)
+    for (int i : order) {
+        const qreal diff = i - m_focal_index;
+        const qreal abs_diff = std::abs(diff);
+        if (abs_diff > cull_max) continue;
+
+        qreal alpha = std::clamp(1.0 - abs_diff * 0.03, 0.0, 1.0);
+        if (abs_diff > fade_start) {
+            alpha *= std::clamp((cull_max - abs_diff) / (cull_max - fade_start), 0.0, 1.0);
+        }
+
         qreal entry_anim = 1.0;
         QPersistentModelIndex pidx(m_model->index(i, 0));
-        if (m_entry_animations.contains(pidx)) {
-            entry_anim = m_entry_animations[pidx];
-        }
+        if (m_entry_animations.contains(pidx)) entry_anim = m_entry_animations[pidx];
+        alpha *= entry_anim;
+        if (alpha <= 0.005) continue;
+
+        const bool focal = (i == focal_idx);
+        QRectF card = CardGeometry(i, !focal); // freeze the selected card so its ring doesn't jitter
         if (entry_anim < 1.0) {
-            qreal pop_s = 0.7 + (entry_anim * 0.3);
-            p.scale(pop_s, pop_s);
-            p.setOpacity(entry_anim);
+            const qreal pop_s = 0.7 + entry_anim * 0.3;
+            const QPointF c = card.center();
+            card = QRectF(0, 0, card.width() * pop_s, card.height() * pop_s);
+            card.moveCenter(c);
         }
 
-        p.scale(s, s);
-        const int cs_w = is + static_cast<int>(25 * scale); 
-        const int cs_h = is + static_cast<int>(25 * scale);
-        QRectF cr(-cs_w / 2.0, -cs_h / 2.0, cs_w, cs_h);
-        QPainterPath path; path.addRoundedRect(cr, 16 * scale, 16 * scale);
-        const bool focal = std::abs(i - m_focal_index) < 0.5;
+        p.save();
+        QPainterPath shadow;
+        shadow.addRoundedRect(card.translated(0, 6), 14, 14);
+        p.fillPath(shadow, QColor(0, 0, 0, static_cast<int>(120 * alpha)));
+
         if (focal) {
-            p.save(); QColor acc = AccentColor(); qreal pulse = (std::sin(m_pulse_tick * 0.1) + 1.0) / 2.0;
-            if (m_has_focus) { p.setPen(QPen(acc, (4.5f + pulse * 1.5f) * scale)); acc.setAlphaF(static_cast<float>(0.12 + pulse * 0.08)); p.setBrush(acc); }
-            else { acc.setAlphaF(0.4f); p.setPen(QPen(acc, 3.0f * scale)); p.setBrush(Qt::NoBrush); }
-            p.drawPath(path); p.restore();
+            QPainterPath outer;
+            outer.addRoundedRect(card.adjusted(-8, -8, 8, 8), 16, 16);
+            QColor outer_col = acc;
+            outer_col.setAlphaF(static_cast<float>((m_has_focus ? 0.18 : 0.16) * alpha));
+            p.fillPath(outer, outer_col);
 
-            // 1. Determine Section Boundary & Header Drawing
-            bool draw_header = (i == 0);
-            int type = m_model->index(i, 0).data(GameListItem::TypeRole).toInt();
-            int prev_type = (i > 0) ? m_model->index(i - 1, 0).data(GameListItem::TypeRole).toInt() : -1;
-            bool is_fav = (type == static_cast<int>(GameListItemType::Favorites));
-            bool was_fav = (prev_type == static_cast<int>(GameListItemType::Favorites));
-
-            if (i > 0) {
-                if (is_fav != was_fav) {
-                    draw_header = true;
-                } else if (!is_fav) {
-                    QString t1 = m_model->index(i, 0).data(Qt::DisplayRole).toString();
-                    QString t2 = m_model->index(i - 1, 0).data(Qt::DisplayRole).toString();
-                    if (t1.isEmpty() || t2.isEmpty() || t1[0].toUpper() != t2[0].toUpper()) draw_header = true;
-                }
-            }
-
-            if (draw_header) {
-                p.save(); p.resetTransform(); p.setPen(acc); p.setOpacity(Theme::IsDarkMode() ? 0.9 : 1.0);
-                qreal header_ay = arrow_ay - (15.0f * scale);
-                
-                if (is_fav) {
-                    qreal fs = std::min(24.0f * scale, static_cast<float>(header_ay * 0.7f));
-                    QFont hf = font(); hf.setBold(true); hf.setPointSizeF(std::max(qreal(1.0), fs)); p.setFont(hf);
-                    QRectF text_rect(x - 300 * scale, 5 * scale, 600 * scale, header_ay - (10.0f * scale));
-                    p.drawText(text_rect, Qt::AlignHCenter | Qt::AlignBottom, tr("★ FAVORITES"));
-                } else {
-                    QString title = m_model->index(i, 0).data(Qt::DisplayRole).toString();
-                    QChar cl = title.isEmpty() ? QLatin1Char('#') : title[0].toUpper();
-                    if (!cl.isLetter()) cl = QLatin1Char('#');
-                    qreal fs = std::min(48.0f * scale, static_cast<float>(header_ay * 0.7f));
-                    QFont hf = font(); hf.setBold(true); hf.setPointSizeF(std::max(qreal(1.0), fs)); p.setFont(hf);
-                    QRectF text_rect(x - 200 * scale, 5 * scale, 400 * scale, header_ay - (10.0f * scale));
-                    p.drawText(text_rect, Qt::AlignHCenter | Qt::AlignBottom, cl);
-                }
-                p.restore();
-            }
-
-            if (i > 0 && was_fav && !is_fav) {
-                p.save(); p.setOpacity(0.4); p.setPen(QPen(acc, 2.5f * scale));
-                qreal dx_line = -bs / 2.0;
-                p.drawLine(QPointF(dx_line, -cs_h / 1.5), QPointF(dx_line, cs_h / 1.5));
-                p.restore();
-            }
+            QPainterPath ring;
+            ring.addRoundedRect(card.adjusted(-3, -3, 3, 3), 14, 14);
+            QColor ring_col = acc;
+            ring_col.setAlphaF(static_cast<float>((m_has_focus ? 0.85 : 0.4) * alpha));
+            p.setPen(QPen(ring_col, m_has_focus ? 5.0 : 3.0));
+            p.setBrush(Qt::NoBrush);
+            p.drawPath(ring);
         }
-        if (!focal) { p.setPen(Qt::NoPen); p.setBrush(CardBg()); p.setOpacity(0.85); p.drawPath(path); }
+
+        p.setOpacity(alpha);
+
         QModelIndex idx = m_model->index(i, 0);
         u64 program_id = idx.data(GameListItemPath::ProgramIdRole).toULongLong();
-        
-        // Priority 1: Direct High-Res from Disk (Cached)
         QPixmap pix = Citron::ImageCache::GetCustomIcon(program_id);
-
-        // Priority 2: Model fallback
-        if (pix.isNull()) {
-            pix = idx.data(GameListItemPath::HighResIconRole).value<QPixmap>();
-        }
-        if (pix.isNull()) {
-            pix = idx.data(Qt::DecorationRole).value<QPixmap>();
-        }
+        if (pix.isNull()) pix = idx.data(GameListItemPath::HighResIconRole).value<QPixmap>();
+        if (pix.isNull()) pix = idx.data(Qt::DecorationRole).value<QPixmap>();
         if (!pix.isNull()) {
-            p.setOpacity(focal ? 1.0 : 0.85);
-            const int pad = 10; QRectF ir(-is / 2.0 + pad / 2.0, -is / 2.0 + pad / 2.0, is - pad, is - pad);
-            QPainterPath ip; ip.addRoundedRect(ir, 12, 12);
-            p.save(); p.setClipPath(ip); p.drawPixmap(ir, pix, pix.rect()); p.restore();
-            p.setPen(QPen(Theme::IsDarkMode() ? QColor(255, 255, 255, 30) : QColor(0, 0, 0, 15), 1.0)); p.drawPath(ip);
+            const QPixmap rounded = RoundedIcon(pix);
+            p.drawPixmap(card, rounded, rounded.rect());
+        } else {
+            QPainterPath clip;
+            clip.addRoundedRect(card, 14, 14);
+            p.setClipPath(clip);
+            p.fillRect(card, CardBg().lighter(130));
+            p.setClipping(false);
         }
         p.restore();
-    }
 
-    p.save(); QColor acc = AccentColor(); p.setPen(acc); p.setOpacity(0.9);
-    qreal arr_size = 12.0f * scale;
-    QPainterPath static_arr; static_arr.moveTo(vcx, arrow_ay); 
-    static_arr.lineTo(vcx - arr_size, arrow_ay - arr_size); 
-    static_arr.lineTo(vcx + arr_size, arrow_ay - arr_size); 
-    static_arr.closeSubpath();
-    p.drawPath(static_arr); p.restore();
-    const int aw = 60, ah = 60;
-    auto drawArrow = [&](bool left, bool hover) {
-        int ax = left ? 40 : static_cast<int>(width()) - 40 - aw;
-        int arrow_y = static_cast<int>(height() - ah) / 2;
-        p.save(); p.setOpacity(hover ? 1.0 : 0.4);
-        p.setPen(Qt::NoPen); p.setBrush(Theme::IsDarkMode() ? QColor(0,0,0,115) : QColor(0,0,0,15));
-        p.drawEllipse(ax, arrow_y, aw, ah);
-        p.setPen(QPen(Theme::IsDarkMode() ? Qt::white : QColor(30, 30, 30), 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.setBrush(Qt::NoBrush);
-        QPainterPath ap;
-        if (left) { ap.moveTo(ax + aw * 0.65, arrow_y + ah * 0.25); ap.lineTo(ax + aw * 0.35, arrow_y + ah * 0.5); ap.lineTo(ax + aw * 0.65, arrow_y + ah * 0.75); }
-        else { ap.moveTo(ax + aw * 0.35, arrow_y + ah * 0.25); ap.lineTo(ax + aw * 0.65, arrow_y + ah * 0.5); ap.lineTo(ax + aw * 0.35, arrow_y + ah * 0.75); }
-        p.drawPath(ap); p.restore();
-    };
-    drawArrow(true, m_left_arrow_hover); drawArrow(false, m_right_arrow_hover);
+        if (focal) {
+            p.save();
+            p.setOpacity(alpha);
+            QFont title_font = font();
+            title_font.setBold(true);
+            title_font.setPointSizeF(title_font.pointSizeF() + 4);
+            p.setFont(title_font);
+            p.setPen(TextColor());
+            const QRectF title_rect(card.left() - 80, card.bottom() + 12, card.width() + 160, 36);
+            const QString title = idx.data(Qt::DisplayRole).toString();
+            p.drawText(title_rect, Qt::AlignHCenter | Qt::AlignTop,
+                       QFontMetrics(title_font).elidedText(title, Qt::ElideRight,
+                                                            static_cast<int>(title_rect.width())));
+            p.restore();
+        }
+    }
 }
 
 void CinematicCarousel::mousePressEvent(QMouseEvent* event) {
-    if (m_left_arrow_hover || m_right_arrow_hover) { m_scroll_timer->start(); return; }
     if (m_snap_animation->state() == QAbstractAnimation::Running) m_snap_animation->stop();
     if (m_momentum_timer->isActive()) m_momentum_timer->stop();
-    
+
     if (event->button() == Qt::LeftButton) {
         m_last_mouse_pos = event->pos(); m_drag_start_pos = event->pos(); m_is_dragging = true;
         m_velocity = 0.0;
@@ -310,27 +572,15 @@ void CinematicCarousel::mousePressEvent(QMouseEvent* event) {
 
 void CinematicCarousel::mouseMoveEvent(QMouseEvent* event) {
     const QPoint pt = event->pos();
-    if (!rect().contains(pt)) {
-        if (m_left_arrow_hover || m_right_arrow_hover || m_hover_icon_index != -1) {
-            m_left_arrow_hover = false; m_right_arrow_hover = false; m_hover_icon_index = -1; update();
-        }
-        return;
-    }
-    bool left = pt.x() < 120 && std::abs(pt.y() - height()/2) < 180;
-    bool right = pt.x() > width() - 120 && std::abs(pt.y() - height()/2) < 180;
-    if (left != m_left_arrow_hover || right != m_right_arrow_hover) {
-        m_left_arrow_hover = left; m_right_arrow_hover = right; update();
-    }
     if (!m_is_dragging) return;
     qint64 now = QDateTime::currentMSecsSinceEpoch();
     qint64 dt = now - m_last_move_timestamp;
-    
+
     qreal dx = m_last_mouse_pos.x() - pt.x();
-    qreal delta_index = (dx / (UISettings::values.game_icon_size.GetValue() + 35.0));
-    
+    qreal delta_index = dx / Stride();
+
     if (dt > 0) {
-        // Instantaneous velocity (index change per frame)
-        m_velocity = (delta_index / static_cast<qreal>(dt)) * 16.0; 
+        m_velocity = (delta_index / static_cast<qreal>(dt)) * 16.0;
     }
 
     setFocalIndex(m_focal_index + delta_index);
@@ -339,14 +589,14 @@ void CinematicCarousel::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void CinematicCarousel::mouseReleaseEvent(QMouseEvent* event) {
-    m_scroll_timer->stop(); m_is_dragging = false;
+    m_is_dragging = false;
 
     // Handle standard click
-    if ((event->pos() - m_drag_start_pos).manhattanLength() < 15) { 
-        QModelIndex idx = indexAt(event->pos()); 
-        if (idx.isValid()) { startSnapAnimation(idx.row()); return; } 
+    if ((event->pos() - m_drag_start_pos).manhattanLength() < 15) {
+        QModelIndex idx = indexAt(event->pos());
+        if (idx.isValid()) { startSnapAnimation(idx.row()); return; }
     }
-    
+
     // Begin momentum glide if velocity is significant
     if (std::abs(m_velocity) > 0.05) {
         m_momentum_timer->start();
@@ -360,17 +610,7 @@ void CinematicCarousel::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 QModelIndex CinematicCarousel::iconAt(const QPoint& pt) const {
-    const qreal vcx = width() / 2.0; const qreal vcy = height() / 2.0; const int is = UISettings::values.game_icon_size.GetValue();
-    const qreal bs = is + 35.0; const qreal th = is * 2.0;
-    for (int i = 0; i < m_model->rowCount(); ++i) {
-        const qreal d = i - m_focal_index; const qreal dist = std::abs(d * bs);
-        qreal s = 1.0; qreal dx = 0.0;
-        if (dist < th) { qreal f = 1.0 - (dist / th); s = 1.0 + (f * 0.40); dx = d * (is / 2.0) * f; }
-        const qreal x = vcx + (d * bs) + dx; const qreal fis = is * s;
-        QRectF ir(x - fis / 2.0, vcy - fis / 2.0, fis, fis);
-        if (ir.contains(pt)) return m_model->index(i, 0);
-    }
-    return QModelIndex();
+    return indexAt(pt);
 }
 
 void CinematicCarousel::keyPressEvent(QKeyEvent* event) {
@@ -400,25 +640,61 @@ void CinematicCarousel::keyPressEvent(QKeyEvent* event) {
 
 void CinematicCarousel::wheelEvent(QWheelEvent* event) { const int d = event->angleDelta().x() != 0 ? event->angleDelta().x() : event->angleDelta().y(); setFocalIndex(m_focal_index - (d / 120.0)); startSnapAnimation(std::round(m_focal_index)); }
 
-void CinematicCarousel::resizeEvent(QResizeEvent* event) { QWidget::resizeEvent(event); update(); }
+void CinematicCarousel::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    const qreal top_s = std::clamp(height() / 820.0, 1.0, 2.4);
+    if (m_profile_chip) {
+        m_profile_chip->SetScale(top_s);
+        m_profile_chip->move(static_cast<int>(18 * top_s), static_cast<int>(14 * top_s));
+    }
+    if (m_backdrop_btn) {
+        const int d = static_cast<int>(36 * top_s);
+        m_backdrop_btn->setFixedSize(d, d);
+        QFont f = m_backdrop_btn->font();
+        f.setPointSizeF(11 * top_s);
+        m_backdrop_btn->setFont(f);
+        const int x = m_profile_chip ? m_profile_chip->x() + m_profile_chip->width() + static_cast<int>(10 * top_s)
+                                     : static_cast<int>(18 * top_s);
+        const int y = m_profile_chip ? m_profile_chip->y() + (m_profile_chip->height() - d) / 2
+                                     : static_cast<int>(14 * top_s);
+        m_backdrop_btn->move(x, y);
+    }
+    if (m_backdrop_picker) {
+        m_backdrop_picker->SetScale(top_s);
+    }
+    if (m_status_cluster) {
+        m_status_cluster->SetScale(top_s);
+        m_status_cluster->move(width() - m_status_cluster->width() - static_cast<int>(18 * top_s),
+                               static_cast<int>(14 * top_s));
+    }
+    if (m_top_hint) {
+        const int hint_y = m_profile_chip ? m_profile_chip->y() + m_profile_chip->height() + 6 : 8;
+        m_top_hint->setGeometry(60, hint_y, std::max(0, width() - 120), 34);
+    }
+    if (m_bottom_hint) {
+        const int hint_h = 22;
+        m_bottom_hint->setGeometry(40, std::max(0, height() - hint_h - 16), std::max(0, width() - 80), hint_h);
+    }
+    update();
+}
 
 void CinematicCarousel::startSnapAnimation(qreal target) { m_snap_animation->stop(); m_snap_animation->setStartValue(m_focal_index); m_snap_animation->setEndValue(target); m_snap_animation->start(); }
 
 void CinematicCarousel::updateFocalItem() { if (!m_model) return; int idx = std::round(m_focal_index); if (idx >= 0 && idx < m_model->rowCount()) emit focalItemChanged(m_model->index(idx, 0)); }
 
-void CinematicCarousel::focusOutEvent(QFocusEvent* event) { m_is_dragging = false; m_scroll_timer->stop(); update(); QWidget::focusOutEvent(event); }
-void CinematicCarousel::leaveEvent(QEvent* event) { m_is_dragging = false; m_left_arrow_hover = false; m_right_arrow_hover = false; m_hover_icon_index = -1; update(); QWidget::leaveEvent(event); }
+void CinematicCarousel::focusOutEvent(QFocusEvent* event) { m_is_dragging = false; update(); QWidget::focusOutEvent(event); }
+void CinematicCarousel::leaveEvent(QEvent* event) { m_is_dragging = false; update(); QWidget::leaveEvent(event); }
 
 
-QColor CinematicCarousel::CardBg() const { 
-    return Theme::IsDarkMode() ? QColor(25, 25, 28, 205) : QColor(240, 240, 245, 180); 
+QColor CinematicCarousel::CardBg() const {
+    return Theme::IsDarkMode() ? QColor(18, 20, 26) : QColor(240, 240, 245);
 }
-QColor CinematicCarousel::TextColor() const { 
-    return Theme::IsDarkMode() ? QColor(255, 255, 255) : QColor(45, 45, 48); 
+QColor CinematicCarousel::TextColor() const {
+    return Theme::IsDarkMode() ? QColor(255, 255, 255) : QColor(45, 45, 48);
 }
-QColor CinematicCarousel::AccentColor() const { 
-    const QString h = QString::fromStdString(UISettings::values.accent_color.GetValue()); 
-    QColor acc = QColor(h).isValid() ? QColor(h) : QColor(0, 150, 255); 
+QColor CinematicCarousel::AccentColor() const {
+    const QString h = QString::fromStdString(UISettings::values.accent_color.GetValue());
+    QColor acc = QColor(h).isValid() ? QColor(h) : QColor(0, 150, 255);
     if (!Theme::IsDarkMode() && acc.lightnessF() > 0.6) {
         acc.setHslF(acc.hslHueF(), acc.hslSaturationF(), 0.5);
     } else if (Theme::IsDarkMode() && acc.lightnessF() < 0.4) {
@@ -427,49 +703,47 @@ QColor CinematicCarousel::AccentColor() const {
     return acc;
 }
 
+QPixmap CinematicCarousel::RoundedIcon(const QPixmap& source) const {
+    const qint64 key = source.cacheKey();
+    auto it = m_rounded_icon_cache.find(key);
+    if (it != m_rounded_icon_cache.end()) {
+        return it.value();
+    }
+    if (m_rounded_icon_cache.size() > 256) {
+        m_rounded_icon_cache.clear();
+    }
+
+    QPixmap rounded(source.size());
+    rounded.fill(Qt::transparent);
+    QPainter rp(&rounded);
+    rp.setRenderHint(QPainter::Antialiasing);
+    const qreal radius = source.width() * 0.078;
+    QPainterPath clip;
+    clip.addRoundedRect(QRectF(0, 0, source.width(), source.height()), radius, radius);
+    rp.setClipPath(clip);
+    rp.drawPixmap(0, 0, source);
+    rp.end();
+
+    m_rounded_icon_cache.insert(key, rounded);
+    return rounded;
+}
+
 GameCarouselView::GameCarouselView(QWidget* parent) : QWidget(parent) {
     m_layout = new QVBoxLayout(this);
-    m_layout->setContentsMargins(30, 20, 30, 20);
+    m_layout->setContentsMargins(0, 0, 0, 0);
     m_layout->setSpacing(0);
-    m_top_hint = new QLabel(this);
-    m_top_hint->setText(tr("if using controller* Press X for Next Alphabetical Letter | Press -/R/ZR for Details Tab | Press B for Back to List"));
-    m_top_hint->setAlignment(Qt::AlignCenter);
-    m_top_hint->setWordWrap(true);
-    m_layout->addSpacing(20);
-    m_layout->addWidget(m_top_hint);
-    m_layout->addSpacing(40);
+
     m_carousel = new CinematicCarousel(this);
-    m_layout->addSpacerItem(new QSpacerItem(20, 20, QSizePolicy::Minimum, QSizePolicy::Expanding));
-    m_layout->addWidget(m_carousel);
-    m_layout->addSpacerItem(new QSpacerItem(20, 20, QSizePolicy::Minimum, QSizePolicy::Expanding));
-    m_bottom_hint = new QLabel(this);
-    m_bottom_hint->setText(tr("*You can Drag to Scroll, or Click on Game Icons manually, you can also use your mouse wheel!*"));
-    m_bottom_hint->setAlignment(Qt::AlignCenter);
-    m_bottom_hint->setWordWrap(true);
-    m_layout->addWidget(m_bottom_hint);
+    m_carousel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_layout->addWidget(m_carousel, 1);
+
     connect(m_carousel, &CinematicCarousel::focalItemChanged, this, &GameCarouselView::itemSelectionChanged);
     connect(m_carousel, &CinematicCarousel::itemActivated, this, &GameCarouselView::itemActivated);
+    connect(m_carousel, &CinematicCarousel::ProfileClicked, this, &GameCarouselView::ProfileClicked);
+    connect(m_carousel, &CinematicCarousel::BackdropThemeChanged, this, &GameCarouselView::BackdropThemeChanged);
     ApplyTheme();
 }
 
-void GameCarouselView::ApplyTheme() { 
-    m_carousel->ApplyTheme(); 
-    bool dark = Theme::IsDarkMode();
-    if (m_top_hint) {
-        m_top_hint->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-weight: bold; font-family: 'Outfit', 'Inter', sans-serif; font-size: 14px; }"
-        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 140)") : QStringLiteral("rgba(30, 30, 35, 180)")));
-    }
-    if (m_bottom_hint) {
-        m_bottom_hint->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-style: italic; font-size: 13px; }"
-        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 100)") : QStringLiteral("rgba(30, 30, 35, 120)")));
-    }
-}
+void GameCarouselView::ApplyTheme() { m_carousel->ApplyTheme(); }
+
 void GameCarouselView::setModel(QAbstractItemModel* model) { m_carousel->setModel(model); }
-void GameCarouselView::resizeEvent(QResizeEvent* event) { 
-    QWidget::resizeEvent(event); 
-    int is = UISettings::values.game_icon_size.GetValue();
-    int min_h = std::min(static_cast<int>(is * 2.0 + 300), height() - 50);
-    m_carousel->setMinimumHeight(std::max(400, min_h)); 
-}

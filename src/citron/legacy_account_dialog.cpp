@@ -679,7 +679,8 @@ void OpenPakAccountDialog::RefreshFriends() {
 
                 for (const auto& entry : list.friends) {
                     const QString game =
-                        controller ? controller->ResolveGameName(entry.app_id) : QString{};
+                        controller ? controller->ResolveGameName(entry.app_id, entry.app_name)
+                                   : QString{};
                     friends_model->appendRow(new OpenPakFriendItem(
                         entry.pid, QString::fromStdString(entry.name),
                         QString::fromStdString(entry.friend_code), entry.presence_status, game,
