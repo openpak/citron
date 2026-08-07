@@ -6,6 +6,12 @@
 #include <filesystem>
 #include <vector>
 
+#ifdef _WIN32
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#endif
+
 #include <fmt/format.h>
 
 #include "citron/legacy_compatible_titles.h"
@@ -29,6 +35,11 @@ namespace OpenPak::SaveSync {
 
 namespace {
 
+#if defined(CITRON_ENABLE_LIBARCHIVE) || defined(_WIN32)
+
+// Only ever called from the real-backend paths below (libarchive, or the Windows PowerShell
+// fallback) -- kept inside this guard so an unused-function error doesn't fire on builds with
+// neither (e.g. a non-Windows build without libarchive).
 bool IsEligible(u64 title_id) {
     return OpenPak::CompatibleTitles::Table().count(title_id) != 0 &&
           Common::OpenPakAccount::IsLinked();
@@ -48,6 +59,8 @@ bool HasLocalContent(const FileSys::VirtualDir& dir) {
     }
     return false;
 }
+
+#endif // CITRON_ENABLE_LIBARCHIVE || _WIN32
 
 #ifdef CITRON_ENABLE_LIBARCHIVE
 
@@ -146,10 +159,61 @@ bool UnzipToDirectory(std::span<const u8> zip_data, const std::filesystem::path&
 
 #endif // CITRON_ENABLE_LIBARCHIVE
 
+#if !defined(CITRON_ENABLE_LIBARCHIVE) && defined(_WIN32)
+
+// No libarchive available for this target (e.g. the llvm-mingw cross-compiled Windows build has
+// no mingw port of it wired up). GetFullPath() on a save directory is always a real path on
+// disk, so shell out to PowerShell's Compress-Archive/Expand-Archive against it directly --
+// the same fallback idiom GMainWindow::ExtractZipToDirectory already uses for firmware zips.
+
+std::vector<u8> ZipDirectoryPowerShell(const FileSys::VirtualDir& dir, u64 title_id) {
+    const std::filesystem::path real_dir = dir->GetFullPath();
+    const std::filesystem::path tmp_zip =
+        std::filesystem::temp_directory_path() / fmt::format("legacy_save_{:016x}.zip", title_id);
+    std::filesystem::remove(tmp_zip);
+
+    const std::string cmd = "powershell -NoProfile -NonInteractive -Command \"Compress-Archive -Path \\\"" +
+                             real_dir.string() + "\\*\\\" -DestinationPath \\\"" + tmp_zip.string() +
+                             "\\\" -Force\"";
+    if (std::system(cmd.c_str()) != 0) {
+        std::filesystem::remove(tmp_zip);
+        return {};
+    }
+
+    std::ifstream in(tmp_zip, std::ios::binary);
+    std::vector<u8> out((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::filesystem::remove(tmp_zip);
+    return out;
+}
+
+bool UnzipToDirectoryPowerShell(std::span<const u8> zip_data, const std::filesystem::path& dest,
+                                 u64 title_id) {
+    std::filesystem::create_directories(dest);
+    const std::filesystem::path tmp_zip = std::filesystem::temp_directory_path() /
+                                           fmt::format("legacy_save_in_{:016x}.zip", title_id);
+    {
+        std::ofstream out(tmp_zip, std::ios::binary);
+        if (!out) {
+            return false;
+        }
+        out.write(reinterpret_cast<const char*>(zip_data.data()),
+                  static_cast<std::streamsize>(zip_data.size()));
+    }
+
+    const std::string cmd = "powershell -NoProfile -NonInteractive -Command \"Expand-Archive -Path \\\"" +
+                             tmp_zip.string() + "\\\" -DestinationPath \\\"" + dest.string() +
+                             "\\\" -Force\"";
+    const bool ok = std::system(cmd.c_str()) == 0;
+    std::filesystem::remove(tmp_zip);
+    return ok;
+}
+
+#endif // !CITRON_ENABLE_LIBARCHIVE && _WIN32
+
 } // namespace
 
 void Pull(Core::System& system, u64 title_id, bool force) {
-#if defined(ENABLE_WEB_SERVICE) && defined(CITRON_ENABLE_LIBARCHIVE)
+#if defined(ENABLE_WEB_SERVICE) && (defined(CITRON_ENABLE_LIBARCHIVE) || defined(_WIN32))
     if (!IsEligible(title_id)) {
         return;
     }
@@ -170,7 +234,12 @@ void Pull(Core::System& system, u64 title_id, bool force) {
         return;
     }
 
-    if (UnzipToDirectory(*zip, save_dir->GetFullPath())) {
+#ifdef CITRON_ENABLE_LIBARCHIVE
+    const bool applied = UnzipToDirectory(*zip, save_dir->GetFullPath());
+#else
+    const bool applied = UnzipToDirectoryPowerShell(*zip, save_dir->GetFullPath(), title_id);
+#endif
+    if (applied) {
         LOG_INFO(Frontend, "OpenPak save pull {:016X}: applied ({} B)", title_id, zip->size());
     }
 #else
@@ -180,7 +249,7 @@ void Pull(Core::System& system, u64 title_id, bool force) {
 }
 
 std::vector<u8> CaptureForPush(Core::System& system, u64 title_id) {
-#ifdef CITRON_ENABLE_LIBARCHIVE
+#if defined(CITRON_ENABLE_LIBARCHIVE) || defined(_WIN32)
     if (!IsEligible(title_id)) {
         return {};
     }
@@ -189,7 +258,11 @@ std::vector<u8> CaptureForPush(Core::System& system, u64 title_id) {
     if (!save_dir) {
         return {};
     }
+#ifdef CITRON_ENABLE_LIBARCHIVE
     return ZipDirectory(save_dir);
+#else
+    return ZipDirectoryPowerShell(save_dir, title_id);
+#endif
 #else
     (void)system;
     (void)title_id;

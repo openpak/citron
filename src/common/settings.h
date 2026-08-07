@@ -747,6 +747,9 @@ struct Values {
 
     // Add-Ons
     std::map<u64, std::vector<std::string>> disabled_addons;
+    // title_ids where DLC should list as individual rows instead of one grouped toggle. Absent
+    // means grouped (the default).
+    std::set<u64> dlc_list_separately;
 
     std::vector<std::string> external_content_dirs;
     // Tracks whether the default sdmc/citron/content directory has already been

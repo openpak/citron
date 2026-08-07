@@ -6,11 +6,13 @@
 #include <memory>
 #include <utility>
 
+#include <QCheckBox>
 #include <QDir>
 #include <QHeaderView>
 #include <QMenu>
 #include <QMessageBox>
 #include <QProcess>
+#include <QSignalBlocker>
 #include <QStandardItemModel>
 #include <QString>
 #include <QTimer>
@@ -32,6 +34,11 @@
 
 
 #include "citron/mod_manager/gamebanana_dialog.h"
+
+namespace {
+// Holds a QStringList of every DLC patch name a single grouped "DLC" row stands in for.
+constexpr int kGroupedNamesRole = Qt::UserRole + 10;
+} // namespace
 
 ConfigurePerGameAddons::ConfigurePerGameAddons(Core::System& system_, QWidget* parent)
     : QWidget(parent), ui{std::make_unique<Ui::ConfigurePerGameAddons>()}, system{system_} {
@@ -69,8 +76,19 @@ ConfigurePerGameAddons::ConfigurePerGameAddons(Core::System& system_, QWidget* p
 
     qRegisterMetaType<QList<QStandardItem*>>("QList<QStandardItem*>");
 
+    checkbox_list_dlc_separately = new QCheckBox(tr("List DLC's Separately"));
+    connect(checkbox_list_dlc_separately, &QCheckBox::toggled, this, [this](bool checked) {
+        if (checked) {
+            Settings::values.dlc_list_separately.insert(title_id);
+        } else {
+            Settings::values.dlc_list_separately.erase(title_id);
+        }
+        LoadConfiguration();
+    });
+
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
+    layout->addWidget(checkbox_list_dlc_separately);
     layout->addWidget(tree_view);
 
     // Replace the scrollArea in the UI's gridLayout with our tree_view layout
@@ -109,6 +127,16 @@ void ConfigurePerGameAddons::ApplyConfiguration() {
 
     for (const auto& item : list_items) {
         const auto disabled = item.front()->checkState() == Qt::Unchecked;
+        const QVariant grouped_names = item.front()->data(kGroupedNamesRole);
+        if (grouped_names.isValid()) {
+            // A single "DLC" row standing in for every DLC patch name it collapsed.
+            if (disabled) {
+                for (const auto& name : grouped_names.toStringList()) {
+                    disabled_addons.push_back(name.toStdString());
+                }
+            }
+            continue;
+        }
         if (disabled) {
             // Get the internal full name we stored in UserRole
             QString internal_name = item.front()->data(Qt::UserRole).toString();
@@ -260,6 +288,13 @@ void ConfigurePerGameAddons::LoadConfiguration() {
     item_model->removeRows(0, item_model->rowCount());
     list_items.clear();
 
+    {
+        const QSignalBlocker blocker(checkbox_list_dlc_separately);
+        checkbox_list_dlc_separately->setChecked(
+            Settings::values.dlc_list_separately.count(title_id) != 0);
+    }
+    const bool list_dlc_separately = checkbox_list_dlc_separately->isChecked();
+
     const FileSys::PatchManager pm{title_id, system.GetFileSystemController(),
                                    system.GetContentProvider()};
     const auto loader = Loader::GetLoader(system, file);
@@ -270,6 +305,7 @@ void ConfigurePerGameAddons::LoadConfiguration() {
     const auto all_patches = pm.GetPatches(update_raw);
 
     std::map<QString, QStandardItem*> groups;
+    std::vector<FileSys::Patch> dlc_patches;
 
     // --- PASS 1: SYSTEM ITEMS (Update, DLC, etc.) ---
     // We add these directly to the top of the list
@@ -277,6 +313,11 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         // Skip folder-based mods for this pass
         if (patch.type == FileSys::PatchType::Mod)
             continue;
+
+        if (patch.type == FileSys::PatchType::DLC && !list_dlc_separately) {
+            dlc_patches.push_back(patch);
+            continue;
+        }
 
         QString full_name = QString::fromStdString(patch.name);
         QStandardItem* parent_to_add_to = nullptr;
@@ -318,6 +359,27 @@ void ConfigurePerGameAddons::LoadConfiguration() {
         } else {
             item_model->appendRow(row);
         }
+        list_items.push_back(row);
+    }
+
+    if (!dlc_patches.empty()) {
+        QStringList names;
+        bool any_enabled = false;
+        for (const auto& patch : dlc_patches) {
+            names << QString::fromStdString(patch.name);
+            if (std::find(disabled.begin(), disabled.end(), patch.name) == disabled.end()) {
+                any_enabled = true;
+            }
+        }
+
+        auto* const dlc_group_item = new QStandardItem(tr("DLC (%1)").arg(dlc_patches.size()));
+        dlc_group_item->setCheckable(true);
+        dlc_group_item->setCheckState(any_enabled ? Qt::Checked : Qt::Unchecked);
+        dlc_group_item->setData(names, kGroupedNamesRole);
+
+        QList<QStandardItem*> row;
+        row << dlc_group_item << new QStandardItem{};
+        item_model->appendRow(row);
         list_items.push_back(row);
     }
 

@@ -364,6 +364,21 @@ void Config::ReadDisabledAddOnValues() {
     EndGroup();
 }
 
+void Config::ReadDlcListSeparatelyValues() {
+    // Custom config section
+    BeginGroup(std::string("DlcListSeparately"));
+
+    const int size = BeginArray(std::string(""));
+    for (int i = 0; i < size; ++i) {
+        SetArrayIndex(i);
+        const auto title_id = ReadUnsignedIntegerSetting(std::string("title_id"), 0);
+        Settings::values.dlc_list_separately.insert(title_id);
+    }
+    EndArray();
+
+    EndGroup();
+}
+
 void Config::ReadDisabledCheatValues() {
     // Custom config section
     BeginGroup(std::string("DisabledCheats"));
@@ -466,6 +481,7 @@ void Config::ReadValues() {
         ReadCustomSavePathValues();
         ReadMirrorValues();
         ReadDisabledAddOnValues();
+        ReadDlcListSeparatelyValues();
         ReadDisabledCheatValues();
         ReadNetworkValues();
         ReadServiceValues();
@@ -576,6 +592,7 @@ void Config::SaveValues() {
         SaveCustomSavePathValues();
         SaveMirrorValues();
         SaveDisabledAddOnValues();
+        SaveDlcListSeparatelyValues();
         SaveDisabledCheatValues();
         SaveNetworkValues();
         SaveWebServiceValues();
@@ -719,6 +736,23 @@ void Config::SaveDisabledAddOnValues() {
         ++i;
     }
     EndArray(); // Base disabled addons array - Has no base key
+
+    EndGroup();
+}
+
+void Config::SaveDlcListSeparatelyValues() {
+    // Custom config section
+    BeginGroup(std::string("DlcListSeparately"));
+
+    int i = 0;
+    BeginArray(std::string(""));
+    for (const auto title_id : Settings::values.dlc_list_separately) {
+        SetArrayIndex(i);
+        WriteIntegerSetting(std::string("title_id"), title_id,
+                            std::make_optional(static_cast<u64>(0)));
+        ++i;
+    }
+    EndArray();
 
     EndGroup();
 }

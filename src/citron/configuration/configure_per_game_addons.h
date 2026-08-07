@@ -16,6 +16,7 @@ namespace Core {
 class System;
 }
 
+class QCheckBox;
 class QStandardItem;
 class QStandardItemModel;
 class QTreeView;
@@ -58,6 +59,7 @@ private:
     QVBoxLayout* layout = nullptr;
     QTreeView* tree_view = nullptr;
     QStandardItemModel* item_model = nullptr;
+    QCheckBox* checkbox_list_dlc_separately = nullptr;
 
     std::vector<QList<QStandardItem*>> list_items;
 
