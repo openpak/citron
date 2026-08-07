@@ -23,6 +23,7 @@ class QStackedWidget;
 class QStandardItemModel;
 class QModelIndex;
 class QTabWidget;
+class QToolButton;
 class OpenPakController;
 class OpenPakFriendDelegate;
 class ExternalReferenceProbe;
@@ -51,6 +52,7 @@ private:
     void ApplyFriendFilter(const QString& text);
     void UpdateRequestsBadge(int count);
     void OnChangeAvatar();
+    void OnEditUsername();
 
     void RefreshCloudSaveTab();
     void RebuildCloudSaveTitlePicker();
@@ -60,6 +62,7 @@ private:
 
     QLabel* header_avatar;
     QLabel* header_name;
+    QToolButton* edit_name_button;
     QLabel* header_code;
     QLabel* status;
 

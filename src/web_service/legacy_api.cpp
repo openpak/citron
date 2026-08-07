@@ -276,8 +276,9 @@ httplib::Result Send(const std::string& method, const std::string& path, const s
         headers.emplace("Authorization", "Bearer " + bearer);
     }
 
-    auto result = method == "GET" ? client.Get(path, headers)
-                                  : client.Post(path, headers, body, "application/json");
+    auto result = method == "GET"    ? client.Get(path, headers)
+                 : method == "PUT"   ? client.Put(path, headers, body, "application/json")
+                                     : client.Post(path, headers, body, "application/json");
     if (!result) {
         const long verify_result = client.get_openssl_verify_result();
         LOG_ERROR(WebService, "Send {} {}: httplib error={}, openssl verify_result={} ({})",
@@ -638,6 +639,25 @@ std::string PushProfilePicture(const std::string& image_base64) {
     if (!result || result->status != 200) {
         return ErrorFrom(result ? result->body : std::string{},
                          fmt::format("Could not update your profile picture (HTTP {}).",
+                                     result ? result->status : 0));
+    }
+    return {};
+}
+
+std::string SetUsername(const std::string& username) {
+    const std::string token = Common::OpenPakAccount::GetToken();
+    if (token.empty()) {
+        return "Not signed in.";
+    }
+
+    const nlohmann::json body{{"Username", username}};
+    const auto result = Send("PUT", "/api/username", body.dump(), token);
+    if (ClearSessionIfRejected(result)) {
+        return "Your session expired. Sign in again.";
+    }
+    if (!result || result->status != 200) {
+        return ErrorFrom(result ? result->body : std::string{},
+                         fmt::format("Could not change your username (HTTP {}).",
                                      result ? result->status : 0));
     }
     return {};

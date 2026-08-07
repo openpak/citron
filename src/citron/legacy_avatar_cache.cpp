@@ -12,6 +12,11 @@ namespace OpenPak::AvatarCache {
 
 namespace {
 
+// Cached once at a fixed, generous size regardless of what a given caller asked for -- the
+// header avatar (72px) and a game icon (48-64px) share the same "self" entry, so caching at
+// whichever size asked first meant the other one got that size force-upscaled back out.
+constexpr int kCacheSize = 256;
+
 struct CacheEntry {
     std::string source_hash; // the base64 string itself; cheap enough and self-invalidating
     QPixmap pixmap;
@@ -41,7 +46,8 @@ QPixmap Get(const std::string& key, const std::string& image_base64, int size) {
         return {};
     }
 
-    pixmap = pixmap.scaled(size, size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    const int target = qMax(size, kCacheSize);
+    pixmap = pixmap.scaled(target, target, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
     cache[key] = CacheEntry{image_base64, pixmap};
     return pixmap;
 }

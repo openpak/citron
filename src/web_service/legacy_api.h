@@ -129,6 +129,10 @@ Profile GetProfile();
 // just the image changed). Returns an error message, or empty on success.
 std::string PushProfilePicture(const std::string& image_base64);
 
+// Renames the account (3-16 chars: letters, digits, '_' or '-'). Returns an error message, or
+// empty on success.
+std::string SetUsername(const std::string& username);
+
 struct HistoryItem {
     std::string title_id;     // 16 hex digits
     std::string name;

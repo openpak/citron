@@ -21,6 +21,7 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QImage>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLinearGradient>
@@ -30,6 +31,7 @@
 #include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QTabBar>
@@ -75,10 +77,13 @@ QColor AccentColor() {
 }
 
 QPixmap RoundedPixmap(const QPixmap& source, int size) {
-    QPixmap out(size, size);
+    const qreal dpr = qApp->devicePixelRatio();
+    QPixmap out(qMax(1, static_cast<int>(size * dpr)), qMax(1, static_cast<int>(size * dpr)));
+    out.setDevicePixelRatio(dpr);
     out.fill(Qt::transparent);
     QPainter painter(&out);
     painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
     QPainterPath clip;
     clip.addEllipse(0, 0, size, size);
     painter.setClipPath(clip);
@@ -94,10 +99,13 @@ QPixmap RoundedRectPixmap(const QPixmap& source, int size, int radius) {
     if (source.isNull()) {
         return {};
     }
-    QPixmap out(size, size);
+    const qreal dpr = qApp->devicePixelRatio();
+    QPixmap out(qMax(1, static_cast<int>(size * dpr)), qMax(1, static_cast<int>(size * dpr)));
+    out.setDevicePixelRatio(dpr);
     out.fill(Qt::transparent);
     QPainter painter(&out);
     painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
     QPainterPath clip;
     clip.addRoundedRect(0, 0, size, size, radius, radius);
     painter.setClipPath(clip);
@@ -251,6 +259,20 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     name_font.setBold(true);
     header_name->setFont(name_font);
 
+    edit_name_button = new QToolButton;
+    edit_name_button->setText(QStringLiteral("✎")); // pencil
+    edit_name_button->setCursor(Qt::PointingHandCursor);
+    edit_name_button->setToolTip(tr("Change your username"));
+    edit_name_button->setAutoRaise(true);
+    connect(edit_name_button, &QToolButton::clicked, this,
+           &OpenPakAccountDialog::OnEditUsername);
+
+    auto* header_name_row = new QHBoxLayout;
+    header_name_row->setSpacing(4);
+    header_name_row->addWidget(header_name);
+    header_name_row->addWidget(edit_name_button);
+    header_name_row->addStretch();
+
     header_code = new QLabel;
     header_code->setCursor(Qt::PointingHandCursor);
     header_code->setToolTip(tr("Click to copy"));
@@ -263,7 +285,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     auto* header_text = new QVBoxLayout;
     header_text->setSpacing(6);
     header_text->addStretch();
-    header_text->addWidget(header_name);
+    header_text->addLayout(header_name_row);
     header_text->addWidget(header_code, 0, Qt::AlignLeft);
     header_text->addStretch();
 
@@ -581,6 +603,55 @@ void OpenPakAccountDialog::OnChangeAvatar() {
                 }
                 status->setText(error.empty() ? tr("Profile picture updated.")
                                              : QString::fromStdString(error));
+            },
+            Qt::QueuedConnection);
+    }}.detach();
+#else
+    status->setText(tr("This build has no web services support."));
+#endif
+}
+
+void OpenPakAccountDialog::OnEditUsername() {
+#ifdef ENABLE_WEB_SERVICE
+    static const QRegularExpression valid_name(QStringLiteral("^[A-Za-z0-9_-]{3,16}$"));
+
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+                             this, tr("Change Username"),
+                             tr("3-16 characters: letters, digits, '_' or '-'"), QLineEdit::Normal,
+                             header_name->text(), &ok)
+                             .trimmed();
+    if (!ok || name.isEmpty() || name == header_name->text()) {
+        return;
+    }
+    if (!valid_name.match(name).hasMatch()) {
+        status->setText(tr("Invalid username."));
+        return;
+    }
+
+    status->setText(tr("Updating username..."));
+    const std::string new_name = name.toStdString();
+
+    std::thread{[this, new_name, guard = QPointer<OpenPakAccountDialog>(this)] {
+        const std::string error = WebService::OpenPakApi::SetUsername(new_name);
+        if (!guard) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            guard.data(),
+            [this, guard, error, new_name] {
+                if (!guard) {
+                    return;
+                }
+                if (error.empty()) {
+                    Common::OpenPakAccount::Save(Common::OpenPakAccount::GetPid(), new_name,
+                                                  Common::OpenPakAccount::GetFriendCode(),
+                                                  Common::OpenPakAccount::GetToken());
+                    header_name->setText(QString::fromStdString(new_name));
+                    status->setText(tr("Username updated."));
+                } else {
+                    status->setText(QString::fromStdString(error));
+                }
             },
             Qt::QueuedConnection);
     }}.detach();
