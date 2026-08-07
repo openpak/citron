@@ -156,6 +156,8 @@ public:
     void OfferOpenPakByamlDownload(u64 title_id);
     void OpenPakByamlDownloadFromMenu(u64 title_id);
     bool OpenPakByamlRequired(u64 title_id) const;
+    bool OpenPakByamlInstalled(u64 title_id) const;
+    bool OpenPakByamlSkipped(u64 title_id) const;
     bool IsConfiguring() const {
         return m_is_configuring;
     }
@@ -187,6 +189,13 @@ public:
     void SetPerformedInitialSync(bool synced) {
         has_performed_initial_sync = synced;
     }
+    [[nodiscard]] bool HasPerformedBcatAutoDownload() const {
+        return has_performed_bcat_autodownload;
+    }
+    void SetPerformedBcatAutoDownload(bool done) {
+        has_performed_bcat_autodownload = done;
+    }
+    void SilentlyDownloadOpenPakByaml(u64 title_id);
 signals:
     void EmulationStarting(EmuThread* emu_thread);
     void EmulationStopping();
@@ -482,8 +491,6 @@ private:
 
     void SyncOpenPakHistory();
 
-    bool OpenPakByamlInstalled(u64 title_id) const;
-    bool OpenPakByamlSkipped(u64 title_id) const;
     void OpenPakByamlMarkSkipped(u64 title_id) const;
     bool OpenPakByamlDownload(u64 title_id);
     void RunOpenPakByamlDownloadWithProgress(u64 title_id);
@@ -520,6 +527,7 @@ private:
     bool m_is_updating_theme = false;
     bool m_is_configuring = false;
     bool has_performed_initial_sync = false;
+    bool has_performed_bcat_autodownload = false;
 #ifdef __unix__
     QSocketNotifier* sig_interrupt_notifier;
     static std::array<int, 3> sig_interrupt_fds;

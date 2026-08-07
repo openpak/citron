@@ -276,6 +276,8 @@ add_executable(citron
     legacy_network_probe.h
     legacy_online_counts.cpp
     legacy_online_counts.h
+    legacy_save_sync.cpp
+    legacy_save_sync.h
     legacy_toast.cpp
     legacy_toast.h
     precompiled_headers.h

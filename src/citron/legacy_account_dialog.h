@@ -5,11 +5,16 @@
 
 #include <functional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <QDialog>
 #include <QTimer>
 
 #include "common/common_types.h"
 
+class QAbstractButton;
+class QButtonGroup;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListView;
@@ -47,6 +52,10 @@ private:
     void UpdateRequestsBadge(int count);
     void OnChangeAvatar();
 
+    void RefreshCloudSaveTab();
+    void RebuildCloudSaveTitlePicker();
+    void ProbeCloudSaveAvailability(u64 title_id);
+
     OpenPakController* controller;
 
     QLabel* header_avatar;
@@ -78,4 +87,15 @@ private:
 
     QTabWidget* tabs;
     QLabel* requests_badge;
+
+    QLabel* cloud_save_icon;
+    QLabel* cloud_save_title;
+    QLabel* cloud_save_status;
+    QPushButton* cloud_save_download_button;
+    QWidget* cloud_save_picker_container;
+    QHBoxLayout* cloud_save_picker_row;
+    QButtonGroup* cloud_save_picker_group;
+    u64 cloud_save_selected_title_id = 0;
+    std::unordered_map<u64, bool> cloud_save_has_data;
+    std::unordered_set<u64> cloud_save_probing;
 };

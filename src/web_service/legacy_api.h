@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 #include "common/common_types.h"
@@ -95,6 +96,15 @@ std::vector<u8> DownloadBcatSeed(const std::string& title_id_hex);
 
 // Public, unauthenticated. Maps lowercase-hex title id -> currently connected player count.
 std::map<std::string, int> GetOnlineCounts();
+
+// Downloads this title's cloud save. title_id_hex is 16 hex digits. nullopt when there is no
+// cloud save stored yet, the account can't use cloud saves (guest), or the request failed.
+std::optional<std::vector<u8>> PullSave(const std::string& title_id_hex);
+
+// Uploads this title's save. The server rejects a drastically smaller upload against an existing
+// larger save rather than clobbering it (kept=true in that case, still reported as success here).
+// Returns an error message fit to show the user, or empty on success.
+std::string PushSave(const std::string& title_id_hex, std::span<const u8> data);
 
 struct Profile {
     bool ok = false;

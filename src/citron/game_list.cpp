@@ -2686,8 +2686,12 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
         icon = item.data(Qt::DecorationRole).value<QPixmap>();
     }
 
+    LOG_CRITICAL(Frontend, "DIAG StartLaunchAnimation: icon.isNull()={} size={}x{}",
+                icon.isNull(), icon.width(), icon.height());
+
     // If we still have no icon, launch instantly without animation
     if (icon.isNull()) {
+        LOG_CRITICAL(Frontend, "DIAG StartLaunchAnimation: skipping animation, no icon");
         const auto title_id = item.data(GameListItemPath::ProgramIdRole).toULongLong();
         emit GameChosen(file_path, title_id);
         m_is_launching = false;
@@ -2712,16 +2716,29 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
     const auto title_id = item.data(GameListItemPath::ProgramIdRole).toULongLong();
     QRect start_geom;
     if (main_stack->currentIndex() == 0) {
-        start_geom = tree_view->visualRect(item.sibling(item.row(), 0));
+        const auto idx = item.sibling(item.row(), 0);
+        tree_view->scrollTo(idx, QAbstractItemView::EnsureVisible);
+        start_geom = tree_view->visualRect(idx);
         start_geom.setTopLeft(tree_view->viewport()->mapTo(main_window, start_geom.topLeft()));
     } else if (main_stack->currentIndex() == 1) {
+        grid_view->scrollTo(item);
         start_geom = grid_view->visualRect(item);
         start_geom.setTopLeft(grid_view->viewport()->mapTo(main_window, start_geom.topLeft()));
     } else {
+        carousel_view->view()->scrollTo(item.row());
         start_geom = carousel_view->view()->visualRect(item);
         start_geom.setTopLeft(
             carousel_view->view()->viewport()->mapTo(main_window, start_geom.topLeft()));
     }
+    if (start_geom.isEmpty()) {
+        // The view hadn't laid the item out yet (e.g. right after a PopulateAsync() following
+        // Stop Emulation) -- visualRect() comes back degenerate and the icon skips straight to
+        // its end position with no visible fly-in. Fall back to a real point to animate from.
+        start_geom = QRect(main_window->rect().center(), QSize(1, 1));
+    }
+    LOG_CRITICAL(Frontend, "DIAG StartLaunchAnimation: start_geom=({},{} {}x{}) currentIndex={}",
+                start_geom.x(), start_geom.y(), start_geom.width(), start_geom.height(),
+                main_stack->currentIndex());
 
     auto* animation_label = new QLabel(main_window);
     animation_label->setPixmap(icon);
@@ -2827,6 +2844,7 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
 
     // Show logo once zoom is finished, just before fly/fade starts
     connect(zoom_anim, &QPropertyAnimation::finished, [logo_widget]() {
+        LOG_CRITICAL(Frontend, "DIAG StartLaunchAnimation: zoom_anim finished, showing logo");
         logo_widget->show();
         logo_widget->raise();
     });
@@ -2843,6 +2861,7 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
     // When the FULL animation group finishes, clean up the UI overlays safely.
     connect(main_group, &QSequentialAnimationGroup::finished, this,
             [this, animation_label, logo_widget, file_path, title_id]() {
+                LOG_CRITICAL(Frontend, "DIAG StartLaunchAnimation: main_group finished");
                 if (animation_label) {
                     animation_label->hide();
                     animation_label->deleteLater();
@@ -2861,6 +2880,7 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
                 emit GameChosen(file_path, title_id);
             });
 
+    LOG_CRITICAL(Frontend, "DIAG StartLaunchAnimation: main_group->start()");
     main_group->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
@@ -3058,6 +3078,30 @@ void GameList::DonePopulating(const QStringList& watch_list) {
     } else {
         LOG_INFO(Frontend,
                  "Mirroring: Startup sync skipped (Reason: UI Busy or Game is Emulating).");
+    }
+
+    if (main_window && !main_window->HasPerformedBcatAutoDownload()) {
+        main_window->SetPerformedBcatAutoDownload(true);
+        for (int i = 0; i < item_model->rowCount(); ++i) {
+            QStandardItem* folder = item_model->item(i, 0);
+            if (!folder) {
+                continue;
+            }
+            for (int j = 0; j < folder->rowCount(); ++j) {
+                QStandardItem* game = folder->child(j, 0);
+                if (!game) {
+                    continue;
+                }
+                const u64 title_id = game->data(GameListItemPath::ProgramIdRole).toULongLong();
+                if (title_id != 0 && main_window->OpenPakByamlRequired(title_id) &&
+                    !main_window->OpenPakByamlInstalled(title_id) &&
+                    !main_window->OpenPakByamlSkipped(title_id)) {
+                    LOG_INFO(Frontend, "OpenPak BCAT: auto-downloading schedule for {:016X}",
+                             title_id);
+                    main_window->SilentlyDownloadOpenPakByaml(title_id);
+                }
+            }
+        }
     }
 
     // Automatically refresh compatibility data from GitHub if enabled

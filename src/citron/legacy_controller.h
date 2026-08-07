@@ -43,6 +43,8 @@ public:
     void RefreshFriendCache();
     void NotifyFriendRequestSent(const QString& friend_code);
 
+    void ManualSaveDownload(u64 title_id);
+
 signals:
     void AccountLinked();
     void AccountUnlinked();

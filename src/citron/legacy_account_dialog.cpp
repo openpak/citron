@@ -7,8 +7,11 @@
 #include <unordered_map>
 #include <utility>
 
+#include <fmt/format.h>
+
 #include <QApplication>
 #include <QBuffer>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
@@ -32,12 +35,14 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include "common/legacy_account.h"
 #include "citron/legacy_account_dialog.h"
 #include "citron/legacy_account_page_p.h"
 #include "citron/legacy_avatar_cache.h"
+#include "citron/legacy_compatible_titles.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_friend_delegate.h"
 #include "citron/legacy_history_delegate.h"
@@ -82,6 +87,21 @@ QPixmap RoundedPixmap(const QPixmap& source, int size) {
     } else {
         painter.drawPixmap(0, 0, size, size, source);
     }
+    return out;
+}
+
+QPixmap RoundedRectPixmap(const QPixmap& source, int size, int radius) {
+    if (source.isNull()) {
+        return {};
+    }
+    QPixmap out(size, size);
+    out.fill(Qt::transparent);
+    QPainter painter(&out);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QPainterPath clip;
+    clip.addRoundedRect(0, 0, size, size, radius, radius);
+    painter.setClipPath(clip);
+    painter.drawPixmap(0, 0, size, size, source);
     return out;
 }
 
@@ -306,11 +326,80 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     history_stack->addWidget(history_view);
     history_stack->addWidget(MakeEmptyLabel(tr("No games played yet.")));
 
+    cloud_save_icon = new QLabel;
+    cloud_save_icon->setFixedSize(64, 64);
+    cloud_save_icon->setAlignment(Qt::AlignCenter);
+
+    cloud_save_title = new QLabel;
+    QFont cloud_save_title_font = cloud_save_title->font();
+    cloud_save_title_font.setBold(true);
+    cloud_save_title_font.setPointSize(cloud_save_title_font.pointSize() + 1);
+    cloud_save_title->setFont(cloud_save_title_font);
+    cloud_save_title->setAlignment(Qt::AlignCenter);
+
+    cloud_save_picker_group = new QButtonGroup(this);
+    cloud_save_picker_row = new QHBoxLayout;
+    cloud_save_picker_row->setSpacing(10);
+    cloud_save_picker_container = new QWidget;
+    cloud_save_picker_container->setLayout(cloud_save_picker_row);
+
+    cloud_save_status = new QLabel;
+    cloud_save_status->setWordWrap(true);
+    cloud_save_status->setAlignment(Qt::AlignCenter);
+    QPalette cloud_save_status_pal = cloud_save_status->palette();
+    cloud_save_status_pal.setColor(QPalette::WindowText, DimColor());
+    cloud_save_status->setPalette(cloud_save_status_pal);
+
+    cloud_save_download_button = new QPushButton(tr("\xE2\x86\x93 Download Save"));
+    cloud_save_download_button->setCursor(Qt::PointingHandCursor);
+    cloud_save_download_button->setMinimumHeight(34);
+    cloud_save_download_button->setMinimumWidth(180);
+    cloud_save_download_button->setStyleSheet(
+        QStringLiteral("QPushButton { background: %1; color: white; border: none; "
+                       "border-radius: 8px; padding: 6px 18px; font-weight: 600; }"
+                       "QPushButton:disabled { background: rgba(128,128,128,60); "
+                       "color: rgba(255,255,255,110); }")
+            .arg(AccentColor().name()));
+    connect(cloud_save_download_button, &QPushButton::clicked, this, [this] {
+        if (cloud_save_selected_title_id != 0) {
+            controller->ManualSaveDownload(cloud_save_selected_title_id);
+        }
+    });
+
+    auto* cloud_save_buttons = new QHBoxLayout;
+    cloud_save_buttons->addStretch(1);
+    cloud_save_buttons->addWidget(cloud_save_download_button);
+    cloud_save_buttons->addStretch(1);
+
+    auto* cloud_save_card = new QFrame;
+    cloud_save_card->setObjectName(QStringLiteral("cloudSaveCard"));
+    cloud_save_card->setStyleSheet(QStringLiteral("QFrame#cloudSaveCard { background: %1; "
+                                                  "border-radius: 12px; }")
+                                       .arg(CardBg().name()));
+    auto* cloud_save_card_layout = new QVBoxLayout(cloud_save_card);
+    cloud_save_card_layout->setContentsMargins(28, 28, 28, 28);
+    cloud_save_card_layout->setSpacing(6);
+    cloud_save_card_layout->addWidget(cloud_save_icon, 0, Qt::AlignHCenter);
+    cloud_save_card_layout->addWidget(cloud_save_title, 0, Qt::AlignHCenter);
+    cloud_save_card_layout->addWidget(cloud_save_picker_container, 0, Qt::AlignHCenter);
+    cloud_save_card_layout->addSpacing(6);
+    cloud_save_card_layout->addWidget(cloud_save_status);
+    cloud_save_card_layout->addSpacing(12);
+    cloud_save_card_layout->addLayout(cloud_save_buttons);
+
+    auto* cloud_save_page = new QWidget;
+    auto* cloud_save_layout = new QVBoxLayout(cloud_save_page);
+    cloud_save_layout->setContentsMargins(20, 20, 20, 20);
+    cloud_save_layout->addStretch(1);
+    cloud_save_layout->addWidget(cloud_save_card);
+    cloud_save_layout->addStretch(2);
+
     tabs = new QTabWidget;
     tabs->setStyleSheet(TabWidgetStyle());
     tabs->addTab(friends_stack, tr("Friends"));
     tabs->addTab(requests_stack, tr("Requests"));
     tabs->addTab(history_stack, tr("Recently Played"));
+    tabs->addTab(cloud_save_page, tr("Cloud Saves"));
 
     requests_badge = new QLabel(tabs->tabBar());
     requests_badge->setAlignment(Qt::AlignCenter);
@@ -394,10 +483,19 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
 
     RefreshFriends();
     RefreshHistory();
+    RefreshCloudSaveTab();
+
+    connect(controller, &OpenPakController::StatusChanged, this,
+            [this, cloud_save_page](const QString& message) {
+                if (tabs->currentWidget() == cloud_save_page) {
+                    cloud_save_status->setText(message);
+                }
+            });
 
     refresh_timer.setInterval(15000);
     connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshFriends);
     connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshHistory);
+    connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshCloudSaveTab);
     refresh_timer.start();
 
     connect(tabs, &QTabWidget::currentChanged, this, [this](int index) {
@@ -707,6 +805,141 @@ void OpenPakAccountDialog::RefreshFriends() {
 #else
     status->setText(tr("This build has no web services support."));
     SetBusy(false);
+#endif
+}
+
+void OpenPakAccountDialog::RefreshCloudSaveTab() {
+    const std::string app_id_hex = controller ? controller->GetLocalAppId() : std::string{};
+
+    u64 running_title_id = 0;
+    if (!app_id_hex.empty()) {
+        try {
+            running_title_id = std::stoull(app_id_hex, nullptr, 16);
+        } catch (const std::exception&) {
+        }
+    }
+    const bool is_running_eligible =
+        running_title_id != 0 && OpenPak::CompatibleTitles::Table().count(running_title_id);
+
+    if (is_running_eligible) {
+        cloud_save_icon->setVisible(true);
+        cloud_save_title->setVisible(true);
+        cloud_save_picker_container->setVisible(false);
+        cloud_save_download_button->setVisible(false);
+
+        const QString game_name = controller->ResolveGameName(app_id_hex);
+        const QString game_icon = controller->ResolveGameIcon(app_id_hex);
+        cloud_save_title->setText(game_name);
+        const QPixmap icon = RoundedRectPixmap(
+            OpenPak::AvatarCache::Get(app_id_hex, game_icon.toStdString(), 64), 64, 10);
+        if (!icon.isNull()) {
+            cloud_save_icon->setPixmap(icon);
+        } else {
+            cloud_save_icon->clear();
+        }
+        cloud_save_status->setText(tr("Save uploads automatically when you stop this game."));
+        return;
+    }
+
+    cloud_save_icon->setVisible(false);
+    cloud_save_title->setVisible(false);
+    cloud_save_download_button->setVisible(true);
+    cloud_save_picker_container->setVisible(true);
+    RebuildCloudSaveTitlePicker();
+
+    if (!app_id_hex.empty()) {
+        cloud_save_status->setText(tr("The running game doesn't support cloud saves."));
+    } else if (!cloud_save_probing.empty()) {
+        cloud_save_status->setText(tr("Checking for cloud saves..."));
+    } else if (cloud_save_picker_row->count() > 0) {
+        cloud_save_status->setText(tr("Pick a title to download its cloud save."));
+    } else {
+        cloud_save_status->setText(tr("No cloud saves found for your installed games."));
+    }
+}
+
+void OpenPakAccountDialog::RebuildCloudSaveTitlePicker() {
+    for (QAbstractButton* button : cloud_save_picker_group->buttons()) {
+        cloud_save_picker_group->removeButton(button);
+        button->deleteLater();
+    }
+    QLayoutItem* item;
+    while ((item = cloud_save_picker_row->takeAt(0)) != nullptr) {
+        delete item;
+    }
+
+    bool selection_still_valid = false;
+    for (const auto& [program_id, version] : OpenPak::CompatibleTitles::Table()) {
+        const std::string title_id_hex = fmt::format("{:016X}", program_id);
+        const QString name = controller->ResolveGameName(title_id_hex);
+        const QString icon_b64 = controller->ResolveGameIcon(title_id_hex);
+        if (icon_b64.isEmpty()) {
+            continue; // Not installed locally -- nothing to show for it.
+        }
+
+        const auto has_data_it = cloud_save_has_data.find(program_id);
+        if (has_data_it == cloud_save_has_data.end()) {
+            ProbeCloudSaveAvailability(program_id);
+            continue; // Don't show until we actually know there's a cloud save.
+        }
+        if (!has_data_it->second) {
+            continue;
+        }
+
+        auto* button = new QToolButton;
+        button->setCheckable(true);
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        button->setIconSize(QSize(48, 48));
+        button->setIcon(RoundedRectPixmap(
+            OpenPak::AvatarCache::Get(title_id_hex, icon_b64.toStdString(), 48), 48, 8));
+        button->setText(QFontMetrics(button->font()).elidedText(name, Qt::ElideRight, 92));
+        button->setToolTip(name);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setAutoRaise(true);
+        button->setFixedWidth(104);
+        if (program_id == cloud_save_selected_title_id) {
+            button->setChecked(true);
+            selection_still_valid = true;
+        }
+        connect(button, &QToolButton::clicked, this, [this, program_id] {
+            cloud_save_selected_title_id = program_id;
+            cloud_save_download_button->setEnabled(true);
+        });
+
+        cloud_save_picker_group->addButton(button);
+        cloud_save_picker_row->addWidget(button);
+    }
+
+    if (!selection_still_valid) {
+        cloud_save_selected_title_id = 0;
+    }
+    cloud_save_download_button->setEnabled(cloud_save_selected_title_id != 0);
+}
+
+void OpenPakAccountDialog::ProbeCloudSaveAvailability(u64 title_id) {
+#ifdef ENABLE_WEB_SERVICE
+    if (cloud_save_probing.count(title_id)) {
+        return;
+    }
+    cloud_save_probing.insert(title_id);
+
+    const std::string title_id_hex = fmt::format("{:016x}", title_id);
+    std::thread{[this, title_id, title_id_hex, guard = QPointer<OpenPakAccountDialog>(this)] {
+        const auto save = WebService::OpenPakApi::PullSave(title_id_hex);
+        const bool has_data = save.has_value() && !save->empty();
+
+        QMetaObject::invokeMethod(
+            guard.data(),
+            [this, guard, title_id, has_data] {
+                if (!guard) {
+                    return;
+                }
+                cloud_save_probing.erase(title_id);
+                cloud_save_has_data[title_id] = has_data;
+                RefreshCloudSaveTab();
+            },
+            Qt::QueuedConnection);
+    }}.detach();
 #endif
 }
 

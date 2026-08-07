@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -19,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <openssl/x509_vfy.h>
 
 #include "common/hex_util.h"
 #include "common/logging.h"
@@ -184,6 +187,33 @@ bool IsLoopback(const std::string& host) {
     return host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1";
 }
 
+// CMakeModules/openssl_build.cmake links web_service against a static OpenSSL built from source
+// (originally for Windows cross-compilation, but it's wired up unconditionally on every
+// platform). X509_get_default_cert_file()/_dir() are compile-time macros baked into that vendored
+// copy's headers, so they resolve to a path inside the build tree that was never populated with
+// real certs -- not the system's actual CA store. On Linux, point at the real distro-provided
+// bundle directly. On Windows/macOS there's no equivalent fixed path; leave the client's cert
+// path unset so httplib falls through to its own native cert-store loader for those platforms.
+void ApplyCaCertPath(httplib::Client& client) {
+#ifdef __linux__
+    static constexpr std::array<const char*, 4> candidates{
+        "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Arch
+        "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora/RHEL/CentOS
+        "/etc/ssl/cert.pem",                  // Alpine
+        "/etc/ssl/ca-bundle.pem",             // openSUSE
+    };
+    for (const char* path : candidates) {
+        if (std::filesystem::exists(path)) {
+            client.set_ca_cert_path(path);
+            return;
+        }
+    }
+    LOG_ERROR(WebService, "ApplyCaCertPath: no known system CA bundle found");
+#else
+    (void)client;
+#endif
+}
+
 // Splits "https://host:port" into a host root httplib accepts, plus validates the scheme. The
 // account token rides on these requests, so an arbitrary override must not be able to receive it.
 std::optional<std::string> SanitizeBaseUrl(std::string raw) {
@@ -229,6 +259,7 @@ httplib::Client& SharedClient() {
         c.set_read_timeout(TimeoutSeconds);
         c.set_follow_location(true);
         c.set_keep_alive(true);
+        ApplyCaCertPath(c);
         return c;
     }();
     return client;
@@ -245,10 +276,15 @@ httplib::Result Send(const std::string& method, const std::string& path, const s
         headers.emplace("Authorization", "Bearer " + bearer);
     }
 
-    if (method == "GET") {
-        return client.Get(path, headers);
+    auto result = method == "GET" ? client.Get(path, headers)
+                                  : client.Post(path, headers, body, "application/json");
+    if (!result) {
+        const long verify_result = client.get_openssl_verify_result();
+        LOG_ERROR(WebService, "Send {} {}: httplib error={}, openssl verify_result={} ({})",
+                  method, path, httplib::to_string(result.error()), verify_result,
+                  X509_verify_cert_error_string(verify_result));
     }
-    return client.Post(path, headers, body, "application/json");
+    return result;
 }
 
 // A 401 on an authenticated call means the stored token is expired or revoked. Left in place it
@@ -321,16 +357,20 @@ LoginResult SignInWithBrowser(const std::function<void(const std::string&)>& ope
     const int port = server.bind_to_any_port("127.0.0.1");
     if (port < 0) {
         out.error = "Could not open a local port for the sign-in callback.";
+        LOG_ERROR(WebService, "SignInWithBrowser: bind_to_any_port failed");
         return out;
     }
 
     std::thread listener{[&server] { void(server.listen_after_bind()); }};
     const std::string redirect_uri = fmt::format("http://127.0.0.1:{}/callback", port);
 
-    open_url(fmt::format("{}/api/oauth/authorize?response_type=code&client_id={}"
-                         "&redirect_uri={}&scope=identity+friends&state={}"
-                         "&code_challenge={}&code_challenge_method=S256",
-                         BaseUrl(), ClientId, PercentEncode(redirect_uri), state, challenge));
+    const std::string auth_url =
+        fmt::format("{}/api/oauth/authorize?response_type=code&client_id={}"
+                    "&redirect_uri={}&scope=identity+friends&state={}"
+                    "&code_challenge={}&code_challenge_method=S256",
+                    BaseUrl(), ClientId, PercentEncode(redirect_uri), state, challenge);
+    LOG_INFO(WebService, "SignInWithBrowser: opening {}", auth_url);
+    open_url(auth_url);
 
     {
         std::unique_lock lock{callback.mutex};
@@ -343,20 +383,26 @@ LoginResult SignInWithBrowser(const std::function<void(const std::string&)>& ope
 
     if (!callback.received) {
         out.error = "Sign-in timed out.";
+        LOG_ERROR(WebService, "SignInWithBrowser: no callback received within 5 minutes");
         return out;
     }
     if (!callback.error.empty()) {
         out.error = callback.error == "access_denied" ? "Sign-in was declined." : callback.error;
+        LOG_ERROR(WebService, "SignInWithBrowser: callback returned error={}", callback.error);
         return out;
     }
     if (callback.code.empty()) {
         out.error = "The browser returned no authorization code.";
+        LOG_ERROR(WebService, "SignInWithBrowser: callback had no code");
         return out;
     }
     if (callback.state != state) {
         out.error = "Anti-CSRF check failed; the sign-in was not completed.";
+        LOG_ERROR(WebService, "SignInWithBrowser: state mismatch, expected={} got={}", state,
+                  callback.state);
         return out;
     }
+    LOG_INFO(WebService, "SignInWithBrowser: callback received, exchanging code for token");
 
     const httplib::Params form{
         {"grant_type", "authorization_code"}, {"code", callback.code},
@@ -368,14 +414,23 @@ LoginResult SignInWithBrowser(const std::function<void(const std::string&)>& ope
     client.set_connection_timeout(TimeoutSeconds);
     client.set_read_timeout(TimeoutSeconds);
     client.set_follow_location(true);
+    ApplyCaCertPath(client);
 
     const auto result = client.Post("/api/oauth/token", form);
     if (!result) {
         out.error = "Could not reach the OpenPak account server.";
+        const long verify_result = client.get_openssl_verify_result();
+        LOG_ERROR(WebService,
+                  "SignInWithBrowser: token exchange had no response (httplib error={}, "
+                  "openssl verify_result={} [{}])",
+                  httplib::to_string(result.error()), verify_result,
+                  X509_verify_cert_error_string(verify_result));
         return out;
     }
     if (result->status != 200) {
         out.error = ErrorFrom(result->body, "Could not exchange the authorization code.");
+        LOG_ERROR(WebService, "SignInWithBrowser: token exchange failed (HTTP {}): {}",
+                  result->status, result->body);
         return out;
     }
 
@@ -390,11 +445,17 @@ LoginResult SignInWithBrowser(const std::function<void(const std::string&)>& ope
 
         if (out.pid == 0 || out.token.empty()) {
             out.error = "The account server returned an incomplete sign-in.";
+            LOG_ERROR(WebService, "SignInWithBrowser: incomplete sign-in, pid={} token_empty={}",
+                      out.pid, out.token.empty());
             return out;
         }
         out.ok = true;
+        LOG_INFO(WebService, "SignInWithBrowser: signed in as pid={} username={}", out.pid,
+                 out.username);
     } catch (const nlohmann::json::exception& e) {
         out.error = fmt::format("Unexpected sign-in response: {}", e.what());
+        LOG_ERROR(WebService, "SignInWithBrowser: failed to parse token response: {} (body={})",
+                  e.what(), result->body);
     }
 
     return out;
@@ -441,6 +502,41 @@ std::vector<u8> DownloadBcatSeed(const std::string& title_id_hex) {
     }
 
     return std::vector<u8>(result->body.begin(), result->body.end());
+}
+
+std::optional<std::vector<u8>> PullSave(const std::string& title_id_hex) {
+    const std::string token = Common::OpenPakAccount::GetToken();
+    const auto result = Send("GET", "/api/save/" + title_id_hex, {}, token);
+
+    if (ClearSessionIfRejected(result)) {
+        return std::nullopt;
+    }
+    if (!result || result->status == 204) {
+        return std::nullopt; // no cloud save stored yet
+    }
+    if (result->status != 200) {
+        LOG_WARNING(WebService, "OpenPak save pull failed (HTTP {})", result->status);
+        return std::nullopt;
+    }
+
+    return std::vector<u8>(result->body.begin(), result->body.end());
+}
+
+std::string PushSave(const std::string& title_id_hex, std::span<const u8> data) {
+    const std::string token = Common::OpenPakAccount::GetToken();
+    const std::string body(reinterpret_cast<const char*>(data.data()), data.size());
+    const auto result = Send("POST", "/api/save/" + title_id_hex, body, token);
+
+    if (ClearSessionIfRejected(result)) {
+        return "Session expired.";
+    }
+    if (!result) {
+        return "Could not reach the OpenPak account server.";
+    }
+    if (result->status != 200) {
+        return ErrorFrom(result->body, "Could not upload the save.");
+    }
+    return {};
 }
 
 std::map<std::string, int> GetOnlineCounts() {
@@ -619,6 +715,7 @@ void SyncHistory(const std::vector<HistoryEntry>& entries) {
     client.set_connection_timeout(TimeoutSeconds);
     client.set_read_timeout(TimeoutSeconds);
     client.set_follow_location(true);
+    ApplyCaCertPath(client);
 
     httplib::Headers headers{{"User-Agent", "citron"}, {"Authorization", "Bearer " + token}};
     const auto result = client.Put("/api/history", headers,

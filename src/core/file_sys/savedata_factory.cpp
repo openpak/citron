@@ -379,6 +379,43 @@ void SaveDataFactory::PerformStartupMirrorSync() const {
     }
 }
 
+VirtualDir SaveDataFactory::GetTitleSaveDirectory(u64 title_id) const {
+    if (!dir) {
+        return nullptr;
+    }
+
+    VirtualDir user_save_root = dir->GetDirectoryRelative("user/save/0000000000000000");
+    if (!user_save_root) {
+        user_save_root = dir->GetDirectoryRelative("user/save");
+    }
+    if (!user_save_root) {
+        return nullptr;
+    }
+
+    const std::string title_id_str = fmt::format("{:016X}", title_id);
+    for (const auto& profile_dir : user_save_root->GetSubdirectories()) {
+        if (!profile_dir) {
+            continue;
+        }
+        auto save_dir = profile_dir->GetDirectoryRelative(title_id_str);
+        if (!save_dir) {
+            for (const auto& sub : profile_dir->GetSubdirectories()) {
+                if (!sub) {
+                    continue;
+                }
+                save_dir = sub->GetDirectoryRelative(title_id_str);
+                if (save_dir) {
+                    break;
+                }
+            }
+        }
+        if (save_dir) {
+            return save_dir;
+        }
+    }
+    return nullptr;
+}
+
 void SaveDataFactory::DoNandBackup(SaveDataSpaceId space, const SaveDataAttribute& meta, VirtualDir custom_dir) const {
     u64 title_id = (meta.program_id != 0 ? meta.program_id : static_cast<u64>(program_id));
     if (Settings::values.mirrored_save_paths.count(title_id)) return;

@@ -157,6 +157,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/legacy_account_dialog.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_online_counts.h"
+#include "citron/legacy_save_sync.h"
 #include "citron/legacy_toast.h"
 #include "citron/play_time_manager.h"
 #include "common/legacy_account.h"
@@ -486,6 +487,26 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
 
     game_list->LoadCompatibilityList();
     game_list->PopulateAsync(UISettings::values.game_dirs);
+
+#ifdef ENABLE_WEB_SERVICE
+    // The content provider isn't populated with installed titles yet at this point in boot, so
+    // there's nothing reliable to check "is Splatoon 2 installed" against here. Just attempt it
+    // for the 3 known title IDs; OpenPakByamlInstalled/Skipped still make this a true no-op after
+    // the first successful run or a decline.
+    if (!has_performed_bcat_autodownload) {
+        has_performed_bcat_autodownload = true;
+        static constexpr std::array<u64, 3> kByamlTitles{
+            0x0100f8f0000a2000ULL, 0x01003bc0000a0000ULL, 0x01003c700009c800ULL,
+        };
+        for (const u64 title_id : kByamlTitles) {
+            if (!OpenPakByamlInstalled(title_id) && !OpenPakByamlSkipped(title_id)) {
+                LOG_INFO(Frontend, "OpenPak BCAT: auto-downloading schedule for {:016X}",
+                         title_id);
+                SilentlyDownloadOpenPakByaml(title_id);
+            }
+        }
+    }
+#endif
 
     // make sure menubar has the arrow cursor instead of inheriting from this
     ui->menubar->setCursor(QCursor());
@@ -1954,8 +1975,7 @@ void GMainWindow::ConnectMenuEvents() {
 
     connect(ui->action_OpenPak_Open_Account, &QAction::triggered, this, [this] {
         if (!Common::OpenPakAccount::IsLinked()) {
-            QMessageBox::information(this, tr("OpenPak Account"),
-                                     tr("Sign in to your OpenPak account first."));
+            legacy_controller->SignIn();
             return;
         }
         OpenPakAccountDialog(legacy_controller, this).exec();
@@ -2407,6 +2427,7 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     current_title_id = title_id; // Store ID safely
 
     OfferOpenPakByamlDownload(title_id);
+    OpenPak::SaveSync::Pull(*system, title_id);
 
     if (type == StartGameType::Normal) {
         // Load per game settings if it is a normal boot
@@ -2650,6 +2671,19 @@ void GMainWindow::OnEmulationStopped() {
 
     // This is necessary to reset the in-memory state for the next launch.
     system->GetFileSystemController().InitializeContentSystem(*vfs, true);
+
+#ifdef ENABLE_WEB_SERVICE
+    // Only safe past this point: emu_thread has fully exited (no more concurrent guest access to
+    // the VFS) and InitializeContentSystem() just rebuilt a fresh save-data factory.
+    {
+        auto save_zip = OpenPak::SaveSync::CaptureForPush(*system, current_title_id);
+        if (!save_zip.empty()) {
+            std::thread{[title_id = current_title_id, zip = std::move(save_zip)]() mutable {
+                OpenPak::SaveSync::UploadCaptured(title_id, std::move(zip));
+            }}.detach();
+        }
+    }
+#endif
 
     // Refresh the game list now that the filesystem is valid again.
     game_list->ClearLaunchOverlays();
@@ -7216,6 +7250,19 @@ void GMainWindow::RunOpenPakByamlDownloadWithProgress(u64 title_id) {
 void GMainWindow::OpenPakByamlDownloadFromMenu(u64 title_id) {
 #ifdef ENABLE_WEB_SERVICE
     RunOpenPakByamlDownloadWithProgress(title_id);
+#endif
+}
+
+void GMainWindow::SilentlyDownloadOpenPakByaml(u64 title_id) {
+#ifdef ENABLE_WEB_SERVICE
+    std::thread{[this, title_id] {
+        const bool ok = OpenPakByamlDownload(title_id);
+        if (ok) {
+            LOG_INFO(Frontend, "OpenPak BCAT: auto-download succeeded for {:016X}", title_id);
+        } else {
+            LOG_ERROR(Frontend, "OpenPak BCAT: auto-download failed for {:016X}", title_id);
+        }
+    }}.detach();
 #endif
 }
 

@@ -1,0 +1,218 @@
+// SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "citron/legacy_save_sync.h"
+
+#include <filesystem>
+#include <vector>
+
+#include <fmt/format.h>
+
+#include "citron/legacy_compatible_titles.h"
+#include "common/logging.h"
+#include "common/legacy_account.h"
+#include "core/core.h"
+#include "core/file_sys/savedata_factory.h"
+#include "core/file_sys/vfs/vfs.h"
+#include "core/hle/service/filesystem/filesystem.h"
+
+#ifdef ENABLE_WEB_SERVICE
+#include "web_service/legacy_api.h"
+#endif
+
+#ifdef CITRON_ENABLE_LIBARCHIVE
+#include <archive.h>
+#include <archive_entry.h>
+#endif
+
+namespace OpenPak::SaveSync {
+
+namespace {
+
+bool IsEligible(u64 title_id) {
+    return OpenPak::CompatibleTitles::Table().count(title_id) != 0 &&
+          Common::OpenPakAccount::IsLinked();
+}
+
+bool HasLocalContent(const FileSys::VirtualDir& dir) {
+    if (!dir) {
+        return false;
+    }
+    if (!dir->GetFiles().empty()) {
+        return true;
+    }
+    for (const auto& sub : dir->GetSubdirectories()) {
+        if (sub && HasLocalContent(sub)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#ifdef CITRON_ENABLE_LIBARCHIVE
+
+void AddDirectoryToArchive(struct archive* a, const FileSys::VirtualDir& dir,
+                           const std::string& prefix) {
+    for (const auto& file : dir->GetFiles()) {
+        if (!file) {
+            continue;
+        }
+        const std::vector<u8> bytes = file->ReadAllBytes();
+
+        struct archive_entry* entry = archive_entry_new();
+        archive_entry_set_pathname(entry, (prefix + file->GetName()).c_str());
+        archive_entry_set_size(entry, static_cast<la_int64_t>(bytes.size()));
+        archive_entry_set_filetype(entry, AE_IFREG);
+        archive_entry_set_perm(entry, 0644);
+        if (archive_write_header(a, entry) == ARCHIVE_OK && !bytes.empty()) {
+            archive_write_data(a, bytes.data(), bytes.size());
+        }
+        archive_entry_free(entry);
+    }
+    for (const auto& sub : dir->GetSubdirectories()) {
+        if (sub) {
+            AddDirectoryToArchive(a, sub, prefix + sub->GetName() + "/");
+        }
+    }
+}
+
+la_ssize_t ArchiveAppendCallback(struct archive*, void* client_data, const void* buff,
+                                 size_t length) {
+    auto* out = static_cast<std::vector<u8>*>(client_data);
+    const auto* bytes = static_cast<const u8*>(buff);
+    out->insert(out->end(), bytes, bytes + length);
+    return static_cast<la_ssize_t>(length);
+}
+
+std::vector<u8> ZipDirectory(const FileSys::VirtualDir& dir) {
+    std::vector<u8> out;
+    struct archive* a = archive_write_new();
+    if (!a) {
+        return out;
+    }
+    archive_write_set_format_zip(a);
+    archive_write_open(a, &out, nullptr, ArchiveAppendCallback, nullptr);
+    AddDirectoryToArchive(a, dir, "");
+    archive_write_close(a);
+    archive_write_free(a);
+    return out;
+}
+
+bool UnzipToDirectory(std::span<const u8> zip_data, const std::filesystem::path& dest) {
+    struct archive* a = archive_read_new();
+    struct archive* ext = archive_write_disk_new();
+    if (!a || !ext) {
+        return false;
+    }
+
+    archive_read_support_format_zip(a);
+    archive_read_support_filter_all(a);
+    archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM);
+    archive_write_disk_set_standard_lookup(ext);
+
+    if (archive_read_open_memory(a, zip_data.data(), zip_data.size()) != ARCHIVE_OK) {
+        archive_read_free(a);
+        archive_write_free(ext);
+        return false;
+    }
+
+    std::filesystem::create_directories(dest);
+
+    struct archive_entry* entry;
+    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        const std::filesystem::path entry_path = dest / archive_entry_pathname(entry);
+        archive_entry_set_pathname(entry, entry_path.string().c_str());
+
+        if (archive_write_header(ext, entry) != ARCHIVE_OK) {
+            continue;
+        }
+        if (archive_entry_size(entry) > 0) {
+            const void* buff;
+            size_t size;
+            la_int64_t offset;
+            while (archive_read_data_block(a, &buff, &size, &offset) == ARCHIVE_OK) {
+                if (archive_write_data_block(ext, buff, size, offset) != ARCHIVE_OK) {
+                    break;
+                }
+            }
+        }
+        archive_write_finish_entry(ext);
+    }
+
+    archive_read_free(a);
+    archive_write_free(ext);
+    return true;
+}
+
+#endif // CITRON_ENABLE_LIBARCHIVE
+
+} // namespace
+
+void Pull(Core::System& system, u64 title_id, bool force) {
+#if defined(ENABLE_WEB_SERVICE) && defined(CITRON_ENABLE_LIBARCHIVE)
+    if (!IsEligible(title_id)) {
+        return;
+    }
+
+    auto save_dir = system.GetFileSystemController().GetSaveDataFactory().GetTitleSaveDirectory(
+        title_id);
+    if (!force && HasLocalContent(save_dir)) {
+        LOG_INFO(Frontend, "OpenPak save pull {:016X}: local save present -> kept (no overwrite)",
+                 title_id);
+        return;
+    }
+    if (!save_dir) {
+        return;
+    }
+
+    const auto zip = WebService::OpenPakApi::PullSave(fmt::format("{:016x}", title_id));
+    if (!zip || zip->empty()) {
+        return;
+    }
+
+    if (UnzipToDirectory(*zip, save_dir->GetFullPath())) {
+        LOG_INFO(Frontend, "OpenPak save pull {:016X}: applied ({} B)", title_id, zip->size());
+    }
+#else
+    (void)system;
+    (void)title_id;
+#endif
+}
+
+std::vector<u8> CaptureForPush(Core::System& system, u64 title_id) {
+#ifdef CITRON_ENABLE_LIBARCHIVE
+    if (!IsEligible(title_id)) {
+        return {};
+    }
+    auto save_dir = system.GetFileSystemController().GetSaveDataFactory().GetTitleSaveDirectory(
+        title_id);
+    if (!save_dir) {
+        return {};
+    }
+    return ZipDirectory(save_dir);
+#else
+    (void)system;
+    (void)title_id;
+    return {};
+#endif
+}
+
+void UploadCaptured(u64 title_id, std::vector<u8> zip_bytes) {
+#ifdef ENABLE_WEB_SERVICE
+    if (zip_bytes.empty()) {
+        return;
+    }
+    const std::string error =
+        WebService::OpenPakApi::PushSave(fmt::format("{:016x}", title_id), zip_bytes);
+    if (!error.empty()) {
+        LOG_WARNING(Frontend, "OpenPak save push {:016X} failed: {}", title_id, error);
+    } else {
+        LOG_INFO(Frontend, "OpenPak save push {:016X}: {} B", title_id, zip_bytes.size());
+    }
+#else
+    (void)title_id;
+    (void)zip_bytes;
+#endif
+}
+
+} // namespace OpenPak::SaveSync
