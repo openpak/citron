@@ -18,6 +18,14 @@ QWidget {
     outline: 0;
 }
 
+/* A generic QWidget rule doesn't reliably style QDialog/QMessageBox's own top-level
+   background on Windows (Qt stylesheet limitation) -- named dialogs below override this
+   fine via their higher-specificity #ObjectName selectors. */
+QDialog, QMessageBox {
+    background-color: #31363b;
+    color: #eff0f1;
+}
+
 QWidget:item:hover {
     background-color: #18465d;
     color: #eff0f1;

@@ -61,6 +61,14 @@ See Qt documentation:
 /* QWidget ----------------------------------------------------------------
 
 --------------------------------------------------------------------------- */
+/* A generic QWidget rule doesn't reliably style QDialog/QMessageBox's own top-level
+   background on Windows (Qt stylesheet limitation) -- named dialogs below override this
+   fine via their higher-specificity #ObjectName selectors. */
+QDialog, QMessageBox {
+  background-color: #19232D;
+  color: #F0F0F0;
+}
+
 QWidget {
   background-color: #19232D;
   border: 0px solid #32414B;

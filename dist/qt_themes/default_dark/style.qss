@@ -3,6 +3,14 @@
 * SPDX-FileCopyrightText: 2025 citron Emulator Project
 * SPDX-License-Identifier: GPL-2.0-or-later
 */
+/* This theme otherwise relies entirely on QPalette; a generic QWidget rule wouldn't
+   reliably style QDialog/QMessageBox's own top-level background on Windows anyway
+   (Qt stylesheet limitation), so state it explicitly here. */
+QDialog, QMessageBox {
+    background-color: #24242a;
+    color: #ffffff;
+}
+
 QAbstractSpinBox {
     min-height: 19px;
 }
