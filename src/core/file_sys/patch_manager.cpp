@@ -502,6 +502,15 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     std::vector<VirtualDir> patch_dirs = GetEnabledModsList(title_id, fs_controller);
 
+    // SDMC (Atmosphere) logic -- GetEnabledModsList alone only covers citron's own mod-load
+    // root, not SD-card-style atmosphere/contents mods, so NSO patches placed there (unlike
+    // full exefs/romfs replacements, which already search both) were never found.
+    const auto& disabled = Settings::values.disabled_addons[title_id];
+    const auto sdmc_load_dir = fs_controller.GetSDMCModificationLoadRoot(title_id);
+    if (sdmc_load_dir && std::find(disabled.begin(), disabled.end(), "SDMC") == disabled.end()) {
+        patch_dirs.push_back(sdmc_load_dir);
+    }
+
     std::sort(patch_dirs.begin(), patch_dirs.end(),
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
     const auto patches = CollectPatches(patch_dirs, build_id);
@@ -535,6 +544,13 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
 
     std::vector<VirtualDir> patch_dirs = GetEnabledModsList(title_id, fs_controller);
+
+    // SDMC (Atmosphere) logic -- see PatchNSO for why this is needed here too.
+    const auto& disabled = Settings::values.disabled_addons[title_id];
+    const auto sdmc_load_dir = fs_controller.GetSDMCModificationLoadRoot(title_id);
+    if (sdmc_load_dir && std::find(disabled.begin(), disabled.end(), "SDMC") == disabled.end()) {
+        patch_dirs.push_back(sdmc_load_dir);
+    }
 
     std::sort(patch_dirs.begin(), patch_dirs.end(),
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
