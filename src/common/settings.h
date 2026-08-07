@@ -721,7 +721,7 @@ struct Values {
     Setting<bool> perform_vulkan_check{linkage, true, "perform_vulkan_check", Category::Debugging};
 
     // Miscellaneous
-    Setting<std::string> log_filter{linkage, "*:Warning", "log_filter", Category::Debugging};
+    Setting<std::string> log_filter{linkage, "*:Info", "log_filter", Category::Debugging};
     Setting<bool> use_dev_keys{linkage, false, "use_dev_keys", Category::Miscellaneous};
 
     // Network
