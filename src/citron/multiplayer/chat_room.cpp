@@ -344,7 +344,9 @@ ChatRoom::ChatRoom(QWidget* parent) : QWidget(parent), ui(std::make_unique<Ui::C
     UpdateTheme();
 }
 
-ChatRoom::~ChatRoom() = default;
+ChatRoom::~ChatRoom() {
+    Shutdown();
+}
 
 void ChatRoom::SetShowOptions(bool show) {
     ui->options_button->setVisible(show);
@@ -354,9 +356,9 @@ void ChatRoom::SetShowOptions(bool show) {
 void ChatRoom::Initialize(Network::RoomNetwork* room_network_) {
     room_network = room_network_;
     if (auto member = room_network->GetRoomMember().lock()) {
-        member->BindOnChatMessageReceived(
+        callback_handle_chat = member->BindOnChatMessageReceived(
             [this](const Network::ChatEntry& chat) { emit ChatReceived(chat); });
-        member->BindOnStatusMessageReceived(
+        callback_handle_status_message = member->BindOnStatusMessageReceived(
             [this](const Network::StatusMessageEntry& status_message) {
                 emit StatusMessageReceived(status_message);
             });
@@ -365,6 +367,16 @@ void ChatRoom::Initialize(Network::RoomNetwork* room_network_) {
 
 void ChatRoom::Shutdown() {
     if (room_network) {
+        if (auto member = room_network->GetRoomMember().lock()) {
+            if (callback_handle_chat) {
+                member->Unbind(callback_handle_chat);
+                callback_handle_chat = nullptr;
+            }
+            if (callback_handle_status_message) {
+                member->Unbind(callback_handle_status_message);
+                callback_handle_status_message = nullptr;
+            }
+        }
         disconnect(this, &ChatRoom::ChatReceived, this, &ChatRoom::OnChatReceive);
         disconnect(this, &ChatRoom::StatusMessageReceived, this, &ChatRoom::OnStatusMessageReceive);
         room_network = nullptr;

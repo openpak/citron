@@ -33,9 +33,9 @@ ClientRoomWindow::ClientRoomWindow(QWidget* parent, Network::RoomNetwork& room_n
 
     // setup the callbacks for network updates
     if (auto member = room_network.GetRoomMember().lock()) {
-        member->BindOnRoomInformationChanged(
+        callback_handle_room_information = member->BindOnRoomInformationChanged(
             [this](const Network::RoomInformation& info) { emit RoomInformationChanged(info); });
-        member->BindOnStateChanged(
+        callback_handle_state = member->BindOnStateChanged(
             [this](const Network::RoomMember::State& state) { emit StateChanged(state); });
 
         connect(this, &ClientRoomWindow::RoomInformationChanged, this,
@@ -77,7 +77,16 @@ ClientRoomWindow::ClientRoomWindow(QWidget* parent, Network::RoomNetwork& room_n
     UpdateView();
 }
 
-ClientRoomWindow::~ClientRoomWindow() = default;
+ClientRoomWindow::~ClientRoomWindow() {
+    if (auto member = room_network.GetRoomMember().lock()) {
+        if (callback_handle_room_information) {
+            member->Unbind(callback_handle_room_information);
+        }
+        if (callback_handle_state) {
+            member->Unbind(callback_handle_state);
+        }
+    }
+}
 
 void ClientRoomWindow::SetModPerms(bool is_mod) {
     ui->chat->SetModPerms(is_mod);

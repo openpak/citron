@@ -100,6 +100,8 @@ private:
 
     std::unique_ptr<Ui::ChatRoom> ui;
     Network::RoomNetwork* room_network;
+    Network::RoomMember::CallbackHandle<Network::ChatEntry> callback_handle_chat;
+    Network::RoomMember::CallbackHandle<Network::StatusMessageEntry> callback_handle_status_message;
 
     QPushButton* send_message;
     QStandardItemModel* player_list;

@@ -43,4 +43,6 @@ private:
     QAction* moderation_action = nullptr;
     QString current_description;
     Network::RoomNetwork& room_network;
+    Network::RoomMember::CallbackHandle<Network::RoomInformation> callback_handle_room_information;
+    Network::RoomMember::CallbackHandle<Network::RoomMember::State> callback_handle_state;
 };

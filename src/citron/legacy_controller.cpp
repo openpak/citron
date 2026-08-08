@@ -6,6 +6,7 @@
 
 #include <QByteArray>
 #include <QDesktopServices>
+#include <QPointer>
 #include <QProcess>
 #include <QUrl>
 
@@ -115,8 +116,12 @@ void OpenPakController::SignIn() {
 #ifdef ENABLE_WEB_SERVICE
     emit StatusChanged(tr("Finish signing in in your browser, then come back here."));
 
-    std::thread{[this] {
-        const auto open_url = [this](const std::string& url) {
+    QPointer<OpenPakController> self(this);
+    std::thread{[this, self] {
+        const auto open_url = [this, self](const std::string& url) {
+            if (!self) {
+                return;
+            }
             QMetaObject::invokeMethod(
                 this,
                 [url] {
@@ -138,9 +143,15 @@ void OpenPakController::SignIn() {
 
         auto login_result = WebService::OpenPakApi::SignInWithBrowser(open_url);
 
+        if (!self) {
+            return;
+        }
         QMetaObject::invokeMethod(
             this,
-            [this, result = std::move(login_result)] {
+            [this, self, result = std::move(login_result)] {
+                if (!self) {
+                    return;
+                }
                 if (!result.ok) {
                     emit StatusChanged(QString::fromStdString(result.error));
                     return;
@@ -176,10 +187,19 @@ void OpenPakController::ManualSaveDownload(u64 title_id) {
     }
 
     emit StatusChanged(tr("Downloading save from the cloud..."));
-    std::thread{[this, title_id] {
+    QPointer<OpenPakController> self(this);
+    std::thread{[this, self, title_id] {
         OpenPak::SaveSync::Pull(system, title_id, /*force=*/true);
+        if (!self) {
+            return;
+        }
         QMetaObject::invokeMethod(
-            this, [this] { emit StatusChanged(tr("Cloud save applied.")); }, Qt::QueuedConnection);
+            this, [this, self] {
+                if (!self) {
+                    return;
+                }
+                emit StatusChanged(tr("Cloud save applied."));
+            }, Qt::QueuedConnection);
     }}.detach();
 #else
     emit StatusChanged(tr("This build has no web services support."));
@@ -225,15 +245,22 @@ void OpenPakController::PollFriends() {
         return;
     }
 
-    std::thread{[this] {
+    QPointer<OpenPakController> self(this);
+    std::thread{[this, self] {
         auto fetched = WebService::OpenPakApi::GetFriends();
         if (!fetched.ok) {
+            return;
+        }
+        if (!self) {
             return;
         }
 
         QMetaObject::invokeMethod(
             this,
-            [this, list = std::move(fetched)] {
+            [this, self, list = std::move(fetched)] {
+                if (!self) {
+                    return;
+                }
                 std::vector<Common::OpenPakFriends::Entry> cache;
                 cache.reserve(list.friends.size());
                 for (const auto& entry : list.friends) {
