@@ -528,6 +528,10 @@ endif()
 # lld by default and does not accept -fuse-ld=bfd.  The generator expression
 # restricts the flag to GNU builds so MinGW/Clang cross-compile builds are unaffected.
 if (NOT MSVC AND NOT APPLE)
+    if (NOT WIN32)
+        # Keep our static OpenSSL from shadowing Qt's system libssl/libcrypto (ELF-only).
+        target_link_options(citron PRIVATE "SHELL:-Xlinker --exclude-libs -Xlinker libcrypto.a,libssl.a")
+    endif()
     target_link_options(citron PRIVATE "$<$<CXX_COMPILER_ID:GNU>:-fuse-ld=bfd>")
     if (MINGW AND CITRON_ENABLE_LTO)
         target_link_options(citron PRIVATE "-Wl,--allow-multiple-definition")
