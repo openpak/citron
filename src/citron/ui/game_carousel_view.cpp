@@ -22,7 +22,11 @@
 #include "citron/uisettings.h"
 #include "citron/theme.h"
 #include "citron/custom_metadata.h"
+#include "citron/legacy_compatible_titles.h"
+#include "citron/legacy_ldn_counts.h"
+#include "citron/legacy_online_counts.h"
 #include "citron/util/image_cache.h"
+#include "common/legacy_account.h"
 
 namespace {
 constexpr int kBackdropPickerRowH = 40;
@@ -532,6 +536,7 @@ void CinematicCarousel::paintEvent(QPaintEvent* event) {
         if (!pix.isNull()) {
             const QPixmap rounded = RoundedIcon(pix);
             p.drawPixmap(card, rounded, rounded.rect());
+            DrawOnlineBadges(p, card, program_id);
         } else {
             QPainterPath clip;
             clip.addRoundedRect(card, 14, 14);
@@ -726,6 +731,62 @@ QPixmap CinematicCarousel::RoundedIcon(const QPixmap& source) const {
 
     m_rounded_icon_cache.insert(key, rounded);
     return rounded;
+}
+
+void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id) const {
+    const bool show_legacy = Common::OpenPakAccount::IsLinked() &&
+                               OpenPak::CompatibleTitles::Table().contains(program_id);
+    const std::optional<OpenPak::LdnCounts::Stats> ldn = OpenPak::LdnCounts::For(program_id);
+    if (!show_legacy && !ldn) {
+        return;
+    }
+
+    const qreal scale = std::clamp(card.width() / 130.0, 0.55, 1.5);
+    const qreal dot_d = 8.0 * scale;
+    const qreal pad = 7.0 * scale;
+    const qreal badge_h = 18.0 * scale;
+
+    QFont f = font();
+    f.setBold(true);
+    f.setPixelSize(std::max(9, static_cast<int>(10 * scale)));
+    const QFontMetrics fm(f);
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+
+    auto draw_corner = [&](bool top_right, const QString& text, const QColor& color) {
+        const qreal text_w = fm.horizontalAdvance(text);
+        const qreal badge_w = dot_d + 6.0 * scale + text_w + 8.0 * scale;
+        const QRectF badge_rect =
+            top_right ? QRectF(card.right() - badge_w - pad, card.top() + pad, badge_w, badge_h)
+                     : QRectF(card.left() + pad, card.top() + pad, badge_w, badge_h);
+
+        QPainterPath bg;
+        bg.addRoundedRect(badge_rect, badge_h / 2.0, badge_h / 2.0);
+        p.fillPath(bg, QColor(12, 12, 16, 195));
+
+        const QRectF dot(badge_rect.left() + 5.0 * scale, badge_rect.center().y() - dot_d / 2.0,
+                         dot_d, dot_d);
+        p.setPen(Qt::NoPen);
+        p.setBrush(color);
+        p.drawEllipse(dot);
+
+        p.setFont(f);
+        p.setPen(Qt::white);
+        const QRectF text_rect(dot.right() + 4.0 * scale, badge_rect.top(),
+                               text_w + 4.0 * scale, badge_h);
+        p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, text);
+    };
+
+    if (show_legacy) {
+        const int players = OpenPak::OnlineCounts::For(program_id);
+        draw_corner(true, QString::number(players), QColor(50, 195, 85));
+    }
+    if (ldn) {
+        draw_corner(false, QString::number(ldn->players), QColor(0, 170, 255));
+    }
+
+    p.restore();
 }
 
 GameCarouselView::GameCarouselView(QWidget* parent) : QWidget(parent) {

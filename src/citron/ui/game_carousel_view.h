@@ -12,6 +12,8 @@
 #include <QSpacerItem>
 #include <QHash>
 
+#include "common/common_types.h"
+
 class OpenPakProfileChip;
 class OpenPakStatusCluster;
 class QLabel;
@@ -107,6 +109,7 @@ private:
     void DrawBackdrop(QPainter& p, const QRectF& bg_rect) const;
     void RefreshBackdropCache(const QSize& logical_size);
     QPixmap RoundedIcon(const QPixmap& source) const;
+    void DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id) const;
 
     BackdropTheme m_backdrop_theme = BackdropTheme::Gradient;
     QPixmap m_backdrop_cache;

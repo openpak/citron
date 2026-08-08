@@ -272,6 +272,8 @@ add_executable(citron
     legacy_compatible_titles.h
     legacy_history_delegate.cpp
     legacy_history_delegate.h
+    legacy_ldn_counts.cpp
+    legacy_ldn_counts.h
     legacy_network_probe.cpp
     legacy_network_probe.h
     legacy_online_counts.cpp

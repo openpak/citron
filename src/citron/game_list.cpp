@@ -73,6 +73,7 @@
 #include "citron/icon_selection_dialog.h"
 #include "citron/main.h"
 #include "citron/mod_manager/gamebanana_dialog.h"
+#include "citron/legacy_ldn_counts.h"
 #include "citron/multiplayer/state.h"
 #include "citron/poster_selection_dialog.h"
 #include "citron/theme.h"
@@ -2561,6 +2562,8 @@ static void UpdateOnlineStatusRecursive(QStandardItem* parent,
 }
 
 void GameList::OnOnlineStatusUpdated(const std::map<u64, std::pair<int, int>>& online_stats) {
+    OpenPak::LdnCounts::Set(online_stats);
+
     if (!item_model) {
         return;
     }
