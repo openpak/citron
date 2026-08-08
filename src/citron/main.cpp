@@ -658,6 +658,8 @@ GMainWindow::~GMainWindow() {
     }
 
 #ifdef __unix__
+    delete sig_interrupt_notifier;
+    sig_interrupt_notifier = nullptr;
     ::close(sig_interrupt_fds[0]);
     ::close(sig_interrupt_fds[1]);
 #endif
