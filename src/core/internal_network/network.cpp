@@ -658,12 +658,16 @@ std::pair<s32, Errno> Poll(std::vector<PollFD>& pollfds, s32 timeout) {
         return {0, Errno::SUCCESS};
     }
 
-    for (size_t i = 0; i < num; ++i) {
-        pollfds[i].revents = TranslatePollRevents(host_pollfds[i].revents);
-    }
-
     if (result > 0) {
-        return {result, Errno::SUCCESS};
+        // result includes the appended interrupt fd; don't count that toward the caller's fds.
+        s32 real_count = 0;
+        for (size_t i = 0; i < num; ++i) {
+            pollfds[i].revents = TranslatePollRevents(host_pollfds[i].revents);
+            if (host_pollfds[i].revents != 0) {
+                ++real_count;
+            }
+        }
+        return {real_count, Errno::SUCCESS};
     }
 
     ASSERT(result == SOCKET_ERROR);
