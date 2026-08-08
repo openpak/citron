@@ -3281,7 +3281,8 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
     QAction* hide_game = context_menu.addAction(tr("Hide Game"));
     context_menu.addSeparator();
     QAction* download_online_schedule = nullptr;
-    if (main_window && main_window->OpenPakByamlRequired(program_id)) {
+    if (main_window && main_window->OpenPakByamlRequired(program_id) &&
+        main_window->OpenPakByamlDownloadEnabled()) {
         download_online_schedule = context_menu.addAction(tr("Download Online Schedule"));
     }
     QAction* start_game = context_menu.addAction(tr("Start Game"));

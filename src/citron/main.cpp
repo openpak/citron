@@ -495,7 +495,7 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
     // Always attempted, not gated on OpenPakByamlInstalled: the download itself is conditional
     // (If-Modified-Since) so an up-to-date copy costs a cheap 304, but a stale one now actually
     // gets refreshed instead of being treated as "done" forever after the first successful run.
-    if (!has_performed_bcat_autodownload) {
+    if (!has_performed_bcat_autodownload && OpenPakByamlDownloadEnabled()) {
         has_performed_bcat_autodownload = true;
         static constexpr std::array<u64, 3> kByamlTitles{
             0x0100f8f0000a2000ULL, 0x01003bc0000a0000ULL, 0x01003c700009c800ULL,
@@ -7166,6 +7166,13 @@ bool GMainWindow::OpenPakByamlRequired(u64 title_id) const {
     }
 }
 
+bool GMainWindow::OpenPakByamlDownloadEnabled() const {
+    // Disabled for now: the server-side BCAT data itself is wrong (confirmed on both citron
+    // and Ryujinx), so downloading just replaces one incorrect copy with another. Re-enable
+    // once that's fixed upstream.
+    return false;
+}
+
 bool GMainWindow::OpenPakByamlInstalled(u64 title_id) const {
     const auto path = Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
                       fmt::format("system/save/bcat/{:016X}/vsdata/VSSetting_0.byaml", title_id);
@@ -7224,6 +7231,9 @@ void OpenPakByamlWriteLastModified(const std::string& title_id_hex, const std::s
 
 bool GMainWindow::OpenPakByamlDownload(u64 title_id) {
 #ifdef ENABLE_WEB_SERVICE
+    if (!OpenPakByamlDownloadEnabled()) {
+        return false;
+    }
     const auto title_id_hex = fmt::format("{:016X}", title_id);
     const auto stored_last_modified = OpenPakByamlReadLastModified(title_id_hex);
     auto check = WebService::OpenPakApi::DownloadBcatSeedIfNewer(title_id_hex,
@@ -7311,8 +7321,8 @@ void GMainWindow::SilentlyDownloadOpenPakByaml(u64 title_id) {
 
 void GMainWindow::OfferOpenPakByamlDownload(u64 title_id) {
 #ifdef ENABLE_WEB_SERVICE
-    if (!OpenPakByamlRequired(title_id) || OpenPakByamlInstalled(title_id) ||
-        OpenPakByamlSkipped(title_id)) {
+    if (!OpenPakByamlDownloadEnabled() || !OpenPakByamlRequired(title_id) ||
+        OpenPakByamlInstalled(title_id) || OpenPakByamlSkipped(title_id)) {
         return;
     }
 

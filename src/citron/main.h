@@ -158,6 +158,7 @@ public:
     bool OpenPakByamlRequired(u64 title_id) const;
     bool OpenPakByamlInstalled(u64 title_id) const;
     bool OpenPakByamlSkipped(u64 title_id) const;
+    bool OpenPakByamlDownloadEnabled() const;
     bool IsConfiguring() const {
         return m_is_configuring;
     }
