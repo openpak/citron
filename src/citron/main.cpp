@@ -1630,6 +1630,7 @@ void GMainWindow::InitializeHotkeys() {
     LinkActionShortcut(ui->action_Show_Filter_Bar, QStringLiteral("Toggle Filter Bar"));
     LinkActionShortcut(ui->action_Toggle_Grid_View, QStringLiteral("Toggle Grid View"));
     LinkActionShortcut(ui->action_Show_Status_Bar, QStringLiteral("Toggle Status Bar"));
+    LinkActionShortcut(ui->action_OpenPak_Open_Account, QStringLiteral("Toggle OpenPak Account"));
     LinkActionShortcut(ui->action_Show_Performance_Overlay,
                        QStringLiteral("Toggle Performance Overlay"));
     LinkActionShortcut(ui->action_Show_Vram_Overlay, QStringLiteral("Toggle VRAM Overlay"));

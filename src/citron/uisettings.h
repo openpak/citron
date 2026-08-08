@@ -293,7 +293,7 @@ namespace UISettings {
     // This must be in alphabetical order according to action name as it must have the same order as
     // UISetting::values.shortcuts, which is alphabetically ordered.
     // clang-format off
-    extern const std::array<Shortcut, 31> default_hotkeys;
+    extern const std::array<Shortcut, 32> default_hotkeys;
 // clang-format on
 
 } // namespace UISettings
