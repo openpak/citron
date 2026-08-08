@@ -82,23 +82,6 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
     // Get the synchronization context.
     auto& kernel = system.Kernel();
 
-    // TEMP diagnostic for the flexlion/Splatoon 2 main-code-corruption investigation --
-    // remove once the writer is found. Flags the instant main+0x184F950 stops being the
-    // real `b.ne` and logs whatever's executing at that moment.
-    {
-        static std::atomic<bool> already_logged{false};
-        if (!already_logged.load(std::memory_order_relaxed)) {
-            u32 word{};
-            if (GetCurrentMemory(kernel).ReadBlock(0x81853950ULL, &word, sizeof(word)) &&
-                word != 0x54000B01) {
-                already_logged.store(true, std::memory_order_relaxed);
-                LOG_CRITICAL(Kernel_SVC,
-                             "[diag] main+0x184F950 corrupted: now 0x{:08X} (was 0x54000B01)",
-                             word);
-                system.CurrentPhysicalCore().LogBacktrace();
-            }
-        }
-    }
     auto& handle_table = GetCurrentProcess(kernel).GetHandleTable();
     auto objs = GetCurrentThread(kernel).GetSynchronizationObjectBuffer();
     auto handles = GetCurrentThread(kernel).GetHandleBuffer();
