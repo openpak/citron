@@ -266,7 +266,7 @@ httplib::Client& SharedClient() {
 }
 
 httplib::Result Send(const std::string& method, const std::string& path, const std::string& body,
-                     const std::string& bearer) {
+                     const std::string& bearer, const httplib::Headers& extra_headers = {}) {
     static std::mutex client_mutex;
     std::lock_guard lock{client_mutex};
     httplib::Client& client = SharedClient();
@@ -274,6 +274,9 @@ httplib::Result Send(const std::string& method, const std::string& path, const s
     httplib::Headers headers{{"User-Agent", "citron"}};
     if (!bearer.empty()) {
         headers.emplace("Authorization", "Bearer " + bearer);
+    }
+    for (const auto& [key, value] : extra_headers) {
+        headers.emplace(key, value);
     }
 
     auto result = method == "GET"    ? client.Get(path, headers)
@@ -503,6 +506,38 @@ std::vector<u8> DownloadBcatSeed(const std::string& title_id_hex) {
     }
 
     return std::vector<u8>(result->body.begin(), result->body.end());
+}
+
+BcatSeedCheck DownloadBcatSeedIfNewer(const std::string& title_id_hex,
+                                      const std::string& if_modified_since) {
+    const std::string token = Common::OpenPakAccount::GetToken();
+    httplib::Headers extra;
+    if (!if_modified_since.empty()) {
+        extra.emplace("If-Modified-Since", if_modified_since);
+    }
+    const auto result = Send("GET", "/api/bcat/" + title_id_hex, {}, token, extra);
+
+    BcatSeedCheck check;
+    if (ClearSessionIfRejected(result)) {
+        return check;
+    }
+    if (!result) {
+        LOG_WARNING(WebService, "OpenPak BCAT freshness check failed (no response)");
+        return check;
+    }
+    if (result->status == 304) {
+        check.not_modified = true;
+        return check;
+    }
+    if (result->status != 200) {
+        LOG_WARNING(WebService, "OpenPak BCAT seed download failed (HTTP {})", result->status);
+        return check;
+    }
+    if (const auto it = result->headers.find("Last-Modified"); it != result->headers.end()) {
+        check.last_modified = it->second;
+    }
+    check.zip_bytes.assign(result->body.begin(), result->body.end());
+    return check;
 }
 
 std::optional<std::vector<u8>> PullSave(const std::string& title_id_hex) {

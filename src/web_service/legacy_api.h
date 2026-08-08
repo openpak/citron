@@ -94,6 +94,18 @@ void PushPresence(s32 status, const std::string& app_field, const std::string& a
 // locally to go online (Splatoon 2). title_id_hex is 16 uppercase hex digits. Empty on failure.
 std::vector<u8> DownloadBcatSeed(const std::string& title_id_hex);
 
+struct BcatSeedCheck {
+    bool not_modified = false;   // true: server confirmed no change since if_modified_since
+    std::string last_modified;   // server's current Last-Modified; store this and send it back
+    std::vector<u8> zip_bytes;   // populated only when not_modified is false and the GET succeeded
+};
+
+// Same seed as DownloadBcatSeed, but conditional: pass the Last-Modified value stored from a
+// previous call (empty if none stored yet) and the server answers 304 instead of resending the
+// zip when nothing changed, so a stale local rotation schedule doesn't stick around forever.
+BcatSeedCheck DownloadBcatSeedIfNewer(const std::string& title_id_hex,
+                                      const std::string& if_modified_since);
+
 // Public, unauthenticated. Maps lowercase-hex title id -> currently connected player count.
 std::map<std::string, int> GetOnlineCounts();
 

@@ -67,6 +67,7 @@ class VfsFilesystem;
 enum class GameListOpenTarget {
     SaveData,
     ModData,
+    BcatData,
 };
 
 enum class GameListRemoveTarget {

@@ -491,16 +491,18 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
 #ifdef ENABLE_WEB_SERVICE
     // The content provider isn't populated with installed titles yet at this point in boot, so
     // there's nothing reliable to check "is Splatoon 2 installed" against here. Just attempt it
-    // for the 3 known title IDs; OpenPakByamlInstalled/Skipped still make this a true no-op after
-    // the first successful run or a decline.
+    // for the 3 known title IDs; OpenPakByamlSkipped still makes this a no-op after a decline.
+    // Always attempted, not gated on OpenPakByamlInstalled: the download itself is conditional
+    // (If-Modified-Since) so an up-to-date copy costs a cheap 304, but a stale one now actually
+    // gets refreshed instead of being treated as "done" forever after the first successful run.
     if (!has_performed_bcat_autodownload) {
         has_performed_bcat_autodownload = true;
         static constexpr std::array<u64, 3> kByamlTitles{
             0x0100f8f0000a2000ULL, 0x01003bc0000a0000ULL, 0x01003c700009c800ULL,
         };
         for (const u64 title_id : kByamlTitles) {
-            if (!OpenPakByamlInstalled(title_id) && !OpenPakByamlSkipped(title_id)) {
-                LOG_INFO(Frontend, "OpenPak BCAT: auto-downloading schedule for {:016X}",
+            if (!OpenPakByamlSkipped(title_id)) {
+                LOG_INFO(Frontend, "OpenPak BCAT: checking schedule freshness for {:016X}",
                          title_id);
                 SilentlyDownloadOpenPakByaml(title_id);
             }
@@ -2936,6 +2938,12 @@ void GMainWindow::OnGameListOpenFolder(u64 program_id, GameListOpenTarget target
         open_target = tr("Mod Data");
         path = Common::FS::GetCitronPath(Common::FS::CitronPath::LoadDir) /
                fmt::format("{:016X}", program_id);
+        break;
+    }
+    case GameListOpenTarget::BcatData: {
+        open_target = tr("BCAT Data");
+        path = Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
+               fmt::format("system/save/bcat/{:016X}", program_id);
         break;
     }
     default:
@@ -7190,11 +7198,41 @@ void GMainWindow::OpenPakByamlMarkSkipped(u64 title_id) const {
     }
 }
 
+namespace {
+std::filesystem::path OpenPakByamlLastModifiedPath(const std::string& title_id_hex) {
+    return Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
+           fmt::format("system/save/bcat/{}/.legacy_last_modified", title_id_hex);
+}
+
+std::string OpenPakByamlReadLastModified(const std::string& title_id_hex) {
+    std::ifstream file{OpenPakByamlLastModifiedPath(title_id_hex)};
+    std::string value;
+    std::getline(file, value);
+    return value;
+}
+
+void OpenPakByamlWriteLastModified(const std::string& title_id_hex, const std::string& value) {
+    if (value.empty()) {
+        return;
+    }
+    std::ofstream file{OpenPakByamlLastModifiedPath(title_id_hex)};
+    if (file) {
+        file << value;
+    }
+}
+} // namespace
+
 bool GMainWindow::OpenPakByamlDownload(u64 title_id) {
 #ifdef ENABLE_WEB_SERVICE
     const auto title_id_hex = fmt::format("{:016X}", title_id);
-    const auto zip_bytes = WebService::OpenPakApi::DownloadBcatSeed(title_id_hex);
-    if (zip_bytes.empty()) {
+    const auto stored_last_modified = OpenPakByamlReadLastModified(title_id_hex);
+    auto check = WebService::OpenPakApi::DownloadBcatSeedIfNewer(title_id_hex,
+                                                                   stored_last_modified);
+    if (check.not_modified) {
+        // Already have the current rotation schedule; nothing to redo.
+        return OpenPakByamlInstalled(title_id);
+    }
+    if (check.zip_bytes.empty()) {
         return false;
     }
 
@@ -7205,8 +7243,8 @@ bool GMainWindow::OpenPakByamlDownload(u64 title_id) {
         if (!out) {
             return false;
         }
-        out.write(reinterpret_cast<const char*>(zip_bytes.data()),
-                  static_cast<std::streamsize>(zip_bytes.size()));
+        out.write(reinterpret_cast<const char*>(check.zip_bytes.data()),
+                  static_cast<std::streamsize>(check.zip_bytes.size()));
     }
 
     const auto dest_path =
@@ -7219,6 +7257,9 @@ bool GMainWindow::OpenPakByamlDownload(u64 title_id) {
 
     const bool ok = ExtractZipToDirectory(tmp_path, dest_path);
     std::filesystem::remove(tmp_path);
+    if (ok) {
+        OpenPakByamlWriteLastModified(title_id_hex, check.last_modified);
+    }
     return ok;
 #else
     return false;

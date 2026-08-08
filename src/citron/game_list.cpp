@@ -3291,6 +3291,10 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
     QAction* open_save_location = context_menu.addAction(tr("Open Save Data Location"));
     QAction* open_nand_location = context_menu.addAction(tr("Open NAND Location"));
     QAction* open_file_location = context_menu.addAction(tr("Open File Location"));
+    QAction* open_bcat_location = nullptr;
+    if (main_window && main_window->OpenPakByamlRequired(program_id)) {
+        open_bcat_location = context_menu.addAction(tr("Open BCAT Location"));
+    }
     QAction* set_custom_save_path = context_menu.addAction(tr("Set Custom Save Path"));
     QAction* remove_custom_save_path = context_menu.addAction(tr("Revert to NAND Save Path"));
     QAction* disable_mirroring = context_menu.addAction(tr("Disable Mirroring"));
@@ -3462,6 +3466,11 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
     connect(open_save_location, &QAction::triggered, [this, program_id, path_str]() {
         emit OpenFolderRequested(program_id, GameListOpenTarget::SaveData, path_str);
     });
+    if (open_bcat_location) {
+        connect(open_bcat_location, &QAction::triggered, [this, program_id, path_str]() {
+            emit OpenFolderRequested(program_id, GameListOpenTarget::BcatData, path_str);
+        });
+    }
 
     connect(set_custom_save_path, &QAction::triggered, [this, program_id, copyWithProgress]() {
         const QString new_path =
