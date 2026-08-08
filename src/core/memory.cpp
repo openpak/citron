@@ -7,6 +7,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <mutex>
@@ -37,6 +38,17 @@
 #include "video_core/rasterizer_download_area.h"
 
 namespace Core::Memory {
+
+namespace {
+// A guest bug can spin on an unmapped access indefinitely; on real hardware that would fault
+// and terminate the thread, but citron just no-ops it, so full formatted logging on every single
+// occurrence can alone stall the emulation. Log the first few, then throttle hard.
+bool ShouldLogUnmappedAccess() {
+    static std::atomic<u64> count{0};
+    const u64 n = count.fetch_add(1, std::memory_order_relaxed);
+    return n < 20 || (n % 100000) == 0;
+}
+} // namespace
 
 static inline bool AddressSpaceContains(const Common::PageTable& table, const Common::ProcessAddress addr, const std::size_t size) {
     const Common::ProcessAddress max_addr = 1ULL << table.GetAddressSpaceBits();
@@ -226,9 +238,11 @@ struct Memory::Impl {
             src_addr, size,
             [src_addr, size, &dest_buffer](const std::size_t copy_amount,
                                            const Common::ProcessAddress current_vaddr) {
-                LOG_ERROR(HW_Memory,
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory,
                           "Unmapped ReadBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
                           GetInteger(current_vaddr), GetInteger(src_addr), size);
+                }
                std::memset(dest_buffer, 0, copy_amount);
             },
             [&](const std::size_t copy_amount, const u8* const src_ptr) {
@@ -281,9 +295,11 @@ struct Memory::Impl {
             dest_addr, size,
             [dest_addr, size](const std::size_t copy_amount,
                               const Common::ProcessAddress current_vaddr) {
-                LOG_ERROR(HW_Memory,
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory,
                           "Unmapped WriteBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
                           GetInteger(current_vaddr), GetInteger(dest_addr), size);
+                }
             },
             [&](const std::size_t copy_amount, u8* const dest_ptr) {
                 std::memcpy(dest_ptr, src_buffer, copy_amount);
@@ -317,9 +333,11 @@ struct Memory::Impl {
             dest_addr, size,
             [dest_addr, size](const std::size_t copy_amount,
                               const Common::ProcessAddress current_vaddr) {
-                LOG_ERROR(HW_Memory,
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory,
                           "Unmapped ZeroBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
                           GetInteger(current_vaddr), GetInteger(dest_addr), size);
+                }
             },
             [](const std::size_t copy_amount, u8* const dest_ptr) {
                std::memset(dest_ptr, 0, copy_amount);
@@ -337,9 +355,11 @@ struct Memory::Impl {
         return WalkBlock(
             dest_addr, size,
             [&](const std::size_t copy_amount, const Common::ProcessAddress current_vaddr) {
-                LOG_ERROR(HW_Memory,
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory,
                           "Unmapped CopyBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
                           GetInteger(current_vaddr), GetInteger(src_addr), size);
+                }
                 ZeroBlock(dest_addr, copy_amount);
             },
             [&](const std::size_t copy_amount, const u8* const src_ptr) {
@@ -365,8 +385,10 @@ struct Memory::Impl {
             WalkBlock(
                 dest_addr, size,
                 [&](const std::size_t block_size, const Common::ProcessAddress current_vaddr) {
-                    LOG_ERROR(HW_Memory, "Unmapped cache maintenance @ {:#018X}",
+                    if (ShouldLogUnmappedAccess()) {
+                        LOG_ERROR(HW_Memory, "Unmapped cache maintenance @ {:#018X}",
                               GetInteger(current_vaddr));
+                    }
                     throw InvalidMemoryException();
                 },
                 [&](const std::size_t block_size, u8* const host_ptr) {},
@@ -633,7 +655,9 @@ struct Memory::Impl {
         return GetPointerImpl(
             GetInteger(vaddr),
             [vaddr]() {
-                LOG_ERROR(HW_Memory, "Unmapped GetPointer @ 0x{:016X}", GetInteger(vaddr));
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory, "Unmapped GetPointer @ 0x{:016X}", GetInteger(vaddr));
+                }
             },
             []() {});
     }
@@ -653,7 +677,9 @@ struct Memory::Impl {
         auto const addr_c1 = GetInteger(vaddr);
         if constexpr (sizeof(T) <= 1) {
             if (auto const ptr_c1 = GetPointerImpl(addr_c1, [addr_c1] {
-                LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                }
             }, [&] {
                 HandleRasterizerDownload(addr_c1, sizeof(T));
             }); ptr_c1) {
@@ -668,7 +694,9 @@ struct Memory::Impl {
             const bool crosses_page = (addr_c1 & 4095) + sizeof(T) > 4096;
             if (!crosses_page) {
                 if (auto const ptr_c1 = GetPointerImpl(addr_c1, [addr_c1] {
-                    LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    if (ShouldLogUnmappedAccess()) {
+                        LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    }
                 }, [&] {
                     HandleRasterizerDownload(addr_c1, sizeof(T));
                 }); ptr_c1) {
@@ -683,12 +711,16 @@ struct Memory::Impl {
                 auto const count_c2 = (addr_c1 + sizeof(T)) & 4095;
                 auto const count_c1 = sizeof(T) - count_c2;
                 if (auto const ptr_c1 = GetPointerImpl(addr_c1, [addr_c1] {
-                    LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    if (ShouldLogUnmappedAccess()) {
+                        LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    }
                 }, [&] {
                     HandleRasterizerDownload(addr_c1, count_c1);
                 }); ptr_c1) {
                     if (auto const ptr_c2 = GetPointerImpl(addr_c2, [addr_c2] {
-                        LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c2);
+                        if (ShouldLogUnmappedAccess()) {
+                            LOG_ERROR(HW_Memory, "Unmapped Read{} @ 0x{:016X}", sizeof(T) * 8, addr_c2);
+                        }
                     }, [&] {
                         HandleRasterizerDownload(addr_c2, count_c2);
                     }); ptr_c2) {
@@ -712,7 +744,9 @@ struct Memory::Impl {
         auto const addr_c1 = GetInteger(vaddr);
         if constexpr (sizeof(T) <= 1) {
             if (auto const ptr_c1 = GetPointerImpl(addr_c1, [addr_c1] {
-                LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                }
             }, [&] {
                 HandleRasterizerWrite(addr_c1, sizeof(T));
             }); ptr_c1) {
@@ -722,7 +756,9 @@ struct Memory::Impl {
             const bool crosses_page = (addr_c1 & 4095) + sizeof(T) > 4096;
             if (!crosses_page) {
                 if (auto const ptr_c1 = GetPointerImpl(addr_c1, [addr_c1] {
-                    LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    if (ShouldLogUnmappedAccess()) {
+                        LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    }
                 }, [&] {
                     HandleRasterizerWrite(addr_c1, sizeof(T));
                 }); ptr_c1) {
@@ -735,12 +771,16 @@ struct Memory::Impl {
                 auto const count_c2 = (addr_c1 + sizeof(T)) & 4095;
                 auto const count_c1 = sizeof(T) - count_c2;
                 if (auto const ptr_c1 = GetPointerImpl(addr_c1, [addr_c1] {
-                    LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    if (ShouldLogUnmappedAccess()) {
+                        LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c1);
+                    }
                 }, [&] {
                     HandleRasterizerWrite(addr_c1, count_c1);
                 }); ptr_c1) {
                     if (auto const ptr_c2 = GetPointerImpl(addr_c2, [addr_c2] {
-                        LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c2);
+                        if (ShouldLogUnmappedAccess()) {
+                            LOG_ERROR(HW_Memory, "Unmapped Write{} @ 0x{:016X}", sizeof(T) * 8, addr_c2);
+                        }
                     }, [&] {
                         HandleRasterizerWrite(addr_c2, count_c2);
                     }); ptr_c2) {
@@ -758,8 +798,10 @@ struct Memory::Impl {
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
             [vaddr, data]() {
-                LOG_ERROR(HW_Memory, "Unmapped WriteExclusive{} @ 0x{:016X} = 0x{:016X}",
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory, "Unmapped WriteExclusive{} @ 0x{:016X} = 0x{:016X}",
                           sizeof(T) * 8, GetInteger(vaddr), static_cast<u64>(data));
+                }
             },
             [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(T)); });
         if (ptr) {
@@ -772,8 +814,10 @@ struct Memory::Impl {
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
             [vaddr, data]() {
-                LOG_ERROR(HW_Memory, "Unmapped WriteExclusive128 @ 0x{:016X} = 0x{:016X}{:016X}",
+                if (ShouldLogUnmappedAccess()) {
+                    LOG_ERROR(HW_Memory, "Unmapped WriteExclusive128 @ 0x{:016X} = 0x{:016X}{:016X}",
                           GetInteger(vaddr), static_cast<u64>(data[1]), static_cast<u64>(data[0]));
+                }
             },
             [&]() { HandleRasterizerWrite(GetInteger(vaddr), sizeof(u128)); });
         if (ptr) {
