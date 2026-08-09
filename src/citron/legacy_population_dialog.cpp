@@ -72,7 +72,7 @@ OpenPakPopulationDialog::OpenPakPopulationDialog(QWidget* parent) : QDialog(pare
 
     auto* description = new QLabel(
         tr("Average OpenPak online population by hour, sourced from a community-run scraper of "
-           "the public online-count endpoint. Updated every 15 minutes."));
+           "the public online-count endpoint. Updated every hour (with live updates)."));
     description->setWordWrap(true);
     layout->addWidget(description);
 

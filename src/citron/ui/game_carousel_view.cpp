@@ -376,16 +376,9 @@ void CinematicCarousel::onActivated() { if (!m_has_focus) return; QModelIndex id
 void CinematicCarousel::onCancelled() {}
 
 void CinematicCarousel::DrawBackdrop(QPainter& p, const QRectF& bg_rect) const {
-    p.fillRect(bg_rect, CardBg());
-
-    if (m_backdrop_movie && m_backdrop_movie->isValid()) {
-        const QPixmap frame = m_backdrop_movie->currentPixmap();
-        if (!frame.isNull()) {
-            p.save();
-            p.setOpacity(m_backdrop_image_opacity / 255.0);
-            p.drawPixmap(bg_rect, frame, CenterCropForAspect(frame.size(), bg_rect.size()));
-            p.restore();
-        }
+    const bool has_image = m_backdrop_movie && m_backdrop_movie->isValid();
+    if (!has_image) {
+        p.fillRect(bg_rect, CardBg());
     }
 
     if (m_backdrop_theme == BackdropTheme::None) {
@@ -486,6 +479,17 @@ void CinematicCarousel::paintEvent(QPaintEvent* event) {
 
     const QRectF bg_rect = rect();
     const QColor acc = AccentColor();
+
+    if (m_backdrop_movie && m_backdrop_movie->isValid()) {
+        const QPixmap frame = m_backdrop_movie->currentPixmap();
+        if (!frame.isNull()) {
+            p.fillRect(bg_rect, CardBg());
+            p.save();
+            p.setOpacity(m_backdrop_image_opacity / 255.0);
+            p.drawPixmap(bg_rect, frame, CenterCropForAspect(frame.size(), bg_rect.size()));
+            p.restore();
+        }
+    }
 
     const bool animated = m_backdrop_theme == BackdropTheme::Wave ||
                           (m_backdrop_movie && m_backdrop_movie->isValid() &&
