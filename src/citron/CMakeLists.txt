@@ -278,6 +278,10 @@ add_executable(citron
     legacy_network_probe.h
     legacy_online_counts.cpp
     legacy_online_counts.h
+    legacy_population_dialog.cpp
+    legacy_population_dialog.h
+    legacy_population_history.cpp
+    legacy_population_history.h
     legacy_save_sync.cpp
     legacy_save_sync.h
     legacy_toast.cpp
@@ -326,6 +330,8 @@ add_executable(citron
     ui/game_grid_view.h
     ui/game_carousel_view.cpp
     ui/game_carousel_view.h
+    ui/population_bar_chart.cpp
+    ui/population_bar_chart.h
     ui/legacy_profile_chip.cpp
     ui/legacy_profile_chip.h
     ui/legacy_status_cluster.cpp

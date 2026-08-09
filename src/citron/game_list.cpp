@@ -74,6 +74,7 @@
 #include "citron/main.h"
 #include "citron/mod_manager/gamebanana_dialog.h"
 #include "citron/legacy_ldn_counts.h"
+#include "citron/legacy_population_history.h"
 #include "citron/multiplayer/state.h"
 #include "citron/poster_selection_dialog.h"
 #include "citron/theme.h"
@@ -2506,6 +2507,8 @@ void GameList::UpdateOnlineStatus() {
     if (main_window->IsEmulationRunning()) {
         return;
     }
+
+    OpenPak::PopulationHistory::Refresh();
 
     // A watcher gets the result back on the main thread safely
     auto online_status_watcher = new QFutureWatcher<std::map<u64, std::pair<int, int>>>(this);

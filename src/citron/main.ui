@@ -153,6 +153,7 @@
      <string>Nex&amp;Tendo</string>
     </property>
     <addaction name="action_OpenPak_Open_Account"/>
+    <addaction name="action_OpenPak_Population"/>
     <addaction name="action_OpenPak_Sign_In"/>
     <addaction name="action_OpenPak_Sign_Out"/>
     <addaction name="separator"/>
@@ -383,6 +384,11 @@
   <action name="action_OpenPak_Open_Account">
    <property name="text">
     <string>&amp;Open Account Page</string>
+   </property>
+  </action>
+  <action name="action_OpenPak_Population">
+   <property name="text">
+    <string>&amp;Population</string>
    </property>
   </action>
   <action name="action_OpenPak_Sign_In">

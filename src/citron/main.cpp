@@ -158,8 +158,10 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/loading_screen.h"
 #include "citron/main.h"
 #include "citron/legacy_account_dialog.h"
+#include "citron/legacy_population_dialog.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_online_counts.h"
+#include "citron/legacy_population_history.h"
 #include "citron/legacy_save_sync.h"
 #include "citron/legacy_toast.h"
 #include "citron/play_time_manager.h"
@@ -1280,6 +1282,7 @@ void GMainWindow::InitializeWidgets() {
     legacy_controller = new OpenPakController(*system, this, this);
     legacy_toast = new OpenPakToast(this);
     OpenPak::OnlineCounts::Start(this);
+    OpenPak::PopulationHistory::Start(this);
 
     // Create status bar
     // Style applied in UpdateUITheme()
@@ -1988,6 +1991,8 @@ void GMainWindow::ConnectMenuEvents() {
         }
         OpenPakAccountDialog(legacy_controller, this).exec();
     });
+    connect(ui->action_OpenPak_Population, &QAction::triggered, this,
+            [this] { OpenPakPopulationDialog(this).exec(); });
     connect(ui->action_OpenPak_Sign_In, &QAction::triggered, legacy_controller,
             &OpenPakController::SignIn);
     connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, legacy_controller,
