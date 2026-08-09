@@ -217,15 +217,22 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
         return false; // only requests carry an outgoing station -- not a response
     }
     const u16 protocol = proto_byte & 0x7F;
-    if (protocol != 0x0B) {
-        return false; // SecureConnection only
+    if (protocol != 0x0B && protocol != 0x6D) {
+        return false; // SecureConnection or MatchmakeExtension only
     }
     if (rmc.size() < 5 + 8) {
         return false;
     }
     const u32 method = ReadU32LE(rmc, 9);
-    if (method != 0x1 && method != 0x7) {
-        return false; // Register(1) / ReplaceURL(7) only
+    if (protocol == 0x0B) {
+        if (method != 0x1 && method != 0x7) {
+            return false; // Register(1) / ReplaceURL(7) only
+        }
+    } else {
+        // MatchmakeExtension(0x6D): CreateMatchmakeSessionWithParam(0x26) / JoinMatchmakeSessionWithParam(0x27) only.
+        if (method != 0x26 && method != 0x27) {
+            return false;
+        }
     }
     const size_t body_start = 5 + 8;
     std::span<const u8> body = rmc.subspan(body_start);
@@ -277,11 +284,15 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
     }
     output.insert(output.end(), new_ws_payload.begin(), new_ws_payload.end());
 
+    const char* method_name = protocol == 0x0B
+                                  ? (method == 0x1 ? "SecureConnection.Register" : "SecureConnection.ReplaceURL")
+                                  : (method == 0x26 ? "MatchmakeExtension.CreateMatchmakeSessionWithParam"
+                                                    : "MatchmakeExtension.JoinMatchmakeSessionWithParam");
     LOG_INFO(Service_SSL,
-             "[OpenPak] Rewrote {} station address(es) in outgoing SecureConnection.{} "
+             "[OpenPak] Rewrote {} station address(es) in outgoing {} "
              "to this console's real external IP ({}.{}.{}.{})",
-             matches.size(), method == 0x1 ? "Register" : "ReplaceURL", (*ext_ip_opt)[0],
-             (*ext_ip_opt)[1], (*ext_ip_opt)[2], (*ext_ip_opt)[3]);
+             matches.size(), method_name, (*ext_ip_opt)[0], (*ext_ip_opt)[1], (*ext_ip_opt)[2],
+             (*ext_ip_opt)[3]);
     return true;
 }
 

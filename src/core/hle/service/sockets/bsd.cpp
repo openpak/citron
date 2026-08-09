@@ -1437,7 +1437,9 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
     if (Settings::values.airplane_mode.GetValue()) {
         return {-1, Errno::AGAIN};
     }
-    if (!descriptor.is_connection_based) {
+    // A connect()ed UDP socket (e.g. a P2P client dialing a single host station) supports
+    // plain recv() same as TCP; only an unconnected DGRAM socket needs an explicit peer.
+    if (!descriptor.is_connection_based && !descriptor.connected) {
         return {-1, Errno::AGAIN};
     }
 
@@ -1551,7 +1553,9 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
         return {static_cast<s32>(message.size()), Errno::SUCCESS};
     }
     FileDescriptor& descriptor = *file_descriptors[fd];
-    if (!descriptor.is_connection_based) {
+    // Same as RecvImpl: a connect()ed UDP socket needs plain send() to actually reach the
+    // peer, not a silently-dropped no-op -- that starved P2P clients dialing a host station.
+    if (!descriptor.is_connection_based && !descriptor.connected) {
         LOG_DEBUG(Service, "Dropping datagram send without destination fd={}", fd);
         return {static_cast<s32>(message.size()), Errno::SUCCESS};
     }
