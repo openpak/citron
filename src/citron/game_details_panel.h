@@ -51,6 +51,7 @@ private:
     QLabel* m_icon_label;
     QLabel* m_title_label;
     QLabel* m_id_label;
+    QLabel* m_online_label;
     QLabel* m_bg_label;
     QFrame* m_meta_card;
     QVBoxLayout* m_header_layout;

@@ -21,6 +21,10 @@
 #include "citron/theme.h"
 #include "citron/uisettings.h"
 #include "citron/custom_metadata.h"
+#include "citron/legacy_compatible_titles.h"
+#include "citron/legacy_online_counts.h"
+#include "citron/util/image_cache.h"
+#include "common/legacy_account.h"
 
 GameDetailsPanel::GameDetailsPanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("GameDetailsPanel"));
@@ -100,11 +104,20 @@ void GameDetailsPanel::setupUI() {
     m_id_label->setFont(id_font);
     meta_inner_layout->addWidget(m_id_label);
 
+    m_online_label = new QLabel(header_container);
+    m_online_label->setAlignment(Qt::AlignCenter);
+    QFont online_font = m_online_label->font();
+    online_font.setBold(true);
+    m_online_label->setFont(online_font);
+    m_online_label->hide();
+
     m_header_layout->addWidget(m_icon_label, 0, Qt::AlignCenter);
     m_header_layout->addSpacing(15);
     m_header_layout->addWidget(m_title_label, 0, Qt::AlignCenter);
     m_header_layout->addSpacing(15);
     m_header_layout->addWidget(m_meta_card, 0, Qt::AlignCenter);
+    m_header_layout->addSpacing(8);
+    m_header_layout->addWidget(m_online_label, 0, Qt::AlignCenter);
     m_header_layout->addStretch(1);
 
     content_layout->addWidget(header_container);
@@ -188,6 +201,9 @@ void GameDetailsPanel::updateStyles() {
     m_id_label->setStyleSheet(
         QStringLiteral("color: %1; font-weight: bold; background: transparent; border: none;")
             .arg(title_color));
+
+    m_online_label->setStyleSheet(QStringLiteral("color: #32c355; background: transparent; "
+                                                  "border: none; font-size: 10.5pt;"));
 }
 
 void GameDetailsPanel::resizeEvent(QResizeEvent* event) {
@@ -195,10 +211,13 @@ void GameDetailsPanel::resizeEvent(QResizeEvent* event) {
     m_bg_label->setGeometry(rect());
 
     int w = width();
-    int target_size = qBound(140, w - 120, 280);
+    int target_w = qBound(140, w - 120, 280);
+    const int target_h = UISettings::values.game_list_poster_view.GetValue()
+                             ? static_cast<int>(target_w * 1.5)
+                             : target_w;
 
-    if (m_icon_label->width() != target_size) {
-        m_icon_label->setFixedSize(target_size, target_size);
+    if (m_icon_label->size() != QSize(target_w, target_h)) {
+        m_icon_label->setFixedSize(target_w, target_h);
         if (m_current_program_id != 0) {
             applyDetails(m_pending_index.isValid() ? QModelIndex(m_pending_index) : QModelIndex());
         }
@@ -216,7 +235,7 @@ void GameDetailsPanel::resizeEvent(QResizeEvent* event) {
 }
 
 void GameDetailsPanel::updateDetails(const QModelIndex& index) {
-    if (!index.isValid()) {
+    if (!index.isValid() || !UISettings::values.enable_details_tab.GetValue()) {
         m_debounce_timer->stop();
         m_pending_index = QModelIndex();
         hide();
@@ -329,25 +348,32 @@ void GameDetailsPanel::applyDetails(const QModelIndex& index) {
     m_current_program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
     m_current_path = index.data(GameListItemPath::FullPathRole).toString();
 
-    const int is = m_icon_label->width();
+    const QSize is = m_icon_label->size();
     const u64 cache_key = m_current_program_id;
     auto cached = m_icon_cache.find(cache_key);
     auto cached_bg = m_bg_cache.find(cache_key);
-    if (cached != m_icon_cache.end() && cached->size() == QSize(is, is) &&
+    if (cached != m_icon_cache.end() && cached->size() == is &&
         cached_bg != m_bg_cache.end()) {
         m_icon_label->setPixmap(*cached);
         m_bg_pixmap = *cached_bg;
         m_bg_label->setPixmap(m_bg_pixmap);
     } else {
-        // Priority 1: Load directly from disk (High-Res) if a custom icon exists
+        // Priority 1: the poster art, if poster icons are enabled and one exists
         QPixmap pixmap;
-        auto custom_icon_path =
-            Citron::CustomMetadata::GetInstance().GetCustomIconPath(m_current_program_id);
-        if (custom_icon_path) {
-            pixmap.load(QString::fromStdString(*custom_icon_path));
+        if (UISettings::values.game_list_poster_view.GetValue()) {
+            pixmap = Citron::ImageCache::GetCustomPoster(m_current_program_id);
         }
 
-        // Priority 2: Fallback to model data
+        // Priority 2: Load directly from disk (High-Res) if a custom icon exists
+        if (pixmap.isNull()) {
+            auto custom_icon_path =
+                Citron::CustomMetadata::GetInstance().GetCustomIconPath(m_current_program_id);
+            if (custom_icon_path) {
+                pixmap.load(QString::fromStdString(*custom_icon_path));
+            }
+        }
+
+        // Priority 3: Fallback to model data
         if (pixmap.isNull()) {
             pixmap = index.data(GameListItemPath::HighResIconRole).value<QPixmap>();
         }
@@ -356,19 +382,19 @@ void GameDetailsPanel::applyDetails(const QModelIndex& index) {
         }
 
         if (!pixmap.isNull()) {
-            QPixmap rounded(is, is);
+            QPixmap rounded(is);
             rounded.fill(Qt::transparent);
             {
                 QPainter painter(&rounded);
                 painter.setRenderHint(QPainter::Antialiasing);
                 painter.setRenderHint(QPainter::SmoothPixmapTransform);
                 QPainterPath path;
-                path.addRoundedRect(0, 0, is, is, 32, 32);
+                path.addRoundedRect(0, 0, is.width(), is.height(), 32, 32);
                 painter.setClipPath(path);
 
                 painter.drawPixmap(
-                    0, 0, is, is,
-                    pixmap.scaled(is, is, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+                    0, 0, is.width(), is.height(),
+                    pixmap.scaled(is, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
             }
             if (m_icon_cache.size() > 256) {
                 m_icon_cache.clear();
@@ -419,6 +445,16 @@ m_title_label->setMinimumHeight(static_cast<int>(doc.size().height()) + 4);
 
 m_id_label->setText(
     QStringLiteral("0x%1").arg(m_current_program_id, 16, 16, QLatin1Char('0')).toUpper());
+
+const bool show_online = Common::OpenPakAccount::IsLinked() &&
+                         OpenPak::CompatibleTitles::Table().contains(m_current_program_id);
+if (show_online) {
+    const int players = OpenPak::OnlineCounts::For(m_current_program_id);
+    m_online_label->setText(tr("Currently Playing: \xF0\x9F\x8E\xAE %1").arg(players));
+    m_online_label->show();
+} else {
+    m_online_label->hide();
+}
 
 if (!m_actions_built) {
     clearActions();

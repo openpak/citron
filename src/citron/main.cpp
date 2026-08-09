@@ -86,11 +86,14 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #define QT_NO_OPENGL
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDialog>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -1999,6 +2002,57 @@ void GMainWindow::ConnectMenuEvents() {
     connect(legacy_controller, &OpenPakController::AccountUnlinked, this, [this] {
         ui->action_OpenPak_Sign_In->setEnabled(true);
         ui->action_OpenPak_Sign_Out->setEnabled(false);
+    });
+    // xdg-open/QDesktopServices::openUrl can both report success without a browser window ever
+    // appearing (broken default-browser handoff, remoting failures, etc). Give the user a manual
+    // fallback instead of leaving them stuck on a status bar message that vanishes in 8 seconds.
+    connect(legacy_controller, &OpenPakController::SignInUrlReady, this, [this](QString url) {
+        if (!legacy_signin_dialog) {
+            legacy_signin_dialog = new QDialog(this);
+            legacy_signin_dialog->setWindowTitle(tr("Sign in to OpenPak"));
+            auto* layout = new QVBoxLayout(legacy_signin_dialog);
+            auto* label = new QLabel(tr("Finish signing in in your browser, then come back here.\n"
+                                        "If nothing opened, copy this link into any browser:"));
+            label->setWordWrap(true);
+            auto* url_field = new QLineEdit;
+            url_field->setReadOnly(true);
+            url_field->setObjectName(QStringLiteral("legacy_signin_url"));
+            auto* button_row = new QHBoxLayout;
+            auto* copy_button = new QPushButton(tr("Copy Link"));
+            auto* open_button = new QPushButton(tr("Open in Browser"));
+            auto* close_button = new QPushButton(tr("Close"));
+            button_row->addWidget(copy_button);
+            button_row->addWidget(open_button);
+            button_row->addStretch(1);
+            button_row->addWidget(close_button);
+            layout->addWidget(label);
+            layout->addWidget(url_field);
+            layout->addLayout(button_row);
+            connect(copy_button, &QPushButton::clicked, legacy_signin_dialog, [url_field] {
+                QGuiApplication::clipboard()->setText(url_field->text());
+            });
+            connect(open_button, &QPushButton::clicked, legacy_signin_dialog, [url_field] {
+                QDesktopServices::openUrl(QUrl(url_field->text()));
+            });
+            connect(close_button, &QPushButton::clicked, legacy_signin_dialog, &QDialog::close);
+            legacy_signin_dialog->setAttribute(Qt::WA_DeleteOnClose);
+            connect(legacy_signin_dialog, &QObject::destroyed, this,
+                    [this] { legacy_signin_dialog = nullptr; });
+        }
+        auto* url_field = legacy_signin_dialog->findChild<QLineEdit*>(
+            QStringLiteral("legacy_signin_url"));
+        if (url_field) {
+            url_field->setText(url);
+            url_field->selectAll();
+        }
+        legacy_signin_dialog->show();
+        legacy_signin_dialog->raise();
+        legacy_signin_dialog->activateWindow();
+    });
+    connect(legacy_controller, &OpenPakController::SignInFinished, this, [this] {
+        if (legacy_signin_dialog) {
+            legacy_signin_dialog->close();
+        }
     });
     connect(legacy_controller, &OpenPakController::StatusChanged, this,
             [this](const QString& message) {

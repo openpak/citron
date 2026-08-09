@@ -169,8 +169,11 @@ namespace UISettings {
                                     // 0 = top-right, 1 = top-left, 2 = bottom-right, 3 = bottom-left. See OpenPakToast::Corner.
                                     Setting<int> legacy_notification_corner{linkage, 0, "legacy/notificationCorner", Category::Ui};
 
-                                    // 0 = Gradient, 1 = Wave, 2 = None. See CinematicCarousel::BackdropTheme.
+                                    // 0 = Gradient, 1 = Wave, 2 = None, 3 = Image. See CinematicCarousel::BackdropTheme.
                                     Setting<int> carousel_backdrop_theme{linkage, 0, "carouselBackdropTheme", Category::Ui};
+                                    // Static image or GIF shown behind the carousel when carousel_backdrop_theme == Image.
+                                    Setting<std::string> carousel_backdrop_image_path{linkage, "", "carousel_backdrop_image_path", Category::Ui};
+                                    Setting<u8> carousel_backdrop_image_opacity{linkage, 200, "carousel_backdrop_image_opacity", Category::Ui};
 
                                     // logging
                                     Setting<bool> show_console{linkage, false, "showConsole", Category::Ui};
@@ -260,6 +263,7 @@ namespace UISettings {
                                                                     Setting<bool> cache_game_list{linkage, true, "cache_game_list", Category::UiGameList};
                                                                     Setting<bool> scan_nca{linkage, false, "scan_nca", Category::UiGameList};
                                                                     Setting<bool> favorites_expanded{linkage, true, "favorites_expanded", Category::UiGameList};
+                                                                    Setting<bool> enable_details_tab{linkage, true, "enable_details_tab", Category::UiGameList};
                                                                     QVector<u64> favorited_ids;
                                                                     QStringList hidden_paths;
 

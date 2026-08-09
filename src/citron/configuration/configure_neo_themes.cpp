@@ -143,6 +143,38 @@ ConfigureNeoThemes::ConfigureNeoThemes(QWidget* parent) : QWidget(parent) {
     bg_layout->addRow(tr("Image Visibility:"), slider_bg_opacity);
 
     left_col->addWidget(bg_group);
+
+    // ── Carousel Background Group ─────────────────────────────────────────
+    auto* carousel_bg_group = new QGroupBox(tr("Carousel Background"), this);
+    auto* carousel_bg_layout = new QFormLayout(carousel_bg_group);
+    carousel_bg_layout->setContentsMargins(12, 16, 12, 12);
+    carousel_bg_layout->setSpacing(10);
+
+    button_carousel_bg_path = new QPushButton(tr("Select Image or GIF..."), carousel_bg_group);
+    auto* button_carousel_bg_reset = new QPushButton(tr("Reset"), carousel_bg_group);
+    connect(button_carousel_bg_path, &QPushButton::clicked, this,
+            &ConfigureNeoThemes::OnSelectCarouselBG);
+
+    auto* carousel_bg_btn_layout = new QHBoxLayout();
+    carousel_bg_btn_layout->addWidget(button_carousel_bg_path);
+    carousel_bg_btn_layout->addWidget(button_carousel_bg_reset);
+
+    label_carousel_bg_path = new QLabel(carousel_bg_group);
+    label_carousel_bg_path->setWordWrap(true);
+    label_carousel_bg_path->setStyleSheet(QStringLiteral("font-size: 10px; color: gray;"));
+
+    carousel_bg_layout->addRow(tr("Carousel Image:"), carousel_bg_btn_layout);
+    carousel_bg_layout->addRow(label_carousel_bg_path);
+
+    connect(button_carousel_bg_reset, &QPushButton::clicked, this, [this] {
+        label_carousel_bg_path->setText(tr("No background image selected."));
+    });
+
+    slider_carousel_bg_opacity = new QSlider(Qt::Horizontal, carousel_bg_group);
+    slider_carousel_bg_opacity->setRange(0, 255);
+    carousel_bg_layout->addRow(tr("Image Visibility:"), slider_carousel_bg_opacity);
+
+    left_col->addWidget(carousel_bg_group);
     left_col->addStretch();
 
     auto* right_col = new QVBoxLayout();
@@ -331,6 +363,13 @@ void ConfigureNeoThemes::SetConfiguration() {
     label_bg_path->setText(bg_path.isEmpty() ? tr("No background image selected.") : bg_path);
     slider_bg_opacity->setValue(UISettings::values.custom_game_list_bg_opacity.GetValue());
 
+    QString carousel_bg_path =
+        QString::fromStdString(UISettings::values.carousel_backdrop_image_path.GetValue());
+    label_carousel_bg_path->setText(carousel_bg_path.isEmpty() ? tr("No background image selected.")
+                                                               : carousel_bg_path);
+    slider_carousel_bg_opacity->setValue(
+        UISettings::values.carousel_backdrop_image_opacity.GetValue());
+
     m_rainbow_mode = UISettings::values.enable_rainbow_mode.GetValue();
     checkbox_rainbow_mode->setChecked(m_rainbow_mode);
     UpdateBGButtonMenu();
@@ -341,6 +380,15 @@ void ConfigureNeoThemes::OnSelectBG() {
                                                 tr("Images (*.png *.jpg *.jpeg)"));
     if (!path.isEmpty()) {
         label_bg_path->setText(path);
+    }
+}
+
+void ConfigureNeoThemes::OnSelectCarouselBG() {
+    QString path =
+        QFileDialog::getOpenFileName(this, tr("Select Carousel Background Image or GIF"),
+                                     QString(), tr("Images (*.png *.jpg *.jpeg *.gif)"));
+    if (!path.isEmpty()) {
+        label_carousel_bg_path->setText(path);
     }
 }
 
@@ -399,6 +447,15 @@ void ConfigureNeoThemes::ApplyConfiguration() {
     UISettings::values.custom_game_list_bg_path.SetValue(new_bg_path);
     UISettings::values.custom_game_list_bg_opacity.SetValue(
         static_cast<u8>(slider_bg_opacity->value()));
+
+    std::string new_carousel_bg_path = label_carousel_bg_path->text().toStdString();
+    if (new_carousel_bg_path == tr("No background image selected.").toStdString()) {
+        new_carousel_bg_path = "";
+    }
+    UISettings::values.carousel_backdrop_image_path.SetValue(new_carousel_bg_path);
+    UISettings::values.carousel_backdrop_image_opacity.SetValue(
+        static_cast<u8>(slider_carousel_bg_opacity->value()));
+
     UISettings::values.enable_rainbow_mode.SetValue(checkbox_rainbow_mode->isChecked());
     UpdateBGButtonMenu();
 }

@@ -41,6 +41,7 @@
 #include <QVBoxLayout>
 
 #include "common/legacy_account.h"
+#include "common/legacy_outgoing_requests.h"
 #include "citron/legacy_account_dialog.h"
 #include "citron/legacy_account_page_p.h"
 #include "citron/legacy_avatar_cache.h"
@@ -340,6 +341,27 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     requests_stack->addWidget(requests_view);
     requests_stack->addWidget(MakeEmptyLabel(tr("No incoming friend requests.")));
 
+    outgoing_requests_label = new QLabel(tr("Outgoing Friend Requests"));
+    QFont outgoing_label_font = outgoing_requests_label->font();
+    outgoing_label_font.setBold(true);
+    outgoing_requests_label->setFont(outgoing_label_font);
+
+    outgoing_requests_view = MakeCardList(this);
+    outgoing_requests_model = new QStandardItemModel(this);
+    outgoing_requests_view->setModel(outgoing_requests_model);
+    outgoing_request_delegate = new OpenPakFriendDelegate(outgoing_requests_view, this);
+    outgoing_requests_view->setItemDelegate(outgoing_request_delegate);
+    connect(outgoing_requests_view, &QListView::clicked, this,
+            &OpenPakAccountDialog::OnFriendsViewClicked);
+
+    outgoing_requests_section = new QWidget;
+    auto* outgoing_section_layout = new QVBoxLayout(outgoing_requests_section);
+    outgoing_section_layout->setContentsMargins(0, 8, 0, 0);
+    outgoing_section_layout->setSpacing(6);
+    outgoing_section_layout->addWidget(outgoing_requests_label);
+    outgoing_section_layout->addWidget(outgoing_requests_view);
+    outgoing_requests_section->setVisible(false);
+
     history_view = MakeCardList(this);
     history_model = new QStandardItemModel(this);
     history_view->setModel(history_model);
@@ -416,10 +438,17 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     cloud_save_layout->addWidget(cloud_save_card);
     cloud_save_layout->addStretch(2);
 
+    auto* requests_page = new QWidget;
+    auto* requests_page_layout = new QVBoxLayout(requests_page);
+    requests_page_layout->setContentsMargins(0, 0, 0, 0);
+    requests_page_layout->setSpacing(0);
+    requests_page_layout->addWidget(requests_stack, 1);
+    requests_page_layout->addWidget(outgoing_requests_section);
+
     tabs = new QTabWidget;
     tabs->setStyleSheet(TabWidgetStyle());
     tabs->addTab(friends_stack, tr("Friends"));
-    tabs->addTab(requests_stack, tr("Requests"));
+    tabs->addTab(requests_page, tr("Requests"));
     tabs->addTab(history_stack, tr("Recently Played"));
     tabs->addTab(cloud_save_page, tr("Cloud Saves"));
 
@@ -698,6 +727,20 @@ void OpenPakAccountDialog::OnFriendsViewClicked(const QModelIndex& index) {
         return;
     }
     auto* view = qobject_cast<QListView*>(sender());
+    if (view == outgoing_requests_view) {
+        const QRect cell_rect = view->visualRect(index);
+        const QPoint pos = view->viewport()->mapFromGlobal(QCursor::pos());
+        const auto hit = outgoing_request_delegate->HitTestActions(cell_rect, pos, false);
+        if (hit != OpenPakFriendDelegate::ActionHit::None) {
+            const std::string code =
+                index.data(OpenPakFriendItem::FriendCodeRole).toString().toStdString();
+            Common::OpenPakOutgoingRequests::Remove(code);
+            outgoing_requests_model->removeRow(index.row());
+            outgoing_requests_section->setVisible(outgoing_requests_model->rowCount() > 0);
+        }
+        return;
+    }
+
     auto* delegate = view == requests_view ? request_delegate : friend_delegate;
     const bool is_request = index.data(OpenPakFriendItem::IsRequestRole).toBool();
 
@@ -779,6 +822,7 @@ void OpenPakAccountDialog::OnAdd() {
     }
     friend_code_input->clear();
     RunAsync([code] { return WebService::OpenPakApi::AddFriendByCode(code); }, [this, code] {
+        Common::OpenPakOutgoingRequests::Add(code);
         if (controller) {
             controller->NotifyFriendRequestSent(QString::fromStdString(code));
         }
@@ -861,6 +905,22 @@ void OpenPakAccountDialog::RefreshFriends() {
                         QString::fromStdString(entry.friend_code), entry.presence_status,
                         QString{}, QString::fromStdString(entry.image_base64), true));
                 }
+
+                std::vector<std::string> accepted_codes;
+                accepted_codes.reserve(list.friends.size());
+                for (const auto& entry : list.friends) {
+                    accepted_codes.push_back(entry.friend_code);
+                }
+                Common::OpenPakOutgoingRequests::PruneAccepted(accepted_codes);
+
+                outgoing_requests_model->clear();
+                for (const auto& entry : Common::OpenPakOutgoingRequests::Get()) {
+                    outgoing_requests_model->appendRow(new OpenPakFriendItem(
+                        0, QString::fromStdString(entry.friend_code),
+                        QString::fromStdString(entry.friend_code), 0, QString{}, QString{}, false,
+                        tr("Cancel")));
+                }
+                outgoing_requests_section->setVisible(outgoing_requests_model->rowCount() > 0);
 
                 status->setText(tr("%1 friend(s), %2 request(s).")
                                     .arg(list.friends.size())

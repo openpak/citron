@@ -125,6 +125,7 @@ public:
     void CancelPopulation();
     void RefreshGame(u64 program_id, u64 play_time);
     void RefreshTheme();
+    void ApplyCarouselBackdropImage();
 
     void SaveInterfaceLayout();
     void LoadInterfaceLayout();

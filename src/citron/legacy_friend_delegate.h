@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QMap>
 #include <QPersistentModelIndex>
+#include <QString>
 #include <QStyledItemDelegate>
 #include <QTimer>
 
@@ -43,7 +44,8 @@ private:
     void PaintAvatar(QPainter*, const QRect&, const QModelIndex&) const;
     void PaintNameAndStatus(QPainter*, const QRect&, const QStyleOptionViewItem&,
                             const QModelIndex&) const;
-    void PaintActions(QPainter*, const QRect& card_rect, bool is_request) const;
+    void PaintActions(QPainter*, const QRect& card_rect, bool is_request,
+                      const QString& pill_label) const;
     QRect ActionsRect(const QRect& card_rect) const;
 
     QColor CardBg() const;

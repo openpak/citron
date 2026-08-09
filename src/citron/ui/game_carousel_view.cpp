@@ -7,6 +7,7 @@
 #include <QRadialGradient>
 #include <QDateTime>
 #include <QKeyEvent>
+#include <QMovie>
 #include <QResizeEvent>
 #include <QVBoxLayout>
 #include <QSpacerItem>
@@ -34,6 +35,20 @@ constexpr int kBackdropPickerWidth = 168;
 const QStringList& BackdropOptionLabels() {
     static const QStringList labels{QObject::tr("Gradient"), QObject::tr("Wave"), QObject::tr("None")};
     return labels;
+}
+
+QRectF CenterCropForAspect(const QSizeF& source, const QSizeF& dest) {
+    if (source.width() <= 0 || source.height() <= 0 || dest.width() <= 0 || dest.height() <= 0) {
+        return QRectF(QPointF(0, 0), source);
+    }
+    const qreal src_aspect = source.width() / source.height();
+    const qreal dst_aspect = dest.width() / dest.height();
+    if (src_aspect > dst_aspect) {
+        const qreal crop_w = source.height() * dst_aspect;
+        return QRectF((source.width() - crop_w) / 2.0, 0, crop_w, source.height());
+    }
+    const qreal crop_h = source.width() / dst_aspect;
+    return QRectF(0, (source.height() - crop_h) / 2.0, source.width(), crop_h);
 }
 }
 
@@ -233,26 +248,40 @@ CinematicCarousel::CinematicCarousel(QWidget* parent) : QWidget(parent) {
         m_backdrop_picker->PopupAt(m_backdrop_btn->mapToGlobal(QPoint(0, m_backdrop_btn->height() + 6)));
     });
 
-    m_top_hint = new QLabel(this);
-    m_top_hint->setText(tr("if using controller* Press X for Next Alphabetical Letter | Press -/R/ZR for Details Tab | Press B for Back to List"));
-    m_top_hint->setAlignment(Qt::AlignCenter);
-    m_top_hint->setWordWrap(true);
-
-    m_bottom_hint = new QLabel(this);
-    m_bottom_hint->setText(tr("*You can Drag to Scroll, or Click on Game Icons manually, you can also use your mouse wheel!*"));
-    m_bottom_hint->setAlignment(Qt::AlignCenter);
-    m_bottom_hint->setWordWrap(true);
-
     m_profile_chip->raise();
     m_backdrop_btn->raise();
     m_status_cluster->raise();
-    m_top_hint->raise();
-    m_bottom_hint->raise();
 }
 
 QModelIndex CinematicCarousel::currentIndex() const {
     if (!m_model || m_model->rowCount() == 0) return QModelIndex();
     return m_model->index(std::round(m_focal_index), 0);
+}
+
+void CinematicCarousel::SetBackdropTheme(BackdropTheme theme) {
+    m_backdrop_theme = theme;
+    update();
+}
+
+void CinematicCarousel::SetBackdropImage(const QString& path, u8 opacity) {
+    m_backdrop_image_opacity = opacity;
+    if (path == m_backdrop_image_path) {
+        update();
+        return;
+    }
+    m_backdrop_image_path = path;
+    if (m_backdrop_movie) {
+        m_backdrop_movie->stop();
+        delete m_backdrop_movie;
+        m_backdrop_movie = nullptr;
+    }
+    if (!path.isEmpty()) {
+        m_backdrop_movie = new QMovie(path, QByteArray(), this);
+        m_backdrop_movie->setCacheMode(QMovie::CacheAll);
+        connect(m_backdrop_movie, &QMovie::frameChanged, this, [this](int) { update(); });
+        m_backdrop_movie->start();
+    }
+    update();
 }
 
 qreal CinematicCarousel::HeroSize() const {
@@ -276,13 +305,14 @@ QRectF CinematicCarousel::CardGeometry(int index, bool with_bob) const {
     const qreal abs_diff = std::abs(diff);
     const qreal scale = std::max(1.0 - abs_diff * 0.05, 0.82);
     const qreal sz = hero_size * scale;
+    const qreal card_h = UISettings::values.game_list_poster_view.GetValue() ? sz * 1.5 : sz;
     const qreal cx = cx0 + diff * stride;
     qreal cy = cy0 + abs_diff * 6.0;
     if (with_bob) {
         const qreal t = m_pulse_tick * 0.032;
         cy += std::sin(t * 1.25 + index * 0.9) * 2.6 * scale;
     }
-    return QRectF(cx - sz / 2.0, cy - sz / 2.0, sz, sz);
+    return QRectF(cx - sz / 2.0, cy - card_h / 2.0, sz, card_h);
 }
 
 QModelIndex CinematicCarousel::indexAt(const QPoint& point) const {
@@ -334,17 +364,6 @@ void CinematicCarousel::scrollToLetter(QChar letter) {
 }
 
 void CinematicCarousel::ApplyTheme() {
-    const bool dark = Theme::IsDarkMode();
-    if (m_top_hint) {
-        m_top_hint->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-weight: bold; font-family: 'Outfit', 'Inter', sans-serif; font-size: 14px; background: transparent; }"
-        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 140)") : QStringLiteral("rgba(30, 30, 35, 180)")));
-    }
-    if (m_bottom_hint) {
-        m_bottom_hint->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-style: italic; font-size: 13px; background: transparent; }"
-        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 100)") : QStringLiteral("rgba(30, 30, 35, 120)")));
-    }
     update();
 }
 
@@ -356,16 +375,26 @@ void CinematicCarousel::onActivated() { if (!m_has_focus) return; QModelIndex id
 
 void CinematicCarousel::onCancelled() {}
 
-// Ported from nexium-live's draw_gradient_backdrop()/draw_wave_background().
 void CinematicCarousel::DrawBackdrop(QPainter& p, const QRectF& bg_rect) const {
     p.fillRect(bg_rect, CardBg());
+
+    if (m_backdrop_movie && m_backdrop_movie->isValid()) {
+        const QPixmap frame = m_backdrop_movie->currentPixmap();
+        if (!frame.isNull()) {
+            p.save();
+            p.setOpacity(m_backdrop_image_opacity / 255.0);
+            p.drawPixmap(bg_rect, frame, CenterCropForAspect(frame.size(), bg_rect.size()));
+            p.restore();
+        }
+    }
+
     if (m_backdrop_theme == BackdropTheme::None) {
         return;
     }
 
     const QColor acc = AccentColor();
     if (m_backdrop_theme == BackdropTheme::Gradient) {
-        const qreal top_y = bg_rect.top();
+        const qreal top_y = bg_rect.top() + bg_rect.height() * 0.42;
         const qreal bot_y = bg_rect.bottom();
         constexpr int kCols = 96;
         const qreal col_w = bg_rect.width() / kCols;
@@ -394,11 +423,11 @@ void CinematicCarousel::DrawBackdrop(QPainter& p, const QRectF& bg_rect) const {
 
     struct WaveBand { qreal base_frac, amp_frac, phase_off, speed, shade; int alpha; };
     static constexpr WaveBand kBands[] = {
-        {0.50, 0.05, 0.0, 1.5, 0.25, 60},
-        {0.36, 0.07, 1.1, 1.2, -0.30, 50},
-        {0.62, 0.035, 2.3, 0.9, 0.45, 42},
-        {0.24, 0.09, 0.6, 1.7, -0.40, 34},
-        {0.10, 0.045, 4.0, 0.6, 0.55, 22},
+        {0.63, 0.043, 0.0, 1.5, 0.25, 49},
+        {0.54, 0.060, 1.1, 1.2, -0.30, 41},
+        {0.72, 0.030, 2.3, 0.9, 0.45, 34},
+        {0.45, 0.077, 0.6, 1.7, -0.40, 28},
+        {0.35, 0.038, 4.0, 0.6, 0.55, 18},
     };
     const qreal t = m_pulse_tick * 0.032;
     const auto shade = [](QColor c, qreal f) {
@@ -447,6 +476,8 @@ void CinematicCarousel::RefreshBackdropCache(const QSize& logical_size) {
     m_backdrop_cache_tick = m_pulse_tick;
     m_backdrop_cache_accent = AccentColor();
     m_backdrop_cache_theme = m_backdrop_theme;
+    m_backdrop_cache_image_path = m_backdrop_image_path;
+    m_backdrop_cache_image_opacity = m_backdrop_image_opacity;
 }
 
 void CinematicCarousel::paintEvent(QPaintEvent* event) {
@@ -456,10 +487,15 @@ void CinematicCarousel::paintEvent(QPaintEvent* event) {
     const QRectF bg_rect = rect();
     const QColor acc = AccentColor();
 
-    const bool animated = m_backdrop_theme == BackdropTheme::Wave;
+    const bool animated = m_backdrop_theme == BackdropTheme::Wave ||
+                          (m_backdrop_movie && m_backdrop_movie->isValid() &&
+                           m_backdrop_movie->frameCount() != 1);
     const qint64 stale_after = animated ? 1 : 1000000;
     if (m_backdrop_cache_logical_size != bg_rect.size().toSize() || m_backdrop_cache_accent != acc ||
-        m_backdrop_cache_theme != m_backdrop_theme || m_pulse_tick - m_backdrop_cache_tick >= stale_after) {
+        m_backdrop_cache_theme != m_backdrop_theme ||
+        m_backdrop_cache_image_path != m_backdrop_image_path ||
+        m_backdrop_cache_image_opacity != m_backdrop_image_opacity ||
+        m_pulse_tick - m_backdrop_cache_tick >= stale_after) {
         RefreshBackdropCache(bg_rect.size().toSize());
     }
     p.drawPixmap(bg_rect, m_backdrop_cache, m_backdrop_cache.rect());
@@ -530,12 +566,19 @@ void CinematicCarousel::paintEvent(QPaintEvent* event) {
 
         QModelIndex idx = m_model->index(i, 0);
         u64 program_id = idx.data(GameListItemPath::ProgramIdRole).toULongLong();
-        QPixmap pix = Citron::ImageCache::GetCustomIcon(program_id);
+        QPixmap pix;
+        if (UISettings::values.game_list_poster_view.GetValue()) {
+            pix = Citron::ImageCache::GetCustomPoster(program_id);
+        }
+        if (pix.isNull()) pix = Citron::ImageCache::GetCustomIcon(program_id);
         if (pix.isNull()) pix = idx.data(GameListItemPath::HighResIconRole).value<QPixmap>();
         if (pix.isNull()) pix = idx.data(Qt::DecorationRole).value<QPixmap>();
         if (!pix.isNull()) {
-            const QPixmap rounded = RoundedIcon(pix);
-            p.drawPixmap(card, rounded, rounded.rect());
+            QPainterPath clip;
+            clip.addRoundedRect(card, 14, 14);
+            p.setClipPath(clip);
+            p.drawPixmap(card, pix, CenterCropForAspect(pix.size(), card.size()));
+            p.setClipping(false);
             DrawOnlineBadges(p, card, program_id);
         } else {
             QPainterPath clip;
@@ -672,14 +715,6 @@ void CinematicCarousel::resizeEvent(QResizeEvent* event) {
         m_status_cluster->move(width() - m_status_cluster->width() - static_cast<int>(18 * top_s),
                                static_cast<int>(14 * top_s));
     }
-    if (m_top_hint) {
-        const int hint_y = m_profile_chip ? m_profile_chip->y() + m_profile_chip->height() + 6 : 8;
-        m_top_hint->setGeometry(60, hint_y, std::max(0, width() - 120), 34);
-    }
-    if (m_bottom_hint) {
-        const int hint_h = 22;
-        m_bottom_hint->setGeometry(40, std::max(0, height() - hint_h - 16), std::max(0, width() - 80), hint_h);
-    }
     update();
 }
 
@@ -706,31 +741,6 @@ QColor CinematicCarousel::AccentColor() const {
         acc.setHslF(acc.hslHueF(), acc.hslSaturationF(), 0.6);
     }
     return acc;
-}
-
-QPixmap CinematicCarousel::RoundedIcon(const QPixmap& source) const {
-    const qint64 key = source.cacheKey();
-    auto it = m_rounded_icon_cache.find(key);
-    if (it != m_rounded_icon_cache.end()) {
-        return it.value();
-    }
-    if (m_rounded_icon_cache.size() > 256) {
-        m_rounded_icon_cache.clear();
-    }
-
-    QPixmap rounded(source.size());
-    rounded.fill(Qt::transparent);
-    QPainter rp(&rounded);
-    rp.setRenderHint(QPainter::Antialiasing);
-    const qreal radius = source.width() * 0.078;
-    QPainterPath clip;
-    clip.addRoundedRect(QRectF(0, 0, source.width(), source.height()), radius, radius);
-    rp.setClipPath(clip);
-    rp.drawPixmap(0, 0, source);
-    rp.end();
-
-    m_rounded_icon_cache.insert(key, rounded);
-    return rounded;
 }
 
 void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id) const {

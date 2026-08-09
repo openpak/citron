@@ -23,6 +23,7 @@ public:
 private:
     void SetConfiguration();
     void OnSelectBG();
+    void OnSelectCarouselBG();
     void OnSelectColor(QPushButton* button, const QString& title, std::string& setting);
     void UpdateBGButtonMenu();
 
@@ -31,6 +32,10 @@ private:
     QPushButton* button_bg_path{nullptr};
     QLabel* label_bg_path{nullptr};
     QSlider* slider_bg_opacity{nullptr};
+
+    QPushButton* button_carousel_bg_path{nullptr};
+    QLabel* label_carousel_bg_path{nullptr};
+    QSlider* slider_carousel_bg_opacity{nullptr};
     QPushButton* button_accent_color{nullptr};
     QPushButton* button_card_bg_color{nullptr};
     QPushButton* button_card_text_color{nullptr};

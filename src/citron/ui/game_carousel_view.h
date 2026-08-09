@@ -18,6 +18,7 @@ class OpenPakProfileChip;
 class OpenPakStatusCluster;
 class QLabel;
 class QToolButton;
+class QMovie;
 
 class OpenPakBackdropPicker : public QWidget {
     Q_OBJECT
@@ -58,7 +59,8 @@ public:
     explicit CinematicCarousel(QWidget* parent = nullptr);
 
     void setModel(QAbstractItemModel* model);
-    void SetBackdropTheme(BackdropTheme theme) { m_backdrop_theme = theme; update(); }
+    void SetBackdropTheme(BackdropTheme theme);
+    void SetBackdropImage(const QString& path, u8 opacity);
     qreal focalIndex() const { return m_focal_index; }
     void setFocalIndex(qreal index);
 
@@ -108,7 +110,6 @@ private:
     QRectF CardGeometry(int index, bool with_bob) const;
     void DrawBackdrop(QPainter& p, const QRectF& bg_rect) const;
     void RefreshBackdropCache(const QSize& logical_size);
-    QPixmap RoundedIcon(const QPixmap& source) const;
     void DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id) const;
 
     BackdropTheme m_backdrop_theme = BackdropTheme::Gradient;
@@ -117,6 +118,11 @@ private:
     qint64 m_backdrop_cache_tick = -1000;
     QColor m_backdrop_cache_accent;
     BackdropTheme m_backdrop_cache_theme = BackdropTheme::None;
+    QString m_backdrop_cache_image_path;
+    u8 m_backdrop_cache_image_opacity = 0;
+    QString m_backdrop_image_path;
+    u8 m_backdrop_image_opacity = 200;
+    QMovie* m_backdrop_movie = nullptr;
     QAbstractItemModel* m_model = nullptr;
     qreal m_focal_index = 0.0;
     QPropertyAnimation* m_snap_animation = nullptr;
@@ -137,8 +143,6 @@ private:
     OpenPakStatusCluster* m_status_cluster = nullptr;
     QToolButton* m_backdrop_btn = nullptr;
     OpenPakBackdropPicker* m_backdrop_picker = nullptr;
-    QLabel* m_top_hint = nullptr;
-    QLabel* m_bottom_hint = nullptr;
 
     // Momentum / Physics members
     QTimer* m_momentum_timer = nullptr;
@@ -146,7 +150,6 @@ private:
     qint64 m_last_move_timestamp = 0;
 
     mutable QMap<QPersistentModelIndex, qreal> m_entry_animations;
-    mutable QHash<qint64, QPixmap> m_rounded_icon_cache;
 };
 
 class GameCarouselView : public QWidget {
@@ -159,6 +162,9 @@ public:
     void ApplyTheme();
     void SetBackdropTheme(CinematicCarousel::BackdropTheme theme) {
         m_carousel->SetBackdropTheme(theme);
+    }
+    void SetBackdropImage(const QString& path, u8 opacity) {
+        m_carousel->SetBackdropImage(path, opacity);
     }
 
     CinematicCarousel* view() const { return m_carousel; }

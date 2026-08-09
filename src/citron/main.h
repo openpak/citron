@@ -43,6 +43,7 @@ class VramOverlay;
 class ControllerOverlay;
 class ProfilerWidget;
 class ControllerDialog;
+class QDialog;
 class QLabel;
 class MultiplayerState;
 class OpenPakAccountDialog;
@@ -457,6 +458,7 @@ private:
     std::string legacy_last_pushed_app_id;
     OpenPakController* legacy_controller = nullptr;
     OpenPakToast* legacy_toast = nullptr;
+    QDialog* legacy_signin_dialog = nullptr;
     OverlayDialog* shutdown_dialog{};
     PerformanceOverlay* performance_overlay{};
     MultiplayerRoomOverlay* multiplayer_room_overlay{};

@@ -107,6 +107,8 @@ add_library(common STATIC
     legacy_friends.h
     legacy_nat.cpp
     legacy_nat.h
+    legacy_outgoing_requests.cpp
+    legacy_outgoing_requests.h
     settings.cpp
     settings.h
     settings_common.cpp

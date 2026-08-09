@@ -53,6 +53,10 @@ signals:
     void FriendRequestReceived(u64 pid, QString name, QString avatar_base64);
     void FriendRequestSent(QString friend_code);
     void StatusChanged(QString message);
+    // Fired once the OAuth URL is known, whether or not the OS actually opened a visible
+    // browser window for it (xdg-open/openUrl can both report success with nothing appearing).
+    void SignInUrlReady(QString url);
+    void SignInFinished();
 
 private:
     void ApplyProfileName(const std::string& name);

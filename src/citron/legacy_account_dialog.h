@@ -72,6 +72,11 @@ private:
     QListView* requests_view;
     QStandardItemModel* requests_model;
     QStackedWidget* requests_stack;
+    QWidget* outgoing_requests_section;
+    QLabel* outgoing_requests_label;
+    QListView* outgoing_requests_view;
+    QStandardItemModel* outgoing_requests_model;
+    OpenPakFriendDelegate* outgoing_request_delegate;
     QListView* history_view;
     QStandardItemModel* history_model;
     QStackedWidget* history_stack;

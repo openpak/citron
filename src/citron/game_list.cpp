@@ -1206,6 +1206,7 @@ GameList::GameList(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
     tree_view = new GameTreeView(this);
     grid_view = new GameGridView(this);
     carousel_view = new GameCarouselView(this);
+    ApplyCarouselBackdropImage();
     switch (UISettings::values.carousel_backdrop_theme.GetValue()) {
     case 1:
         carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Wave);
@@ -1836,8 +1837,7 @@ GameList::GameList(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
     layout->addLayout(root_layout, 1);
     setLayout(layout);
 
-    SetViewMode(UISettings::values.game_list_grid_view.GetValue() ? GameList::ViewMode::Grid
-                                                                  : GameList::ViewMode::List);
+    SetViewMode(static_cast<ViewMode>(UISettings::values.game_list_view_mode.GetValue()));
 
     // Selection handling is now unified in the view components
 
@@ -2041,7 +2041,17 @@ void GameList::OnConfigurationChanged() {
     RefreshTheme();
 }
 
+void GameList::ApplyCarouselBackdropImage() {
+    if (!carousel_view)
+        return;
+    const QString path =
+        QString::fromStdString(UISettings::values.carousel_backdrop_image_path.GetValue());
+    const u8 opacity = UISettings::values.carousel_backdrop_image_opacity.GetValue();
+    carousel_view->SetBackdropImage(path, opacity);
+}
+
 void GameList::RefreshTheme() {
+    ApplyCarouselBackdropImage();
     OnUpdateThemedIcons();
     if (tree_view)
         tree_view->ApplyTheme();
@@ -4823,6 +4833,7 @@ void GameList::showEvent(QShowEvent* event) {
 void GameList::AnimateDetailsPanel(bool show) {
     if (!details_panel)
         return;
+    show = show && UISettings::values.enable_details_tab.GetValue();
 
     int start_w = details_panel->width();
     int end_w = 0;

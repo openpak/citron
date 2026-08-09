@@ -65,11 +65,12 @@ void OpenPakFriendDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
     PaintAvatar(painter, avatar_rect, index);
 
     const bool is_request = index.data(OpenPakFriendItem::IsRequestRole).toBool();
+    const QString pill_label = index.data(OpenPakFriendItem::PillLabelRole).toString();
     const QRect actions = ActionsRect(card);
     const QRect text_rect(avatar_rect.right() + 10, card.top(), actions.left() - 6 - avatar_rect.right() - 10,
                           card.height());
     PaintNameAndStatus(painter, text_rect, option, index);
-    PaintActions(painter, card, is_request);
+    PaintActions(painter, card, is_request, pill_label);
 
     painter->restore();
 }
@@ -232,7 +233,7 @@ void OpenPakFriendDelegate::PaintNameAndStatus(QPainter* painter, const QRect& r
 }
 
 void OpenPakFriendDelegate::PaintActions(QPainter* painter, const QRect& card_rect,
-                                          bool is_request) const {
+                                          bool is_request, const QString& pill_label) const {
     const QRect actions = ActionsRect(card_rect);
 
     painter->save();
@@ -262,7 +263,7 @@ void OpenPakFriendDelegate::PaintActions(QPainter* painter, const QRect& card_re
         draw_pill(secondary, tr("Decline"), QColor(220, 80, 70));
     } else {
         const QRect pill(actions.right() - 64, actions.top() + (actions.height() - 24) / 2, 64, 24);
-        draw_pill(pill, tr("Remove"), QColor(220, 80, 70));
+        draw_pill(pill, pill_label.isEmpty() ? tr("Remove") : pill_label, QColor(220, 80, 70));
     }
 
     painter->restore();

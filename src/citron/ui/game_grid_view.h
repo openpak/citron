@@ -77,8 +77,6 @@ private:
     GameGridDelegate* m_fav_delegate = nullptr;
     GameGridDelegate* m_main_delegate = nullptr;
     QVBoxLayout* m_layout = nullptr;
-    QLabel* m_top_help = nullptr;
-    QLabel* m_bottom_hint = nullptr;
     bool m_has_focus = false;
     bool m_last_is_poster = false;
 };

@@ -193,17 +193,6 @@ GameGridView::GameGridView(QWidget* parent) : QWidget(parent) {
     m_layout->setContentsMargins(0, 20, 0, 20);
     m_layout->setSpacing(0);
 
-    m_top_help = new QLabel(m_container);
-    m_top_help->setText(tr("if using controller* Press X for Next Alphabetical Letter | Press "
-                           "-/R/ZR for Details Tab | Press B/L/ZL for Go Back"));
-    m_top_help->setStyleSheet(
-        QStringLiteral("QLabel { color: rgba(255, 255, 255, 140); font-weight: bold; font-family: "
-                       "'Outfit', 'Inter', sans-serif; font-size: 14px; }"));
-    m_top_help->setAlignment(Qt::AlignCenter);
-    m_layout->addSpacing(10);
-    m_layout->addWidget(m_top_help);
-    m_layout->addSpacing(20);
-
     auto setupView = [&](QListView*& view, GameGridDelegate*& delegate) {
         view = new ContentHeightListView(m_container);
         view->setViewMode(QListView::IconMode);
@@ -262,13 +251,6 @@ GameGridView::GameGridView(QWidget* parent) : QWidget(parent) {
                        "QListView::item:selected { background: transparent; }"));
     m_layout->addWidget(m_main_view);
 
-    m_bottom_hint = new QLabel(m_container);
-    m_bottom_hint->setText(
-        tr("*You can use your Mouse Wheel or the Scrollbar to navigate the Grid View*"));
-    m_bottom_hint->setStyleSheet(QStringLiteral(
-        "QLabel { color: rgba(255, 255, 255, 100); font-style: italic; font-size: 13px; }"));
-    m_bottom_hint->setAlignment(Qt::AlignCenter);
-    m_layout->addWidget(m_bottom_hint);
     m_scroll_area->setWidget(m_container);
     QVBoxLayout* main_layout = new QVBoxLayout(this);
     main_layout->setContentsMargins(0, 0, 0, 0);
@@ -335,17 +317,6 @@ void GameGridView::ApplyTheme() {
     if (m_fav_label) m_fav_label->setStyleSheet(label_style);
     if (m_main_label) m_main_label->setStyleSheet(label_style + QStringLiteral("margin-top: 18px;"));
 
-    if (m_top_help) {
-        m_top_help->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-weight: bold; font-family: 'Outfit', 'Inter', sans-serif; font-size: 14px; }"
-        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 140)") : QStringLiteral("rgba(30, 30, 35, 180)")));
-    }
-    
-    if (m_bottom_hint) {
-        m_bottom_hint->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-style: italic; font-size: 13px; }"
-        ).arg(dark ? QStringLiteral("rgba(255, 255, 255, 100)") : QStringLiteral("rgba(30, 30, 35, 120)")));
-    }
 }
 
 void GameGridView::setModels(QAbstractItemModel* fav_model, QAbstractItemModel* main_model) {
