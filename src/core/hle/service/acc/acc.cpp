@@ -218,11 +218,22 @@ std::string BuildIdToken() {
         fmt::format(R"({{"alg":"RS256","kid":"{}","typ":"id_token","jku":"{}"}})", BaasKeyId,
                     BaasJku);
 
+    // [OpenPak] Ride the signed nx2 token in the "nnex" claim so the auth server can
+    // cryptographically bind this NEX login to the account (anti-impersonation).
+    std::string nnex_claim;
+    if (Common::OpenPakAccount::IsLinked()) {
+        const std::string tok = Common::OpenPakAccount::GetToken();
+        if (!tok.empty()) {
+            nnex_claim = fmt::format(R"("nnex":"{}",)", tok);
+        }
+    }
+
     const std::string payload = fmt::format(
         R"({{"sub":"{}","aud":"{}","iss":"{}","typ":"id_token","iat":{},"exp":{},"jku":"{}",)"
-        R"("jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}","hm":true}})",
+        R"("jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}",{}"hm":true}})",
         RandomHex(0x10), BaasAudience, BaasIssuer, now, now + 3 * 60 * 60, BaasJku,
-        Common::UUID::MakeRandom().FormattedString(), RandomHex(0x10), RandomHex(0x10));
+        Common::UUID::MakeRandom().FormattedString(), RandomHex(0x10), RandomHex(0x10),
+        nnex_claim);
 
     const std::string signing_input =
         Base64UrlEncode(header) + "." + Base64UrlEncode(payload);
