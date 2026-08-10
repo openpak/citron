@@ -5,12 +5,15 @@
 
 #include <algorithm>
 
+#include <QApplication>
 #include <QDateTime>
 #include <QFont>
 #include <QFontMetrics>
+#include <QListView>
 #include <QModelIndex>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPalette>
 #include <QPixmap>
 #include <QStyle>
 #include <QStyleOptionViewItem>
@@ -46,7 +49,8 @@ QString RelativeLastPlayed(const QString& rfc3339) {
 
 } // Anonymous namespace
 
-OpenPakHistoryDelegate::OpenPakHistoryDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
+OpenPakHistoryDelegate::OpenPakHistoryDelegate(QListView* view, QObject* parent)
+    : QStyledItemDelegate(parent), list_view(view) {}
 
 OpenPakHistoryDelegate::~OpenPakHistoryDelegate() = default;
 
@@ -117,6 +121,12 @@ void OpenPakHistoryDelegate::paint(QPainter* painter, const QStyleOptionViewItem
                       Qt::AlignVCenter | Qt::AlignLeft | Qt::TextSingleLine,
                       QFontMetrics(sub_font).elidedText(sub, Qt::ElideRight, text_rect.width()));
 
+    if (list_view && list_view->hasFocus() && list_view->currentIndex() == index) {
+        painter->setPen(QPen(AccentColor(), 2));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawRoundedRect(card.adjusted(1, 1, -1, -1), kCardRadius, kCardRadius);
+    }
+
     painter->restore();
 }
 
@@ -130,4 +140,13 @@ QColor OpenPakHistoryDelegate::FgColor() const {
 
 QColor OpenPakHistoryDelegate::DimColor() const {
     return UISettings::IsDarkTheme() ? QColor(145, 145, 155) : QColor(100, 100, 112);
+}
+
+QColor OpenPakHistoryDelegate::AccentColor() const {
+    const QString hex = QString::fromStdString(UISettings::values.accent_color.GetValue());
+    if (QColor(hex).isValid()) {
+        return QColor(hex);
+    }
+    const QColor pa = QApplication::palette().color(QPalette::Highlight);
+    return (pa.isValid() && pa != Qt::black) ? pa : QColor(100, 149, 237);
 }

@@ -7,6 +7,7 @@
 #include "common/settings_input.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
+#include <QApplication>
 #include <QCoreApplication>
 #include <QWidget>
 
@@ -18,6 +19,19 @@ ControllerNavigation::ControllerNavigation(Core::HID::HIDCore& hid_core, QWidget
 
 ControllerNavigation::~ControllerNavigation() {
     UnloadController();
+}
+
+bool ControllerNavigation::IsOwnerWindowActive() const {
+    const auto* owner = qobject_cast<const QWidget*>(parent());
+    if (!owner) {
+        return true;
+    }
+    const QWidget* window = owner->window();
+    if (!window || window->isActiveWindow()) {
+        return true;
+    }
+    const QWidget* active = QApplication::activeWindow();
+    return active && window->isAncestorOf(active);
 }
 
 void ControllerNavigation::LoadController(Core::HID::HIDCore& hid_core) {
@@ -95,7 +109,9 @@ void ControllerNavigation::stopRepeatTimer() {
 
 void ControllerNavigation::navigationRepeat() {
     if (m_repeat_dx != 0 || m_repeat_dy != 0) {
-        emit navigated(m_repeat_dx, m_repeat_dy);
+        if (IsOwnerWindowActive()) {
+            emit navigated(m_repeat_dx, m_repeat_dy);
+        }
         m_repeat_timer->start(Settings::values.navigation_repeat_interval.GetValue());
     }
 }
@@ -122,6 +138,8 @@ void ControllerNavigation::ControllerUpdateEvent(Core::HID::ControllerTriggerTyp
 void ControllerNavigation::ControllerUpdateButton() {
     if (!player1_controller || !handheld_controller) return;
 
+    const bool window_active = IsOwnerWindowActive();
+
     const auto& p1_btns = player1_controller->GetButtonsValues();
     const auto& hh_btns = handheld_controller->GetButtonsValues();
 
@@ -130,16 +148,20 @@ void ControllerNavigation::ControllerUpdateButton() {
         const bool pressed = button && !button_values[i].value;
         const bool released = !button && button_values[i].value;
 
-        if (pressed) {
+        if (pressed && window_active) {
             // Native Navigation logic
             switch (i) {
             case Settings::NativeButton::A: // Nintendo A / PS Circle (East)
                 emit activated();
                 break;
-            case Settings::NativeButton::B:  // Nintendo B / PS Cross (South)
+            case Settings::NativeButton::B: // Nintendo B / PS Cross (South)
+                emit cancelled();
+                emit backPressed();
+                break;
             case Settings::NativeButton::L:  // L1
             case Settings::NativeButton::ZL: // L2
                 emit cancelled();
+                emit leftShoulderPressed();
                 break;
             case Settings::NativeButton::DDown:
                 emit navigated(0, 1);
@@ -157,8 +179,11 @@ void ControllerNavigation::ControllerUpdateButton() {
                 emit navigated(1, 0);
                 startRepeatTimer(1, 0);
                 break;
-            case Settings::NativeButton::R:     // R1
-            case Settings::NativeButton::ZR:    // R2
+            case Settings::NativeButton::R:  // R1
+            case Settings::NativeButton::ZR: // R2
+                toggleFocus();
+                emit rightShoulderPressed();
+                break;
             case Settings::NativeButton::Plus:  // Options
             case Settings::NativeButton::Minus: // Select
                 toggleFocus();
@@ -167,7 +192,7 @@ void ControllerNavigation::ControllerUpdateButton() {
                 emit auxiliaryAction(0); // Cycle alphabetical sections
                 break;
             }
-        } else if (released) {
+        } else if (released && window_active) {
             // Released
             switch (i) {
             case Settings::NativeButton::DDown:
@@ -184,6 +209,8 @@ void ControllerNavigation::ControllerUpdateButton() {
 
 void ControllerNavigation::ControllerUpdateStick() {
     if (!player1_controller || !handheld_controller) return;
+
+    const bool window_active = IsOwnerWindowActive();
 
     const auto& p1_sticks = player1_controller->GetSticksValues();
     const auto& hh_sticks = handheld_controller->GetSticksValues();
@@ -202,20 +229,22 @@ void ControllerNavigation::ControllerUpdateStick() {
             bool was_active = stick_values[i].down || stick_values[i].up || stick_values[i].left || stick_values[i].right;
             bool is_active = down || up || left || right;
 
-            if (down && !stick_values[i].down) {
-                emit navigated(0, 1);
-                startRepeatTimer(0, 1);
-            } else if (up && !stick_values[i].up) {
-                emit navigated(0, -1);
-                startRepeatTimer(0, -1);
-            } else if (left && !stick_values[i].left) {
-                emit navigated(-1, 0);
-                startRepeatTimer(-1, 0);
-            } else if (right && !stick_values[i].right) {
-                emit navigated(1, 0);
-                startRepeatTimer(1, 0);
-            } else if (!is_active && was_active) {
-                stopRepeatTimer();
+            if (window_active) {
+                if (down && !stick_values[i].down) {
+                    emit navigated(0, 1);
+                    startRepeatTimer(0, 1);
+                } else if (up && !stick_values[i].up) {
+                    emit navigated(0, -1);
+                    startRepeatTimer(0, -1);
+                } else if (left && !stick_values[i].left) {
+                    emit navigated(-1, 0);
+                    startRepeatTimer(-1, 0);
+                } else if (right && !stick_values[i].right) {
+                    emit navigated(1, 0);
+                    startRepeatTimer(1, 0);
+                } else if (!is_active && was_active) {
+                    stopRepeatTimer();
+                }
             }
         }
 

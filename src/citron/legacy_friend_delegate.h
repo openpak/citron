@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QMap>
 #include <QPersistentModelIndex>
+#include <QPoint>
 #include <QString>
 #include <QStyledItemDelegate>
 #include <QTimer>
@@ -45,7 +46,7 @@ private:
     void PaintNameAndStatus(QPainter*, const QRect&, const QStyleOptionViewItem&,
                             const QModelIndex&) const;
     void PaintActions(QPainter*, const QRect& card_rect, bool is_request,
-                      const QString& pill_label) const;
+                      const QString& pill_label, qreal hover) const;
     QRect ActionsRect(const QRect& card_rect) const;
 
     QColor CardBg() const;
@@ -58,4 +59,5 @@ private:
     QTimer* anim_timer;
 
     mutable QMap<QPersistentModelIndex, qreal> hover_prog;
+    mutable QPoint last_cursor_pos;
 };

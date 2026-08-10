@@ -3896,6 +3896,26 @@ QStandardItemModel* GameList::GetModel() const {
     return item_model;
 }
 
+QString GameList::GetGamePath(u64 program_id) const {
+    for (int i = 0; i < item_model->rowCount(); ++i) {
+        QStandardItem* folder = item_model->item(i, 0);
+        if (!folder || folder->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                           GameListItemType::AddDir) {
+            continue;
+        }
+        for (int j = 0; j < folder->rowCount(); ++j) {
+            QStandardItem* game_item = folder->child(j, 0);
+            if (game_item &&
+                game_item->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                    GameListItemType::Game &&
+                game_item->data(GameListItemPath::ProgramIdRole).toULongLong() == program_id) {
+                return game_item->data(GameListItemPath::FullPathRole).toString();
+            }
+        }
+    }
+    return {};
+}
+
 void GameList::PopulateAsync(QVector<UISettings::GameDir>& game_dirs, bool is_smart_update) {
     if (current_worker) {
         return;

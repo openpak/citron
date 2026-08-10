@@ -1989,7 +1989,14 @@ void GMainWindow::ConnectMenuEvents() {
             legacy_controller->SignIn();
             return;
         }
-        OpenPakAccountDialog(legacy_controller, this).exec();
+        OpenPakAccountDialog(legacy_controller, *system, this).exec();
+    });
+    connect(legacy_toast, &OpenPakToast::clicked, this, [this](OpenPakToast::Kind kind) {
+        if (kind != OpenPakToast::Kind::Request || !Common::OpenPakAccount::IsLinked()) {
+            return;
+        }
+        OpenPakAccountDialog(legacy_controller, *system, this, OpenPakAccountDialog::kRequestsPage)
+            .exec();
     });
     connect(ui->action_OpenPak_Population, &QAction::triggered, this,
             [this] { OpenPakPopulationDialog(this).exec(); });
@@ -2087,6 +2094,12 @@ void GMainWindow::ConnectMenuEvents() {
                 legacy_toast->Show(tr("Friend Request Sent!"), friend_code, {},
                                      OpenPakToast::Kind::RequestSent);
             });
+    connect(legacy_controller, &OpenPakController::QuickStartRequested, this, [this](u64 title_id) {
+        const QString path = game_list->GetGamePath(title_id);
+        if (!path.isEmpty()) {
+            BootGameFromList(path, StartGameType::Normal);
+        }
+    });
     connect(ui->action_Connect_To_Room, &QAction::triggered, multiplayer_state,
             &MultiplayerState::OnDirectConnectToRoom);
     connect(ui->action_Show_Room, &QAction::triggered, multiplayer_state,

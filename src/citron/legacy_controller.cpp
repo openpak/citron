@@ -209,6 +209,10 @@ void OpenPakController::ManualSaveDownload(u64 title_id) {
 #endif
 }
 
+void OpenPakController::QuickStart(u64 title_id) {
+    emit QuickStartRequested(title_id);
+}
+
 void OpenPakController::ApplyProfileName(const std::string& name) {
     if (name.empty()) {
         return;

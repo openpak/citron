@@ -55,6 +55,9 @@ signals:
     void focusChanged(FocusTarget new_focus);
     void auxiliaryAction(int action_id); // For mapping X, Y, etc.
     void activityDetected();             // Emitted on any controller input
+    void leftShoulderPressed();          // L / ZL, in addition to cancelled()
+    void rightShoulderPressed();         // R / ZR, in addition to toggleFocus()
+    void backPressed();                  // B specifically (not L/ZL), in addition to cancelled()
 
 private slots:
     void navigationRepeat();
@@ -62,6 +65,7 @@ private slots:
 private:
     void TriggerButton(Settings::NativeButton::Values native_button, Qt::Key key);
     void ControllerUpdateEvent(Core::HID::ControllerTriggerType type);
+    bool IsOwnerWindowActive() const;
 
     void ControllerUpdateButton();
 

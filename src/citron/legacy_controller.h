@@ -44,6 +44,7 @@ public:
     void NotifyFriendRequestSent(const QString& friend_code);
 
     void ManualSaveDownload(u64 title_id);
+    void QuickStart(u64 title_id);
 
 signals:
     void AccountLinked();
@@ -53,6 +54,7 @@ signals:
     void FriendRequestReceived(u64 pid, QString name, QString avatar_base64);
     void FriendRequestSent(QString friend_code);
     void StatusChanged(QString message);
+    void QuickStartRequested(u64 title_id);
     // Fired once the OAuth URL is known, whether or not the OS actually opened a visible
     // browser window for it (xdg-open/openUrl can both report success with nothing appearing).
     void SignInUrlReady(QString url);

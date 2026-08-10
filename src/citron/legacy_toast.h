@@ -28,6 +28,9 @@ public:
     void Show(const QString& headline, const QString& detail, const QString& avatar_base64,
              Kind kind = Kind::Online);
 
+signals:
+    void clicked(OpenPakToast::Kind kind);
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;

@@ -70,7 +70,14 @@ void OpenPakFriendDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
     const QRect text_rect(avatar_rect.right() + 10, card.top(), actions.left() - 6 - avatar_rect.right() - 10,
                           card.height());
     PaintNameAndStatus(painter, text_rect, option, index);
-    PaintActions(painter, card, is_request, pill_label);
+    const qreal hov = hover_prog.value(QPersistentModelIndex(index), 0.0);
+    PaintActions(painter, card, is_request, pill_label, hov);
+
+    if (list_view && list_view->hasFocus() && list_view->currentIndex() == index) {
+        painter->setPen(QPen(AccentColor(), 2));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawRoundedRect(card.adjusted(1, 1, -1, -1), kCardRadius, kCardRadius);
+    }
 
     painter->restore();
 }
@@ -116,10 +123,23 @@ void OpenPakFriendDelegate::AdvanceAnimations() {
     }
     bool dirty = false;
 
-    const QPoint mp = list_view->viewport()->mapFromGlobal(QCursor::pos());
-    const QModelIndex hov_raw = list_view->indexAt(mp);
-    const QPersistentModelIndex hov_key =
-        hov_raw.isValid() ? QPersistentModelIndex(hov_raw) : QPersistentModelIndex{};
+    const QPoint cursor_pos = QCursor::pos();
+    const bool mouse_moved = cursor_pos != last_cursor_pos;
+    last_cursor_pos = cursor_pos;
+
+    QPersistentModelIndex hov_key;
+    if (list_view->hasFocus() && list_view->currentIndex().isValid() && !mouse_moved) {
+        // Ignore a motionless cursor so it doesn't steal the highlight from the selection.
+        hov_key = QPersistentModelIndex(list_view->currentIndex());
+    } else {
+        const QPoint mp = list_view->viewport()->mapFromGlobal(cursor_pos);
+        const QModelIndex hov_raw = list_view->indexAt(mp);
+        if (hov_raw.isValid()) {
+            hov_key = QPersistentModelIndex(hov_raw);
+        } else if (list_view->hasFocus() && list_view->currentIndex().isValid()) {
+            hov_key = QPersistentModelIndex(list_view->currentIndex());
+        }
+    }
 
     if (hov_key.isValid() && !hover_prog.contains(hov_key)) {
         hover_prog[hov_key] = 0.0;
@@ -233,7 +253,8 @@ void OpenPakFriendDelegate::PaintNameAndStatus(QPainter* painter, const QRect& r
 }
 
 void OpenPakFriendDelegate::PaintActions(QPainter* painter, const QRect& card_rect,
-                                          bool is_request, const QString& pill_label) const {
+                                          bool is_request, const QString& pill_label,
+                                          qreal hover) const {
     const QRect actions = ActionsRect(card_rect);
 
     painter->save();
@@ -242,15 +263,18 @@ void OpenPakFriendDelegate::PaintActions(QPainter* painter, const QRect& card_re
     f.setBold(true);
     painter->setFont(f);
 
+    const qreal intensity = 0.4 + 0.6 * hover;
     auto draw_pill = [&](const QRect& pill, const QString& text, const QColor& color) {
         QPainterPath path;
         path.addRoundedRect(pill, pill.height() / 2.0, pill.height() / 2.0);
         QColor fill = color;
-        fill.setAlpha(38);
+        fill.setAlpha(static_cast<int>(38 * intensity));
         painter->fillPath(path, fill);
-        painter->setPen(QPen(color, 1.2));
+        QColor outline = color;
+        outline.setAlphaF(intensity);
+        painter->setPen(QPen(outline, 1.2));
         painter->drawPath(path);
-        painter->setPen(color);
+        painter->setPen(outline);
         painter->drawText(pill, Qt::AlignCenter, text);
     };
 

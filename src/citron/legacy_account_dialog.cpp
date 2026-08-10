@@ -9,6 +9,8 @@
 
 #include <fmt/format.h>
 
+#include <QAbstractButton>
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QBuffer>
 #include <QButtonGroup>
@@ -17,31 +19,43 @@
 #include <QComboBox>
 #include <QCursor>
 #include <QEvent>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFont>
+#include <QGraphicsDropShadowEffect>
+#include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLinearGradient>
 #include <QListView>
+#include <QMenu>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPainter>
+#include <QPropertyAnimation>
 #include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QResizeEvent>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QStandardItemModel>
-#include <QTabBar>
-#include <QTabWidget>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include "common/fs/path_util.h"
 #include "common/legacy_account.h"
 #include "common/legacy_outgoing_requests.h"
+#include "common/settings.h"
 #include "citron/legacy_account_dialog.h"
 #include "citron/legacy_account_page_p.h"
 #include "citron/legacy_avatar_cache.h"
@@ -51,6 +65,9 @@
 #include "citron/legacy_history_delegate.h"
 #include "citron/legacy_network_probe.h"
 #include "citron/uisettings.h"
+#include "citron/util/controller_navigation.h"
+#include "core/core.h"
+#include "hid_core/hid_core.h"
 
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/legacy_api.h"
@@ -59,6 +76,7 @@
 namespace {
 
 constexpr int kHeaderAvatarSize = 72;
+constexpr int kPreviewAvatarSize = 30;
 
 QColor CardBg() {
     return UISettings::IsDarkTheme() ? QColor(30, 30, 34) : QColor(244, 244, 248);
@@ -75,6 +93,17 @@ QColor AccentColor() {
     }
     const QColor pa = QApplication::palette().color(QPalette::Highlight);
     return (pa.isValid() && pa != Qt::black) ? pa : QColor(100, 149, 237);
+}
+
+QColor PresenceColor(int status) {
+    switch (status) {
+    case 1:
+        return QColor(100, 149, 237);
+    case 2:
+        return QColor(50, 195, 85);
+    default:
+        return QColor(120, 120, 120);
+    }
 }
 
 QPixmap RoundedPixmap(const QPixmap& source, int size) {
@@ -114,6 +143,11 @@ QPixmap RoundedRectPixmap(const QPixmap& source, int size, int radius) {
     return out;
 }
 
+std::filesystem::path BackgroundImagePath() {
+    return Common::FS::GetCitronPath(Common::FS::CitronPath::CacheDir) /
+           "legacy_profile_background.png";
+}
+
 class HeaderCard : public QWidget {
 public:
     explicit HeaderCard(QWidget* parent) : QWidget(parent) {
@@ -126,6 +160,11 @@ public:
         timer->start();
     }
 
+    void SetBackgroundImage(const QPixmap& pixmap) {
+        background = pixmap;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
@@ -136,6 +175,21 @@ protected:
         clip_path.addRoundedRect(card, 12, 12);
         painter.setClipPath(clip_path);
         painter.fillPath(clip_path, CardBg());
+
+        if (!background.isNull()) {
+            const QSize scaled_size = background.size().scaled(card.size(), Qt::KeepAspectRatioByExpanding);
+            const QPixmap scaled = background.scaled(scaled_size, Qt::KeepAspectRatioByExpanding,
+                                                      Qt::SmoothTransformation);
+            const QPoint offset((card.width() - scaled.width()) / 2,
+                                (card.height() - scaled.height()) / 2);
+            painter.drawPixmap(card.topLeft() + offset, scaled);
+
+            QLinearGradient scrim(card.left(), 0, card.right(), 0);
+            scrim.setColorAt(0.0, QColor(0, 0, 0, 150));
+            scrim.setColorAt(0.55, QColor(0, 0, 0, 80));
+            scrim.setColorAt(1.0, QColor(0, 0, 0, 40));
+            painter.fillRect(card, scrim);
+        }
 
         const QColor accent = AccentColor();
         const qreal breathe = 0.5 + 0.5 * std::sin(phase);
@@ -156,47 +210,44 @@ protected:
         right_glow.setColorAt(1.0, edge);
         painter.fillRect(QRect(card.right() - glow_w, card.top(), glow_w, card.height()), right_glow);
 
-        // Filled, layered wave bands -- same visual language as nexium-live's carousel backdrop:
-        // each band is a solid fill down to the card's bottom edge, stacked with alternating
-        // tint/shade and phase so they read as layered waves rather than decorative scribbles.
-        struct WaveBand {
-            qreal base_frac, amp_frac, phase_off, speed, shade;
-            int alpha;
-        };
-        static constexpr WaveBand kBands[] = {
-            {0.55, 0.05, 0.0, 1.5, 0.28, 70},
-            {0.42, 0.07, 1.1, 1.2, -0.30, 60},
-            {0.70, 0.035, 2.3, 0.9, 0.50, 50},
-            {0.30, 0.09, 0.6, 1.7, -0.42, 42},
-            {0.85, 0.03, 3.5, 0.7, 0.66, 34},
-        };
-        const auto shade = [](QColor c, qreal f) {
-            const auto adj = [f](int v) {
-                return f >= 0.0 ? static_cast<int>(v + (255 - v) * f) : static_cast<int>(v * (1.0 + f));
+        if (background.isNull()) {
+            struct WaveBand {
+                qreal base_frac, amp_frac, phase_off, speed, shade;
+                int alpha;
             };
-            return QColor(adj(c.red()), adj(c.green()), adj(c.blue()));
-        };
-        constexpr int kSteps = 48;
-        for (const auto& band : kBands) {
-            const qreal base_y = card.top() + card.height() * band.base_frac;
-            const qreal amp = card.height() * band.amp_frac;
-            const qreal ph = phase * band.speed + band.phase_off;
+            static constexpr WaveBand kBands[] = {
+                {0.55, 0.05, 0.0, 1.5, 0.28, 70},   {0.42, 0.07, 1.1, 1.2, -0.30, 60},
+                {0.70, 0.035, 2.3, 0.9, 0.50, 50},  {0.30, 0.09, 0.6, 1.7, -0.42, 42},
+                {0.85, 0.03, 3.5, 0.7, 0.66, 34},
+            };
+            const auto shade = [](QColor c, qreal f) {
+                const auto adj = [f](int v) {
+                    return f >= 0.0 ? static_cast<int>(v + (255 - v) * f) : static_cast<int>(v * (1.0 + f));
+                };
+                return QColor(adj(c.red()), adj(c.green()), adj(c.blue()));
+            };
+            constexpr int kSteps = 48;
+            for (const auto& band : kBands) {
+                const qreal base_y = card.top() + card.height() * band.base_frac;
+                const qreal amp = card.height() * band.amp_frac;
+                const qreal ph = phase * band.speed + band.phase_off;
 
-            QPainterPath fill;
-            fill.moveTo(card.left(), card.bottom());
-            for (int s = 0; s <= kSteps; ++s) {
-                const qreal nx = static_cast<qreal>(s) / kSteps;
-                const qreal x = card.left() + nx * card.width();
-                const qreal y = base_y + std::sin(nx * 2 * M_PI + ph) * amp +
-                               std::cos(nx * 2 * M_PI * 1.7 + ph * 0.8) * amp * 0.4;
-                fill.lineTo(x, y);
+                QPainterPath fill;
+                fill.moveTo(card.left(), card.bottom());
+                for (int s = 0; s <= kSteps; ++s) {
+                    const qreal nx = static_cast<qreal>(s) / kSteps;
+                    const qreal x = card.left() + nx * card.width();
+                    const qreal y = base_y + std::sin(nx * 2 * M_PI + ph) * amp +
+                                   std::cos(nx * 2 * M_PI * 1.7 + ph * 0.8) * amp * 0.4;
+                    fill.lineTo(x, y);
+                }
+                fill.lineTo(card.right(), card.bottom());
+                fill.closeSubpath();
+
+                QColor band_color = shade(accent, band.shade);
+                band_color.setAlpha(band.alpha);
+                painter.fillPath(fill, band_color);
             }
-            fill.lineTo(card.right(), card.bottom());
-            fill.closeSubpath();
-
-            QColor band_color = shade(accent, band.shade);
-            band_color.setAlpha(band.alpha);
-            painter.fillPath(fill, band_color);
         }
 
         painter.setClipping(false);
@@ -207,7 +258,75 @@ protected:
 
 private:
     qreal phase = 0.0;
+    QPixmap background;
 };
+
+class ClickableFrame : public QFrame {
+public:
+    explicit ClickableFrame(QWidget* parent = nullptr) : QFrame(parent) {
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+    std::function<void()> on_click;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton && on_click && rect().contains(event->pos())) {
+            on_click();
+        }
+        QFrame::mouseReleaseEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if ((event->key() == Qt::Key_Space || event->key() == Qt::Key_Return ||
+            event->key() == Qt::Key_Enter) &&
+            on_click) {
+            on_click();
+            return;
+        }
+        QFrame::keyPressEvent(event);
+    }
+
+    void paintEvent(QPaintEvent* event) override {
+        QFrame::paintEvent(event);
+        if (!hasFocus()) {
+            return;
+        }
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(AccentColor(), 2));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRoundedRect(rect().adjusted(1, 1, -1, -1), 10, 10);
+    }
+};
+
+QString DashCardStyle() {
+    return QStringLiteral("QFrame { background: %1; border-radius: 12px; }").arg(CardBg().name());
+}
+
+QFrame* MakeDashCard() {
+    auto* card = new QFrame;
+    card->setStyleSheet(DashCardStyle());
+    return card;
+}
+
+QLabel* MakeCardTitle(const QString& text) {
+    auto* label = new QLabel(text);
+    QFont f = label->font();
+    f.setBold(true);
+    f.setPointSize(f.pointSize() + 1);
+    label->setFont(f);
+    return label;
+}
+
+QLabel* MakeDimLabel(const QString& text) {
+    auto* label = new QLabel(text);
+    QPalette pal = label->palette();
+    pal.setColor(QPalette::WindowText, DimColor());
+    label->setPalette(pal);
+    return label;
+}
 
 QListView* MakeCardList(QWidget* parent) {
     auto* view = new QListView(parent);
@@ -229,24 +348,403 @@ QLabel* MakeEmptyLabel(const QString& text) {
     return label;
 }
 
-QString TabWidgetStyle() {
-    const QColor bg = CardBg();
-    const QString bg_hex = bg.name();
-    return QStringLiteral("QTabWidget::pane { border: none; background: %1; border-radius: 8px; }"
-                          "QTabBar::tab { padding: 6px 14px; margin-right: 2px; "
-                          "border-top-left-radius: 8px; border-top-right-radius: 8px; }"
-                          "QTabBar::tab:selected { background: %1; }")
-        .arg(bg_hex);
+QWidget* MakePage(std::initializer_list<QWidget*> widgets, int margin = 0) {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(margin, margin, margin, margin);
+    layout->setSpacing(8);
+    std::size_t i = 0;
+    for (QWidget* w : widgets) {
+        layout->addWidget(w, (++i == widgets.size()) ? 1 : 0);
+    }
+    return page;
 }
+
+class OpenPakToggleSwitch : public QWidget {
+public:
+    explicit OpenPakToggleSwitch(QWidget* parent = nullptr) : QWidget(parent) {
+        setFixedSize(46, 26);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+    void SetChecked(bool checked_) {
+        checked = checked_;
+        update();
+    }
+    bool IsChecked() const {
+        return checked;
+    }
+
+    std::function<void(bool)> on_toggled;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton && rect().contains(event->pos())) {
+            Toggle();
+        }
+        QWidget::mouseReleaseEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if (event->key() == Qt::Key_Space || event->key() == Qt::Key_Return ||
+            event->key() == Qt::Key_Enter) {
+            Toggle();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+
+        const QRectF track = rect().adjusted(1, 1, -1, -1);
+        const QColor track_color = checked ? AccentColor() : QColor(255, 255, 255, 35);
+        QPainterPath track_path;
+        track_path.addRoundedRect(track, track.height() / 2.0, track.height() / 2.0);
+        painter.fillPath(track_path, track_color);
+
+        if (hasFocus()) {
+            painter.setPen(QPen(AccentColor(), 2));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPath(track_path);
+        }
+
+        const qreal knob_d = track.height() - 6;
+        const qreal knob_x = checked ? track.right() - knob_d - 3 : track.left() + 3;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Qt::white);
+        painter.drawEllipse(QRectF(knob_x, track.top() + 3, knob_d, knob_d));
+    }
+
+private:
+    void Toggle() {
+        checked = !checked;
+        update();
+        if (on_toggled) {
+            on_toggled(checked);
+        }
+    }
+
+    bool checked = false;
+};
+
+class OpenPakDropdownRow : public ClickableFrame {
+public:
+    OpenPakDropdownRow(const QString& text, bool selected, QWidget* parent = nullptr)
+        : ClickableFrame(parent) {
+        setObjectName(QStringLiteral("dropdownRow"));
+        setStyleSheet(
+            QStringLiteral("QFrame#dropdownRow { background: transparent; border-radius: 8px; }"
+                          "QFrame#dropdownRow:hover { background: rgba(255,255,255,20); }"));
+        auto* label = new QLabel(selected ? QStringLiteral("✓  ") + text : QStringLiteral("     ") + text);
+        if (selected) {
+            QFont f = label->font();
+            f.setBold(true);
+            label->setFont(f);
+            label->setStyleSheet(QStringLiteral("color: %1;").arg(AccentColor().name()));
+        } else {
+            label->setStyleSheet(QStringLiteral("color: rgba(255,255,255,220);"));
+        }
+        auto* row_layout = new QHBoxLayout(this);
+        row_layout->setContentsMargins(10, 8, 10, 8);
+        row_layout->addWidget(label);
+    }
+};
+
+class OpenPakDropdown : public QWidget {
+public:
+    explicit OpenPakDropdown(QWidget* parent = nullptr) : QWidget(parent) {
+        setFixedHeight(34);
+        setMinimumWidth(160);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+    void SetValues(QStringList values_, int current) {
+        values = std::move(values_);
+        index = std::clamp(current, 0, static_cast<int>(values.size()) - 1);
+        update();
+    }
+    int CurrentIndex() const {
+        return index;
+    }
+
+    std::function<void(int)> on_changed;
+    std::function<void(QWidget*)> on_popup_opened;
+    std::function<void()> on_popup_closed;
+
+    void OpenPopup() {
+        if (values.isEmpty() || popup) {
+            return;
+        }
+        QWidget* root = window();
+        popup = new QFrame(root);
+        popup->setObjectName(QStringLiteral("dropdownPopup"));
+        popup->setStyleSheet(QStringLiteral(
+            "QFrame#dropdownPopup { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+            "  stop:0 rgba(32, 32, 38, 250), stop:1 rgba(22, 22, 27, 255)); "
+            "  border: 1px solid rgba(255,255,255,40); border-radius: 10px; }"));
+
+        auto* layout = new QVBoxLayout(popup);
+        layout->setContentsMargins(6, 6, 6, 6);
+        layout->setSpacing(2);
+        OpenPakDropdownRow* first_row = nullptr;
+        for (int i = 0; i < values.size(); ++i) {
+            auto* row = new OpenPakDropdownRow(values[i], i == index, popup);
+            row->on_click = [this, i] { SetIndex(i); ClosePopup(); };
+            layout->addWidget(row);
+            if (!first_row) {
+                first_row = row;
+            }
+        }
+
+        popup->adjustSize();
+        popup->setFixedWidth(std::max(width(), popup->sizeHint().width()));
+        QPoint local_pos = mapTo(root, QPoint(0, height() + 4));
+        if (local_pos.y() + popup->height() > root->height()) {
+            local_pos = mapTo(root, QPoint(0, -popup->height() - 4));
+        }
+        if (local_pos.x() + popup->width() > root->width()) {
+            local_pos.setX(root->width() - popup->width());
+        }
+        popup->move(local_pos);
+        popup->show();
+        popup->raise();
+        if (first_row) {
+            first_row->setFocus();
+        }
+        if (on_popup_opened) {
+            on_popup_opened(popup);
+        }
+    }
+
+    void ClosePopup() {
+        if (!popup) {
+            return;
+        }
+        popup->deleteLater();
+        popup = nullptr;
+        setFocus();
+        if (on_popup_closed) {
+            on_popup_closed();
+        }
+    }
+
+    bool IsPopupOpen() const {
+        return popup != nullptr;
+    }
+
+protected:
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton) {
+            popup ? ClosePopup() : OpenPopup();
+        }
+        QWidget::mouseReleaseEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if (event->key() == Qt::Key_Space || event->key() == Qt::Key_Return ||
+            event->key() == Qt::Key_Enter) {
+            OpenPopup();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+
+        const QRectF box = rect().adjusted(1, 1, -1, -1);
+        QPainterPath box_path;
+        box_path.addRoundedRect(box, 8, 8);
+        painter.fillPath(box_path, QColor(255, 255, 255, 20));
+        painter.setPen(QPen(hasFocus() ? AccentColor() : QColor(255, 255, 255, 30), hasFocus() ? 2 : 1));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(box_path);
+
+        painter.setPen(QColor(255, 255, 255, 220));
+        painter.setFont(font());
+        const QString text = values.isEmpty() ? QString{} : values[index];
+        painter.drawText(box.adjusted(12, 0, -24, 0), Qt::AlignVCenter | Qt::AlignLeft, text);
+
+        QFont chevron_font = font();
+        chevron_font.setBold(true);
+        painter.setFont(chevron_font);
+        painter.setPen(hasFocus() ? AccentColor() : DimColor());
+        painter.drawText(QRectF(box.right() - 22, box.top(), 22, box.height()), Qt::AlignCenter,
+                         QStringLiteral("▾"));
+    }
+
+private:
+    void SetIndex(int new_index) {
+        if (values.isEmpty()) {
+            return;
+        }
+        index = new_index;
+        update();
+        if (on_changed) {
+            on_changed(index);
+        }
+    }
+
+    QStringList values;
+    int index = 0;
+    QPointer<QFrame> popup;
+};
+
+class OpenPakSignalIcon : public QWidget {
+public:
+    explicit OpenPakSignalIcon(QWidget* parent = nullptr) : QWidget(parent) {
+        setFixedSize(26, 16);
+        auto* timer = new QTimer(this);
+        timer->setInterval(45);
+        connect(timer, &QTimer::timeout, this, [this] {
+            if (!online) {
+                return;
+            }
+            phase += 0.09;
+            update();
+        });
+        timer->start();
+    }
+
+    void SetOnline(bool online_) {
+        online = online_;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+
+        constexpr int kBars = 3;
+        constexpr qreal kBarWidth = 5.0;
+        constexpr qreal kGap = 3.0;
+
+        for (int i = 0; i < kBars; ++i) {
+            const qreal bar_h = height() * (0.42 + 0.29 * i);
+            const qreal x = i * (kBarWidth + kGap);
+            const qreal y = height() - bar_h;
+            QPainterPath path;
+            path.addRoundedRect(QRectF(x, y, kBarWidth, bar_h), 1.5, 1.5);
+
+            QColor color;
+            if (online) {
+                const qreal wave = 0.5 + 0.5 * std::sin(phase - i * 1.1);
+                color = QColor(50, 195, 85);
+                color.setAlphaF(0.45 + 0.55 * wave);
+            } else {
+                color = QColor(224, 57, 62, 210);
+            }
+            painter.fillPath(path, color);
+        }
+
+        if (!online) {
+            painter.setPen(QPen(QColor(224, 57, 62), 2.2, Qt::SolidLine, Qt::RoundCap));
+            painter.drawLine(QPointF(0, 0), QPointF(width(), height()));
+            painter.drawLine(QPointF(0, height()), QPointF(width(), 0));
+        }
+    }
+
+private:
+    bool online = true;
+    qreal phase = 0.0;
+};
 
 } // Anonymous namespace
 
-OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidget* parent)
-    : QDialog(parent), controller(controller_) {
-    setWindowTitle(tr("OpenPak Account"));
-    resize(560, 660);
+class OpenPakPageNavArrow : public QWidget {
+public:
+    enum class Side { Left, Right };
 
-    auto* header_card = new HeaderCard(this);
+    explicit OpenPakPageNavArrow(Side side_, QWidget* parent = nullptr)
+        : QWidget(parent), side(side_) {
+        setFixedHeight(40);
+        setMinimumWidth(190); // fits "Recently Played", the longest page title
+    }
+
+    void SetState(bool enabled_, const QString& label_) {
+        widget_enabled = enabled_;
+        label = label_;
+        setCursor(widget_enabled ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        update();
+    }
+
+    std::function<void()> on_click;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (widget_enabled && event->button() == Qt::LeftButton && on_click) {
+            on_click();
+        }
+        QWidget::mouseReleaseEvent(event);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+
+        const QColor fg = widget_enabled ? AccentColor() : DimColor();
+        const qreal alpha = widget_enabled ? 1.0 : 0.35;
+
+        QColor bubble = fg;
+        bubble.setAlphaF(0.16 * alpha);
+        QPainterPath bubble_path;
+        const int bubble_size = 26;
+        const QRect bubble_rect =
+            side == Side::Left ? QRect(4, (height() - bubble_size) / 2, bubble_size, bubble_size)
+                               : QRect(width() - bubble_size - 4, (height() - bubble_size) / 2,
+                                       bubble_size, bubble_size);
+        bubble_path.addEllipse(bubble_rect);
+        painter.fillPath(bubble_path, bubble);
+        painter.setPen(QPen(fg, 1.4));
+        painter.drawPath(bubble_path);
+
+        QFont bubble_font = font();
+        bubble_font.setBold(true);
+        painter.setFont(bubble_font);
+        painter.setPen(fg);
+        painter.drawText(bubble_rect, Qt::AlignCenter, side == Side::Left ? tr("L") : tr("R"));
+
+        QFont label_font = font();
+        label_font.setPointSize(label_font.pointSize() - 1);
+        painter.setFont(label_font);
+        QColor label_color = fg;
+        label_color.setAlphaF(alpha);
+        painter.setPen(label_color);
+
+        const int text_margin = bubble_size + 10;
+        const QRect text_rect = side == Side::Left
+                                    ? QRect(text_margin, 0, width() - text_margin - 4, height())
+                                    : QRect(4, 0, width() - text_margin - 4, height());
+        painter.drawText(text_rect,
+                         (side == Side::Left ? Qt::AlignLeft : Qt::AlignRight) | Qt::AlignVCenter,
+                         QFontMetrics(label_font).elidedText(label, Qt::ElideRight, text_rect.width()));
+    }
+
+private:
+    Side side;
+    bool widget_enabled = false;
+    QString label;
+};
+
+
+OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
+                                             Core::System& system_, QWidget* parent,
+                                             int initial_page_)
+    : QDialog(parent), controller(controller_), system(system_), hid_core(system_.HIDCore()),
+      initial_page(initial_page_) {
+    setWindowTitle(tr("OpenPak Account"));
+    setFixedSize(999, 598);
+
+    controller_navigation = new ControllerNavigation(hid_core, this);
+    WireControllerNav();
+
+    header_card = new HeaderCard(this);
     header_avatar = new QLabel;
     header_avatar->setFixedSize(kHeaderAvatarSize, kHeaderAvatarSize);
     header_avatar->setPixmap(RoundedPixmap({}, kHeaderAvatarSize));
@@ -259,12 +757,19 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     name_font.setPointSize(name_font.pointSize() + 4);
     name_font.setBold(true);
     header_name->setFont(name_font);
+    header_name->setStyleSheet(QStringLiteral("QLabel { color: white; }"));
+    auto* name_shadow = new QGraphicsDropShadowEffect(header_name);
+    name_shadow->setBlurRadius(12);
+    name_shadow->setColor(QColor(0, 0, 0, 230));
+    name_shadow->setOffset(0, 1);
+    header_name->setGraphicsEffect(name_shadow);
 
     edit_name_button = new QToolButton;
-    edit_name_button->setText(QStringLiteral("✎")); // pencil
+    edit_name_button->setText(QStringLiteral("✎"));
     edit_name_button->setCursor(Qt::PointingHandCursor);
     edit_name_button->setToolTip(tr("Change your username"));
     edit_name_button->setAutoRaise(true);
+    edit_name_button->setFocusPolicy(Qt::NoFocus);
     connect(edit_name_button, &QToolButton::clicked, this,
            &OpenPakAccountDialog::OnEditUsername);
 
@@ -281,7 +786,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     QFont code_font(QStringLiteral("monospace"));
     header_code->setFont(code_font);
     header_code->setStyleSheet(QStringLiteral("QLabel { padding: 2px 8px; border-radius: 8px; "
-                                              "background: rgba(255,255,255,20); }"));
+                                              "background: rgba(0,0,0,150); color: white; }"));
 
     auto* header_text = new QVBoxLayout;
     header_text->setSpacing(6);
@@ -295,22 +800,335 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     header_content->addWidget(header_avatar);
     header_content->addLayout(header_text);
 
-    auto* header_row = new QHBoxLayout(header_card);
-    header_row->setContentsMargins(16, 14, 16, 14);
-    header_row->addStretch();
-    header_row->addLayout(header_content);
-    header_row->addStretch();
+    auto* background_button = new QToolButton;
+    background_button->setText(QStringLiteral("🖼"));
+    background_button->setCursor(Qt::PointingHandCursor);
+    background_button->setToolTip(tr("Change the background image"));
+    background_button->setAutoRaise(true);
+    background_button->setFocusPolicy(Qt::NoFocus);
+    background_button->setPopupMode(QToolButton::InstantPopup);
+    background_button->setStyleSheet(QStringLiteral("QToolButton { color: white; }"));
+    auto* background_menu = new QMenu(background_button);
+    background_menu->addAction(tr("Choose Background Image..."), this,
+                               &OpenPakAccountDialog::OnChangeBackground);
+    background_menu->addAction(tr("Remove Background"), this,
+                               &OpenPakAccountDialog::OnRemoveBackground);
+    background_button->setMenu(background_menu);
+
+    auto* header_top_row = new QHBoxLayout;
+    header_top_row->addStretch();
+    header_top_row->addWidget(background_button);
+
+    auto* header_middle_row = new QHBoxLayout;
+    header_middle_row->addStretch();
+    header_middle_row->addLayout(header_content);
+    header_middle_row->addStretch();
+
+    auto* header_outer = new QVBoxLayout(header_card);
+    header_outer->setContentsMargins(10, 6, 10, 14);
+    header_outer->addLayout(header_top_row);
+    header_outer->addLayout(header_middle_row);
+    header_outer->addStretch();
+    header_card->setMinimumHeight(200);
+    header_card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    auto* status_card = MakeDashCard();
+    auto* status_card_layout = new QVBoxLayout(status_card);
+    status_card_layout->setContentsMargins(18, 16, 18, 16);
+    status_card_layout->setSpacing(10);
+    auto* status_title = MakeCardTitle(tr("OpenPak Status"));
+    status_title->setAlignment(Qt::AlignCenter);
+    status_card_layout->addWidget(status_title);
+
+    auto* online_icon = new OpenPakSignalIcon;
+    dash_online_dot = online_icon;
+    dash_online_text = new QLabel;
+    dash_online_text->setAlignment(Qt::AlignCenter);
+    const bool legacy_enabled = Settings::values.enable_legacy.GetValue();
+    online_icon->SetOnline(legacy_enabled);
+    if (legacy_enabled) {
+        dash_online_text->setText(tr("Online"));
+        dash_online_text->setStyleSheet(QStringLiteral("color: #3fdb76; font-weight: 600;"));
+    } else {
+        dash_online_text->setText(tr("Offline: Please enable \"OpenPak Redirection\""));
+        dash_online_text->setStyleSheet(QStringLiteral("color: #ff5b56; font-weight: 600;"));
+        dash_online_text->setWordWrap(true);
+    }
+
+    auto* online_row = new QHBoxLayout;
+    online_row->setSpacing(10);
+    online_row->addStretch();
+    online_row->addWidget(dash_online_dot, 0, Qt::AlignVCenter);
+    online_row->addWidget(dash_online_text, 0, Qt::AlignVCenter);
+    online_row->addStretch();
+    status_card_layout->addLayout(online_row);
+
+    auto* stats_divider = new QFrame;
+    stats_divider->setFrameShape(QFrame::HLine);
+    stats_divider->setStyleSheet(QStringLiteral("color: rgba(255,255,255,20);"));
+    status_card_layout->addWidget(stats_divider);
+
+    auto* stats_row = new QHBoxLayout;
+    stats_row->setSpacing(0);
+    const auto make_stat = [&](const QString& label, QLabel*& value_out) {
+        auto* col = new QVBoxLayout;
+        col->setSpacing(4);
+        auto* label_widget = MakeDimLabel(label);
+        label_widget->setAlignment(Qt::AlignHCenter);
+        col->addWidget(label_widget);
+        value_out = new QLabel(QStringLiteral("0"));
+        QFont vf = value_out->font();
+        vf.setBold(true);
+        vf.setPointSize(vf.pointSize() + 7);
+        value_out->setFont(vf);
+        value_out->setAlignment(Qt::AlignHCenter);
+        col->addWidget(value_out);
+        stats_row->addLayout(col, 1);
+    };
+    make_stat(tr("Friends Online"), dash_friends_online_value);
+
+    auto* stats_vline = new QFrame;
+    stats_vline->setFrameShape(QFrame::VLine);
+    stats_vline->setStyleSheet(QStringLiteral("color: rgba(255,255,255,20);"));
+    stats_row->addWidget(stats_vline);
+
+    make_stat(tr("In-Game"), dash_in_game_value);
+    status_card_layout->addLayout(stats_row);
+
+    dash_requests_card = new ClickableFrame;
+    dash_requests_card->setStyleSheet(DashCardStyle());
+    dash_requests_card->setFocusPolicy(Qt::NoFocus);
+    static_cast<ClickableFrame*>(dash_requests_card)->on_click = [this] {
+        GoToPage(page_titles.indexOf(tr("Requests")));
+    };
+    auto* requests_card_layout = new QVBoxLayout(dash_requests_card);
+    requests_card_layout->setContentsMargins(18, 16, 18, 16);
+    requests_card_layout->setSpacing(8);
+
+    dash_requests_badge = new QLabel;
+    dash_requests_badge->setFixedSize(20, 20);
+    dash_requests_badge->setAlignment(Qt::AlignCenter);
+    dash_requests_badge->setStyleSheet(
+        QStringLiteral("background: #e0393e; color: white; font-size: 11px; font-weight: bold; "
+                       "border-radius: 10px;"));
+    dash_requests_badge->hide();
+
+    auto* requests_header_row = new QHBoxLayout;
+    requests_header_row->addWidget(MakeCardTitle(tr("Friend Requests")));
+    requests_header_row->addWidget(dash_requests_badge);
+    requests_header_row->addStretch();
+    requests_header_row->addWidget(MakeDimLabel(QStringLiteral("›")));
+    requests_card_layout->addLayout(requests_header_row);
+
+    dash_requests_preview = MakeDimLabel(tr("No pending requests"));
+    dash_requests_preview->setWordWrap(true);
+    requests_card_layout->addWidget(dash_requests_preview);
+
+    auto* friends_card = MakeDashCard();
+    auto* friends_card_layout = new QVBoxLayout(friends_card);
+    friends_card_layout->setContentsMargins(18, 16, 18, 16);
+    friends_card_layout->setSpacing(8);
+
+    auto* view_all = new ClickableFrame;
+    view_all->setFrameShape(QFrame::NoFrame);
+    view_all->setFocusPolicy(Qt::NoFocus);
+    view_all->on_click = [this] { GoToPage(page_titles.indexOf(tr("Friends"))); };
+    auto* view_all_label = new QLabel(tr("View All ›"));
+    view_all_label->setStyleSheet(
+        QStringLiteral("color: %1; font-weight: 600;").arg(AccentColor().name()));
+    auto* view_all_layout = new QHBoxLayout(view_all);
+    view_all_layout->setContentsMargins(0, 0, 0, 0);
+    view_all_layout->addWidget(view_all_label);
+
+    auto* friends_header_row = new QHBoxLayout;
+    friends_header_row->addWidget(MakeCardTitle(tr("Friends List")));
+    friends_header_row->addStretch();
+    friends_header_row->addWidget(view_all);
+    friends_card_layout->addLayout(friends_header_row);
+
+    auto* friends_preview_container = new QWidget;
+    dash_friends_list_layout = new QVBoxLayout(friends_preview_container);
+    dash_friends_list_layout->setContentsMargins(0, 0, 4, 0);
+    dash_friends_list_layout->setSpacing(10);
+    dash_friends_list_layout->addStretch(1); // pushes rows to the top once they run out
+
+    auto* friends_preview_scroll = new QScrollArea;
+    friends_preview_scroll->setWidget(friends_preview_container);
+    friends_preview_scroll->setWidgetResizable(true);
+    friends_preview_scroll->setFrameShape(QFrame::NoFrame);
+    friends_preview_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    friends_preview_scroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+    friends_preview_scroll->setFocusPolicy(Qt::NoFocus);
+    friends_preview_scroll->verticalScrollBar()->setFocusPolicy(Qt::NoFocus);
+    friends_card_layout->addWidget(friends_preview_scroll, 1);
+
+    auto* right_column = new QVBoxLayout;
+    right_column->setSpacing(12);
+    right_column->addWidget(status_card);
+    right_column->addWidget(dash_requests_card);
+    right_column->addWidget(friends_card, 1);
+
+    auto* right_column_widget = new QWidget;
+    right_column_widget->setLayout(right_column);
+    right_column_widget->setFixedWidth(300);
+
+    auto* home_settings_card = MakeDashCard();
+    auto* home_settings_layout = new QVBoxLayout(home_settings_card);
+    home_settings_layout->setContentsMargins(22, 16, 22, 16);
+    home_settings_layout->setSpacing(2);
+
+    const auto add_settings_divider = [&] {
+        auto* divider = new QFrame;
+        divider->setFrameShape(QFrame::HLine);
+        divider->setStyleSheet(QStringLiteral("color: rgba(255,255,255,20);"));
+        home_settings_layout->addWidget(divider);
+    };
+    const auto make_row_icon = [](const QString& glyph) {
+        auto* label = new QLabel(glyph);
+        QFont f = label->font();
+        f.setPointSize(f.pointSize() + 4);
+        label->setFont(f);
+        label->setFixedWidth(28);
+        label->setAlignment(Qt::AlignCenter);
+        return label;
+    };
+    const auto make_row_title = [](const QString& text) {
+        auto* label = new QLabel(text);
+        QFont f = label->font();
+        f.setBold(true);
+        label->setFont(f);
+        return label;
+    };
+    const auto make_value_pill = [](const QString& text, int fixed_width) {
+        auto* label = new QLabel(text);
+        label->setAlignment(Qt::AlignCenter);
+        label->setFixedWidth(fixed_width);
+        label->setStyleSheet(QStringLiteral(
+            "background: rgba(255,255,255,25); color: %1; font-weight: 600; "
+            "border-radius: 9px; padding: 2px 10px;")
+            .arg(DimColor().name()));
+        return label;
+    };
+
+    auto* network_row = new QHBoxLayout;
+    network_row->setSpacing(10);
+    network_row->addStretch(1);
+    network_row->addWidget(make_row_icon(QStringLiteral("📶")));
+    network_row->addWidget(make_row_title(tr("NAT Type")));
+    nat_label = make_value_pill(tr("Not Tested"), 96);
+    network_row->addWidget(nat_label);
+    network_row->addSpacing(14);
+    network_row->addWidget(make_row_icon(QStringLiteral("⏱")));
+    network_row->addWidget(make_row_title(tr("Ping")));
+    ping_label = make_value_pill(QStringLiteral("--"), 96);
+    network_row->addWidget(ping_label);
+    network_row->addStretch(1);
+
+    auto* test_connection_button = new QPushButton(tr("Test Connection"));
+    test_connection_button->setCursor(Qt::PointingHandCursor);
+    test_connection_button->setMinimumHeight(30);
+    test_connection_button->setStyleSheet(
+        QStringLiteral("QPushButton { background: rgba(255,255,255,25); color: rgba(255,255,255,220); "
+                       "border: 2px solid transparent; border-radius: 8px; padding: 4px 16px; "
+                       "font-weight: 600; }"
+                       "QPushButton:hover { background: rgba(255,255,255,40); }"
+                       "QPushButton:focus { border: 2px solid %1; }"
+                       "QPushButton:disabled { background: rgba(128,128,128,40); "
+                       "color: rgba(255,255,255,90); }")
+            .arg(AccentColor().name()));
+    network_row->addWidget(test_connection_button);
+    home_default_focus = test_connection_button;
+
+    auto* network_row_widget = new QWidget;
+    network_row_widget->setLayout(network_row);
+    home_settings_layout->addWidget(network_row_widget);
+    add_settings_divider();
+
+    auto* notifications_row = new QHBoxLayout;
+    notifications_row->setSpacing(10);
+    notifications_row->addWidget(make_row_icon(QStringLiteral("🔔")));
+    notifications_row->addWidget(make_row_title(tr("Notifications")));
+    notifications_row->addStretch(1);
+    auto* notifications_toggle = new OpenPakToggleSwitch;
+    notifications_toggle->SetChecked(UISettings::values.legacy_notifications_enabled.GetValue());
+    notifications_toggle->on_toggled = [](bool checked) {
+        UISettings::values.legacy_notifications_enabled.SetValue(checked);
+    };
+    notifications_row->addWidget(notifications_toggle);
+
+    auto* notifications_row_widget = new QWidget;
+    notifications_row_widget->setLayout(notifications_row);
+    home_settings_layout->addWidget(notifications_row_widget);
+    add_settings_divider();
+
+    auto* corner_row = new QHBoxLayout;
+    corner_row->setSpacing(10);
+    corner_row->addWidget(make_row_icon(QStringLiteral("📍")));
+    corner_row->addWidget(make_row_title(tr("Notification Corner")));
+    corner_row->addStretch(1);
+    auto* notification_corner = new OpenPakDropdown;
+    notification_corner->SetValues({tr("Top Right"), tr("Top Left"), tr("Bottom Right"),
+                                    tr("Bottom Left")},
+                                   std::clamp(UISettings::values.legacy_notification_corner.GetValue(), 0, 3));
+    notification_corner->on_popup_opened = [this](QWidget* popup) { active_popup = popup; };
+    notification_corner->on_popup_closed = [this] { active_popup = nullptr; };
+    notification_corner->on_changed = [](int index) {
+        UISettings::values.legacy_notification_corner.SetValue(index);
+    };
+    corner_row->addWidget(notification_corner);
+
+    auto* corner_row_widget = new QWidget;
+    corner_row_widget->setLayout(corner_row);
+    home_settings_layout->addWidget(corner_row_widget);
+
+    auto* left_column = new QVBoxLayout;
+    left_column->setSpacing(12);
+    left_column->addWidget(header_card, 1);
+    left_column->addWidget(home_settings_card);
+
+    auto* home_layout = new QHBoxLayout;
+    home_layout->setSpacing(16);
+    home_layout->addLayout(left_column, 1);
+    home_layout->addWidget(right_column_widget);
+
+    auto* home_page = new QWidget;
+    auto* home_page_outer = new QVBoxLayout(home_page);
+    home_page_outer->setContentsMargins(0, 0, 0, 0);
+    home_page_outer->addLayout(home_layout);
+
+    const QString field_style = QStringLiteral(
+        "QLineEdit { background: rgba(255,255,255,15); border: 1px solid rgba(255,255,255,25); "
+        "border-radius: 8px; padding: 9px 14px; color: white; }"
+        "QLineEdit:focus { border: 1px solid %1; }")
+            .arg(AccentColor().name());
 
     friend_code_input = new QLineEdit;
     friend_code_input->setPlaceholderText(tr("SW-0000-0000-0000"));
+    friend_code_input->setStyleSheet(field_style);
     add_button = new QPushButton(tr("Add Friend"));
+    add_button->setCursor(Qt::PointingHandCursor);
+    add_button->setStyleSheet(
+        QStringLiteral("QPushButton { background: %1; color: white; border: none; "
+                       "border-radius: 8px; padding: 9px 20px; font-weight: 600; }"
+                       "QPushButton:disabled { background: rgba(128,128,128,60); "
+                       "color: rgba(255,255,255,110); }")
+            .arg(AccentColor().name()));
     auto* add_row = new QHBoxLayout;
-    add_row->addWidget(friend_code_input);
+    add_row->setSpacing(10);
+    add_row->addWidget(friend_code_input, 1);
     add_row->addWidget(add_button);
 
     friend_search = new QLineEdit;
     friend_search->setPlaceholderText(tr("Search friends..."));
     friend_search->setClearButtonEnabled(true);
+    friend_search->setStyleSheet(field_style);
+
+    auto* add_card = MakeDashCard();
+    auto* add_card_layout = new QVBoxLayout(add_card);
+    add_card_layout->setContentsMargins(18, 16, 18, 16);
+    add_card_layout->setSpacing(10);
+    add_card_layout->addLayout(add_row);
+    add_card_layout->addWidget(friend_search);
 
     friends_view = MakeCardList(this);
     friends_model = new QStandardItemModel(this);
@@ -320,16 +1138,11 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     connect(friends_view, &QListView::clicked, this, &OpenPakAccountDialog::OnFriendsViewClicked);
     connect(friend_search, &QLineEdit::textChanged, this, &OpenPakAccountDialog::ApplyFriendFilter);
 
-    auto* friends_page = new QWidget;
-    auto* friends_page_layout = new QVBoxLayout(friends_page);
-    friends_page_layout->setContentsMargins(0, 0, 0, 0);
-    friends_page_layout->setSpacing(8);
-    friends_page_layout->addWidget(friend_search);
-    friends_page_layout->addWidget(friends_view, 1);
-
     friends_stack = new QStackedWidget;
-    friends_stack->addWidget(friends_page);
+    friends_stack->addWidget(friends_view);
     friends_stack->addWidget(MakeEmptyLabel(tr("No friends yet — add one by friend code above.")));
+
+    auto* friends_page = MakePage({add_card, friends_stack});
 
     requests_view = MakeCardList(this);
     requests_model = new QStandardItemModel(this);
@@ -362,10 +1175,18 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     outgoing_section_layout->addWidget(outgoing_requests_view);
     outgoing_requests_section->setVisible(false);
 
+    auto* requests_page = new QWidget;
+    auto* requests_page_layout = new QVBoxLayout(requests_page);
+    requests_page_layout->setContentsMargins(0, 0, 0, 0);
+    requests_page_layout->setSpacing(0);
+    requests_page_layout->addWidget(requests_stack, 1);
+    requests_page_layout->addWidget(outgoing_requests_section);
+
     history_view = MakeCardList(this);
     history_model = new QStandardItemModel(this);
     history_view->setModel(history_model);
-    history_view->setItemDelegate(new OpenPakHistoryDelegate(this));
+    history_view->setItemDelegate(new OpenPakHistoryDelegate(history_view, this));
+    connect(history_view, &QListView::clicked, this, &OpenPakAccountDialog::OnHistoryViewClicked);
     history_stack = new QStackedWidget;
     history_stack->addWidget(history_view);
     history_stack->addWidget(MakeEmptyLabel(tr("No games played yet.")));
@@ -416,10 +1237,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     cloud_save_buttons->addStretch(1);
 
     auto* cloud_save_card = new QFrame;
-    cloud_save_card->setObjectName(QStringLiteral("cloudSaveCard"));
-    cloud_save_card->setStyleSheet(QStringLiteral("QFrame#cloudSaveCard { background: %1; "
-                                                  "border-radius: 12px; }")
-                                       .arg(CardBg().name()));
+    cloud_save_card->setStyleSheet(DashCardStyle());
     auto* cloud_save_card_layout = new QVBoxLayout(cloud_save_card);
     cloud_save_card_layout->setContentsMargins(28, 28, 28, 28);
     cloud_save_card_layout->setSpacing(6);
@@ -438,93 +1256,128 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     cloud_save_layout->addWidget(cloud_save_card);
     cloud_save_layout->addStretch(2);
 
-    auto* requests_page = new QWidget;
-    auto* requests_page_layout = new QVBoxLayout(requests_page);
-    requests_page_layout->setContentsMargins(0, 0, 0, 0);
-    requests_page_layout->setSpacing(0);
-    requests_page_layout->addWidget(requests_stack, 1);
-    requests_page_layout->addWidget(outgoing_requests_section);
+    pages_stack = new QStackedWidget;
+    pages_stack->addWidget(home_page);
+    pages_stack->addWidget(friends_page);
+    pages_stack->addWidget(requests_page);
+    pages_stack->addWidget(history_stack);
+    pages_stack->addWidget(cloud_save_page);
 
-    tabs = new QTabWidget;
-    tabs->setStyleSheet(TabWidgetStyle());
-    tabs->addTab(friends_stack, tr("Friends"));
-    tabs->addTab(requests_page, tr("Requests"));
-    tabs->addTab(history_stack, tr("Recently Played"));
-    tabs->addTab(cloud_save_page, tr("Cloud Saves"));
+    page_titles = {tr("Home"), tr("Friends"), tr("Requests"), tr("Recently Played"),
+                  tr("Cloud Saves")};
 
-    requests_badge = new QLabel(tabs->tabBar());
+    page_title_label = new QLabel;
+    QFont page_title_font = page_title_label->font();
+    page_title_font.setBold(true);
+    page_title_font.setPointSize(page_title_font.pointSize() + 1);
+    page_title_label->setFont(page_title_font);
+    page_title_label->setAlignment(Qt::AlignCenter);
+
+    nav_left_arrow = new OpenPakPageNavArrow(OpenPakPageNavArrow::Side::Left);
+    nav_left_arrow->on_click = [this] { GoToPage(current_page - 1); };
+    nav_right_arrow = new OpenPakPageNavArrow(OpenPakPageNavArrow::Side::Right);
+    nav_right_arrow->on_click = [this] { GoToPage(current_page + 1); };
+
+    requests_badge = new QLabel;
     requests_badge->setAlignment(Qt::AlignCenter);
-    requests_badge->setFixedHeight(16);
+    requests_badge->setFixedSize(18, 18);
+    requests_badge->setStyleSheet(
+        QStringLiteral("QLabel { background-color: #e0393e; color: white; font-size: 10px; "
+                       "font-weight: bold; border-radius: 9px; }"));
     requests_badge->hide();
+
+    auto* nav_bar = new QHBoxLayout;
+    nav_bar->addWidget(nav_left_arrow);
+    nav_bar->addStretch();
+    nav_bar->addWidget(page_title_label);
+    nav_bar->addWidget(requests_badge);
+    nav_bar->addStretch();
+    nav_bar->addWidget(nav_right_arrow);
 
     status = new QLabel;
     status->setWordWrap(true);
+    status->setStyleSheet(QStringLiteral("QLabel { background: rgba(255,255,255,15); "
+                                         "color: rgba(255,255,255,200); border-radius: 10px; "
+                                         "padding: 8px 14px; }"));
 
-    auto* notifications_toggle = new QCheckBox(tr("Notifications"));
-    notifications_toggle->setChecked(UISettings::values.legacy_notifications_enabled.GetValue());
-    connect(notifications_toggle, &QCheckBox::toggled, this,
-            [](bool checked) { UISettings::values.legacy_notifications_enabled.SetValue(checked); });
-
-    auto* notification_corner = new QComboBox;
-    notification_corner->addItem(tr("Top Right"));
-    notification_corner->addItem(tr("Top Left"));
-    notification_corner->addItem(tr("Bottom Right"));
-    notification_corner->addItem(tr("Bottom Left"));
-    notification_corner->setCurrentIndex(
-        std::clamp(UISettings::values.legacy_notification_corner.GetValue(), 0, 3));
-    connect(notification_corner, &QComboBox::currentIndexChanged, this,
-            [](int index) { UISettings::values.legacy_notification_corner.SetValue(index); });
-
-    auto* status_row = new QHBoxLayout;
-    status_row->addWidget(status, 1);
-    status_row->addWidget(notifications_toggle);
-    status_row->addWidget(notification_corner);
-
-    nat_label = new QLabel(tr("NAT: Not tested"));
-    ping_label = new QLabel(tr("Ping: --"));
-    auto* test_connection_button = new QPushButton(tr("Test Connection"));
-
-    auto* network_row = new QHBoxLayout;
-    network_row->addWidget(nat_label);
-    network_row->addWidget(ping_label);
-    network_row->addStretch(1);
-    network_row->addWidget(test_connection_button);
+    setStyleSheet(
+        QStringLiteral("QPushButton:focus, QToolButton:focus, QCheckBox:focus, "
+                       "QComboBox:focus, QLineEdit:focus { "
+                       "outline: none; border: 2px solid %1; border-radius: 6px; }")
+            .arg(AccentColor().name()));
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(14, 14, 14, 14);
-    layout->setSpacing(12);
-    layout->addWidget(header_card);
-    layout->addLayout(add_row);
-    layout->addWidget(tabs, 1);
-    layout->addLayout(status_row);
-    layout->addLayout(network_row);
+    layout->setSpacing(10);
+    layout->addLayout(nav_bar);
+    layout->addWidget(pages_stack, 1);
+    layout->addWidget(status);
 
     network_probe = new ExternalReferenceProbe(this);
+    status_check_timer = new QTimer(this);
+    status_check_timer->setInterval(350);
+    const QString checking_style = QStringLiteral(
+        "background: rgba(255,255,255,25); color: %1; font-weight: 600; "
+        "border-radius: 9px; padding: 2px 10px;")
+        .arg(DimColor().name());
+    connect(status_check_timer, &QTimer::timeout, this, [this, checking_style] {
+        status_check_dots = (status_check_dots + 1) % 4;
+        const QString dots = QString(status_check_dots, QLatin1Char('.'));
+        if (nat_checking) {
+            nat_label->setText(tr("Checking") + dots);
+        }
+        if (ping_checking) {
+            ping_label->setText(tr("Checking") + dots);
+        }
+        if (!nat_checking && !ping_checking) {
+            status_check_timer->stop();
+        }
+    });
     connect(network_probe, &ExternalReferenceProbe::NatStatusChanged, this,
-            [this](ExternalReferenceProbe::NatStatus nat_status) {
+            [this, checking_style](ExternalReferenceProbe::NatStatus nat_status) {
                 switch (nat_status) {
                 case ExternalReferenceProbe::NatStatus::Checking:
-                    nat_label->setText(tr("NAT: Checking..."));
+                    nat_checking = true;
+                    nat_label->setText(tr("Checking"));
+                    nat_label->setStyleSheet(checking_style);
                     break;
                 case ExternalReferenceProbe::NatStatus::Open:
-                    nat_label->setText(tr("NAT: Open"));
+                    nat_checking = false;
+                    nat_label->setText(tr("Open"));
+                    nat_label->setStyleSheet(QStringLiteral(
+                        "background: rgba(50,195,85,40); color: #32c355; font-weight: 600; "
+                        "border-radius: 9px; padding: 2px 10px;"));
                     break;
                 case ExternalReferenceProbe::NatStatus::Unknown:
-                    nat_label->setText(tr("NAT: Unknown"));
+                    nat_checking = false;
+                    nat_label->setText(tr("Unknown"));
+                    nat_label->setStyleSheet(QStringLiteral(
+                        "background: rgba(224,57,62,40); color: #e0393e; font-weight: 600; "
+                        "border-radius: 9px; padding: 2px 10px;"));
                     break;
                 }
             });
     connect(network_probe, &ExternalReferenceProbe::PingResult, this, [this](int ms) {
-        ping_label->setText(ms >= 0 ? tr("Ping: %1 ms").arg(ms) : tr("Ping: --"));
+        ping_checking = false;
+        ping_label->setText(ms >= 0 ? tr("%1 ms").arg(ms) : QStringLiteral("--"));
     });
-    connect(test_connection_button, &QPushButton::clicked, this, [this, test_connection_button] {
-        network_probe->ProbeNat();
-        network_probe->PingBackend();
-        test_connection_button->setEnabled(false);
-        QTimer::singleShot(10000, test_connection_button, [test_connection_button] {
-            test_connection_button->setEnabled(true);
-        });
-    });
+    connect(test_connection_button, &QPushButton::clicked, this,
+            [this, test_connection_button, checking_style] {
+                nat_checking = true;
+                ping_checking = true;
+                status_check_dots = 0;
+                nat_label->setText(tr("Checking"));
+                nat_label->setStyleSheet(checking_style);
+                ping_label->setText(tr("Checking"));
+                ping_label->setStyleSheet(checking_style);
+                status_check_timer->start();
+                network_probe->ProbeNat();
+                network_probe->PingBackend();
+                test_connection_button->setEnabled(false);
+                QTimer::singleShot(10000, test_connection_button, [test_connection_button] {
+                    test_connection_button->setEnabled(true);
+                });
+            });
 
     connect(add_button, &QPushButton::clicked, this, &OpenPakAccountDialog::OnAdd);
     connect(friend_code_input, &QLineEdit::returnPressed, this, &OpenPakAccountDialog::OnAdd);
@@ -532,13 +1385,16 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     header_name->setText(QString::fromStdString(Common::OpenPakAccount::GetUsername()));
     header_code->setText(QString::fromStdString(Common::OpenPakAccount::GetFriendCode()));
 
+    LoadSavedBackground();
+    GoToPage(initial_page);
+    UpdateHeroSizing();
     RefreshFriends();
     RefreshHistory();
     RefreshCloudSaveTab();
 
     connect(controller, &OpenPakController::StatusChanged, this,
             [this, cloud_save_page](const QString& message) {
-                if (tabs->currentWidget() == cloud_save_page) {
+                if (pages_stack->currentWidget() == cloud_save_page) {
                     cloud_save_status->setText(message);
                 }
             });
@@ -549,8 +1405,8 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
     connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshCloudSaveTab);
     refresh_timer.start();
 
-    connect(tabs, &QTabWidget::currentChanged, this, [this](int index) {
-        if (tabs->widget(index) == history_stack) {
+    connect(pages_stack, &QStackedWidget::currentChanged, this, [this](int index) {
+        if (pages_stack->widget(index) == history_stack) {
             RefreshHistory();
         }
     });
@@ -567,9 +1423,10 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
                 if (!guard) {
                     return;
                 }
-                const QPixmap avatar = OpenPak::AvatarCache::Get("self", image, kHeaderAvatarSize);
+                const QPixmap avatar = OpenPak::AvatarCache::Get("self", image, 256);
                 if (!avatar.isNull()) {
-                    header_avatar->setPixmap(RoundedPixmap(avatar, kHeaderAvatarSize));
+                    header_avatar_source = avatar;
+                    UpdateHeroSizing();
                 }
             },
             Qt::QueuedConnection);
@@ -580,16 +1437,402 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_, QWidg
 OpenPakAccountDialog::~OpenPakAccountDialog() = default;
 
 bool OpenPakAccountDialog::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == header_code && event->type() == QEvent::MouseButtonRelease) {
+    const bool is_activate_key =
+        event->type() == QEvent::KeyPress &&
+        (static_cast<QKeyEvent*>(event)->key() == Qt::Key_Space ||
+         static_cast<QKeyEvent*>(event)->key() == Qt::Key_Return ||
+         static_cast<QKeyEvent*>(event)->key() == Qt::Key_Enter);
+
+    if (watched == header_code &&
+        (event->type() == QEvent::MouseButtonRelease || is_activate_key)) {
         QApplication::clipboard()->setText(header_code->text());
         status->setText(tr("Friend code copied."));
         return true;
     }
-    if (watched == header_avatar && event->type() == QEvent::MouseButtonRelease) {
+    if (watched == header_avatar &&
+        (event->type() == QEvent::MouseButtonRelease || is_activate_key)) {
         OnChangeAvatar();
         return true;
     }
     return QDialog::eventFilter(watched, event);
+}
+
+void OpenPakAccountDialog::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_PageDown) {
+        GoToPage(current_page + 1);
+        return;
+    }
+    if (event->key() == Qt::Key_PageUp) {
+        GoToPage(current_page - 1);
+        return;
+    }
+    QDialog::keyPressEvent(event);
+}
+
+void OpenPakAccountDialog::resizeEvent(QResizeEvent* event) {
+    QDialog::resizeEvent(event);
+    UpdateHeroSizing();
+}
+
+void OpenPakAccountDialog::showEvent(QShowEvent* event) {
+    QDialog::showEvent(event);
+    if (QApplication::focusWidget() && isAncestorOf(QApplication::focusWidget())) {
+        return;
+    }
+    if (current_page == 0 && home_default_focus) {
+        home_default_focus->setFocus();
+    } else {
+        focusNextChild();
+    }
+}
+
+void OpenPakAccountDialog::UpdateHeroSizing() {
+    if (!header_card || !header_avatar) {
+        return;
+    }
+    const int card_h = std::max(header_card->height(), 1);
+    const int avatar_size = std::clamp(static_cast<int>(card_h * 0.62), 88, 260);
+    header_avatar->setFixedSize(avatar_size, avatar_size);
+    header_avatar->setPixmap(RoundedPixmap(header_avatar_source, avatar_size));
+
+    QFont name_font = header_name->font();
+    name_font.setPointSizeF(std::clamp(avatar_size * 0.19, 15.0, 34.0));
+    name_font.setBold(true);
+    header_name->setFont(name_font);
+
+    QFont code_font(QStringLiteral("monospace"));
+    code_font.setPointSizeF(std::clamp(avatar_size * 0.105, 10.0, 18.0));
+    header_code->setFont(code_font);
+}
+
+void OpenPakAccountDialog::GoToPage(int index) {
+    if (!pages_stack) {
+        return;
+    }
+    index = std::clamp(index, 0, pages_stack->count() - 1);
+    if (index == current_page) {
+        return;
+    }
+
+    current_page = index;
+    pages_stack->setCurrentIndex(index);
+    if (page_title_label && index < page_titles.size()) {
+        page_title_label->setText(page_titles[index]);
+    }
+    UpdatePageNav();
+    if (index == 0 && home_default_focus) {
+        home_default_focus->setFocus();
+    } else if (index == kFriendsPage && friends_view) {
+        friends_view->setFocus();
+    } else {
+        focusNextChild();
+    }
+}
+
+void OpenPakAccountDialog::WireControllerNav() {
+    connect(controller_navigation, &ControllerNavigation::leftShoulderPressed, this,
+            [this] { GoToPage(current_page - 1); });
+    connect(controller_navigation, &ControllerNavigation::rightShoulderPressed, this,
+            [this] { GoToPage(current_page + 1); });
+    connect(controller_navigation, &ControllerNavigation::navigated, this,
+            &OpenPakAccountDialog::OnDirectionalNav);
+    connect(controller_navigation, &ControllerNavigation::activated, this,
+            &OpenPakAccountDialog::OnControllerActivate, Qt::QueuedConnection);
+    connect(controller_navigation, &ControllerNavigation::backPressed, this, [this] {
+        if (active_popup) {
+            active_popup->deleteLater();
+            active_popup = nullptr;
+            return;
+        }
+        reject();
+    });
+}
+
+void OpenPakAccountDialog::UpdatePageNav() {
+    if (!nav_left_arrow || !nav_right_arrow || !pages_stack) {
+        return;
+    }
+    const int last = pages_stack->count() - 1;
+    nav_left_arrow->SetState(current_page > 0,
+                             current_page > 0 ? page_titles[current_page - 1] : QString{});
+    nav_right_arrow->SetState(current_page < last,
+                              current_page < last ? page_titles[current_page + 1] : QString{});
+}
+
+void OpenPakAccountDialog::OnDirectionalNav(int dx, int dy) {
+    QWidget* focused = QApplication::focusWidget();
+    if (focused && !isAncestorOf(focused)) {
+        focused = nullptr;
+    }
+
+    if (auto* list = qobject_cast<QAbstractItemView*>(focused)) {
+        if (dy != 0) {
+            QKeyEvent key(QEvent::KeyPress, dy > 0 ? Qt::Key_Down : Qt::Key_Up, Qt::NoModifier);
+            QApplication::sendEvent(list, &key);
+        }
+        return;
+    }
+
+    if (current_page == kFriendsPage) {
+        // Add Friend / Search Friends are text fields, not part of the controller focus chain.
+        if (friends_view) {
+            friends_view->setFocus();
+        }
+        return;
+    }
+
+    const QList<QAbstractButton*> picker_buttons = cloud_save_picker_group->buttons();
+    const int picker_index = picker_buttons.indexOf(qobject_cast<QAbstractButton*>(focused));
+    if (picker_index >= 0) {
+        if (dx > 0 && picker_index + 1 < picker_buttons.size()) {
+            picker_buttons[picker_index + 1]->setFocus();
+            return;
+        }
+        if (dx < 0 && picker_index > 0) {
+            picker_buttons[picker_index - 1]->setFocus();
+            return;
+        }
+        if (dy > 0 && cloud_save_download_button->isEnabled()) {
+            cloud_save_download_button->setFocus();
+            return;
+        }
+        return;
+    }
+    if (focused == cloud_save_download_button && dy < 0 && !picker_buttons.isEmpty()) {
+        picker_buttons.first()->setFocus();
+        return;
+    }
+
+    if (dy > 0 || dx > 0) {
+        focusNextChild();
+    } else if (dy < 0 || dx < 0) {
+        focusPreviousChild();
+    }
+}
+
+void OpenPakAccountDialog::OnControllerActivate() {
+    QWidget* focused = QApplication::focusWidget();
+    if (!focused || !isAncestorOf(focused)) {
+        return;
+    }
+    if (focused == history_view) {
+        ActivateHistoryRow(history_view->currentIndex());
+        return;
+    }
+    if (auto* list = qobject_cast<QListView*>(focused);
+        list == friends_view || list == requests_view || list == outgoing_requests_view) {
+        ActivateCurrentRow(list);
+        return;
+    }
+    if (auto* button = qobject_cast<QAbstractButton*>(focused)) {
+        button->click();
+        return;
+    }
+    if (auto* combo = qobject_cast<QComboBox*>(focused)) {
+        combo->showPopup();
+        return;
+    }
+    QKeyEvent key(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+    QApplication::sendEvent(focused, &key);
+}
+
+bool OpenPakAccountDialog::ConfirmAction(const QString& title, const QString& message,
+                                          const QString& yes_text, const QString& no_text,
+                                          const std::string& icon_base64) {
+    auto* scrim = new QWidget(this);
+    scrim->setGeometry(rect());
+    scrim->setStyleSheet(QStringLiteral("background: rgba(0,0,0,140);"));
+
+    auto* card = new QFrame(scrim);
+    card->setObjectName(QStringLiteral("confirmCard"));
+    card->setFixedWidth(460);
+    card->setStyleSheet(QStringLiteral(
+        "QFrame#confirmCard { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+        "  stop:0 rgba(32, 32, 38, 250), stop:1 rgba(22, 22, 27, 255)); "
+        "  border: 1px solid rgba(255,255,255,40); border-radius: 20px; }"));
+
+    auto* title_label = new QLabel(title);
+    QFont title_font = title_label->font();
+    title_font.setBold(true);
+    title_font.setPointSize(title_font.pointSize() + 2);
+    title_label->setFont(title_font);
+    title_label->setStyleSheet(QStringLiteral("color: #ffffff; background: transparent;"));
+    title_label->setAlignment(Qt::AlignCenter);
+
+    auto* card_layout = new QVBoxLayout(card);
+    card_layout->setContentsMargins(32, 24, 32, 24);
+    card_layout->setSpacing(14);
+    card_layout->addWidget(title_label);
+
+    if (!icon_base64.empty()) {
+        QPixmap icon_source;
+        icon_source.loadFromData(QByteArray::fromBase64(QByteArray::fromStdString(icon_base64)));
+        if (!icon_source.isNull()) {
+            auto* icon_label = new QLabel;
+            icon_label->setFixedSize(88, 88);
+            icon_label->setPixmap(RoundedRectPixmap(icon_source, 88, 12));
+            icon_label->setAlignment(Qt::AlignCenter);
+            card_layout->addWidget(icon_label, 0, Qt::AlignHCenter);
+        }
+    }
+
+    auto* message_label = new QLabel(message);
+    message_label->setWordWrap(true);
+    message_label->setAlignment(Qt::AlignCenter);
+    message_label->setStyleSheet(QStringLiteral("color: #ffffff; font-weight: 500; background: transparent;"));
+    card_layout->addWidget(message_label);
+
+    const QString button_style =
+        QStringLiteral("QPushButton { background: rgba(255,255,255,10); "
+                       "border: 1px solid rgba(255,255,255,25); border-radius: 14px; "
+                       "color: #ffffff; padding: 10px 24px; }"
+                       "QPushButton:hover { background: rgba(255,255,255,20); "
+                       "border-color: rgba(255,255,255,60); }"
+                       "QPushButton:focus { background: %1; border-color: %1; "
+                       "color: #000000; font-weight: bold; }")
+            .arg(AccentColor().name());
+
+    auto* no_button = new QPushButton(no_text);
+    no_button->setStyleSheet(button_style);
+    auto* yes_button = new QPushButton(yes_text);
+    yes_button->setStyleSheet(button_style);
+
+    auto* button_row = new QHBoxLayout;
+    button_row->setSpacing(12);
+    button_row->addWidget(no_button);
+    button_row->addWidget(yes_button);
+    card_layout->addSpacing(4);
+    card_layout->addLayout(button_row);
+
+    card->adjustSize();
+    card->move((scrim->width() - card->width()) / 2, (scrim->height() - card->height()) / 2);
+    auto* scrim_opacity = new QGraphicsOpacityEffect(scrim);
+    scrim_opacity->setOpacity(0.0);
+    scrim->setGraphicsEffect(scrim_opacity);
+    scrim->show();
+    scrim->raise();
+    no_button->setFocus();
+
+    auto* fade_in = new QPropertyAnimation(scrim_opacity, "opacity", scrim);
+    fade_in->setDuration(150);
+    fade_in->setStartValue(0.0);
+    fade_in->setEndValue(1.0);
+    fade_in->setEasingCurve(QEasingCurve::OutCubic);
+    fade_in->start(QAbstractAnimation::DeleteWhenStopped);
+
+    QEventLoop loop;
+    bool result = false;
+    connect(yes_button, &QPushButton::clicked, &loop, [&] {
+        result = true;
+        loop.quit();
+    });
+    connect(no_button, &QPushButton::clicked, &loop, [&] { loop.quit(); });
+
+    disconnect(controller_navigation, nullptr, this, nullptr);
+    const auto nav_conn = connect(controller_navigation, &ControllerNavigation::navigated, &loop,
+                                  [this](int dx, int) {
+                                      if (dx > 0) {
+                                          focusNextChild();
+                                      } else if (dx < 0) {
+                                          focusPreviousChild();
+                                      }
+                                  });
+    const auto activate_conn =
+        connect(controller_navigation, &ControllerNavigation::activated, &loop, [] {
+            if (auto* button = qobject_cast<QAbstractButton*>(QApplication::focusWidget())) {
+                button->click();
+            }
+        });
+    const auto back_conn = connect(controller_navigation, &ControllerNavigation::backPressed,
+                                   &loop, [&loop] { loop.quit(); });
+
+    loop.exec();
+
+    disconnect(nav_conn);
+    disconnect(activate_conn);
+    disconnect(back_conn);
+    WireControllerNav();
+
+    QEventLoop fade_loop;
+    auto* fade_out = new QPropertyAnimation(scrim_opacity, "opacity", scrim);
+    fade_out->setDuration(130);
+    fade_out->setStartValue(1.0);
+    fade_out->setEndValue(0.0);
+    fade_out->setEasingCurve(QEasingCurve::InCubic);
+    connect(fade_out, &QPropertyAnimation::finished, &fade_loop, &QEventLoop::quit);
+    fade_out->start(QAbstractAnimation::DeleteWhenStopped);
+    fade_loop.exec();
+
+    scrim->deleteLater();
+    return result;
+}
+
+void OpenPakAccountDialog::ActivateCurrentRow(QListView* view) {
+    if (view != friends_view && view != requests_view && view != outgoing_requests_view) {
+        return;
+    }
+
+    const QModelIndex index = view->currentIndex();
+    if (!index.isValid()) {
+        return;
+    }
+
+    if (view == outgoing_requests_view) {
+        const std::string code =
+            index.data(OpenPakFriendItem::FriendCodeRole).toString().toStdString();
+        Common::OpenPakOutgoingRequests::Remove(code);
+        outgoing_requests_model->removeRow(index.row());
+        outgoing_requests_section->setVisible(outgoing_requests_model->rowCount() > 0);
+        return;
+    }
+
+    const bool is_request = index.data(OpenPakFriendItem::IsRequestRole).toBool();
+    const u64 pid = SelectedPid(index);
+    if (pid == 0) {
+        return;
+    }
+
+#ifdef ENABLE_WEB_SERVICE
+    const std::string avatar_b64 = index.data(OpenPakFriendItem::AvatarB64Role).toString().toStdString();
+    if (is_request) {
+        const QString name = index.data(OpenPakFriendItem::NameRole).toString();
+        if (!ConfirmAction(tr("Friend Request"), tr("Accept %1's friend request?").arg(name),
+                          tr("Yes"), tr("No"), avatar_b64)) {
+            return;
+        }
+        RunAsync([pid] { return WebService::OpenPakApi::AcceptFriend(pid); });
+    } else {
+        const QString name = index.data(OpenPakFriendItem::NameRole).toString();
+        if (!ConfirmAction(tr("Remove Friend"), tr("Remove %1 from your friends list?").arg(name),
+                          tr("Yes"), tr("No"), avatar_b64)) {
+            return;
+        }
+        RunAsync([pid] { return WebService::OpenPakApi::RemoveFriend(pid); });
+    }
+#endif
+}
+
+void OpenPakAccountDialog::ActivateHistoryRow(const QModelIndex& index) {
+    if (!index.isValid() || !controller) {
+        return;
+    }
+    const QString title_id_hex = index.data(OpenPakHistoryItem::TitleIdRole).toString();
+    const QString name = index.data(OpenPakHistoryItem::NameRole).toString();
+    const std::string icon_b64 = index.data(OpenPakHistoryItem::IconB64Role).toString().toStdString();
+    bool ok = false;
+    const u64 title_id = title_id_hex.toULongLong(&ok, 16);
+    if (!ok || title_id == 0) {
+        return;
+    }
+    if (!ConfirmAction(tr("Quick Start"), tr("Start %1?").arg(name), tr("Yes"), tr("No"), icon_b64)) {
+        return;
+    }
+    controller->QuickStart(title_id);
+    accept();
+}
+
+void OpenPakAccountDialog::OnHistoryViewClicked(const QModelIndex& index) {
+    ActivateHistoryRow(index);
 }
 
 void OpenPakAccountDialog::OnChangeAvatar() {
@@ -616,7 +1859,8 @@ void OpenPakAccountDialog::OnChangeAvatar() {
     square.save(&buffer, "JPG", 85);
     const std::string image_base64 = jpeg_bytes.toBase64().toStdString();
 
-    header_avatar->setPixmap(RoundedPixmap(QPixmap::fromImage(square), kHeaderAvatarSize));
+    header_avatar_source = QPixmap::fromImage(square);
+    UpdateHeroSizing();
     status->setText(tr("Uploading profile picture..."));
 
     std::thread{[this, image_base64, guard = QPointer<OpenPakAccountDialog>(this)] {
@@ -638,6 +1882,54 @@ void OpenPakAccountDialog::OnChangeAvatar() {
 #else
     status->setText(tr("This build has no web services support."));
 #endif
+}
+
+void OpenPakAccountDialog::OnChangeBackground() {
+    const QString path = QFileDialog::getOpenFileName(this, tr("Choose a background image"),
+                                                       QString{}, tr("Images (*.png *.jpg *.jpeg)"));
+    if (path.isEmpty()) {
+        return;
+    }
+
+    QImage image(path);
+    if (image.isNull()) {
+        status->setText(tr("Couldn't read that image."));
+        return;
+    }
+    if (image.width() > 1600 || image.height() > 900) {
+        image = image.scaled(1600, 900, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+
+    const auto out_path = BackgroundImagePath();
+    if (!image.save(QString::fromStdString(out_path.string()), "PNG")) {
+        status->setText(tr("Couldn't save that background image."));
+        return;
+    }
+
+    ApplyBackground(QPixmap::fromImage(image));
+    status->setText(tr("Background updated."));
+}
+
+void OpenPakAccountDialog::OnRemoveBackground() {
+    std::error_code ec;
+    std::filesystem::remove(BackgroundImagePath(), ec);
+    ApplyBackground({});
+    status->setText(tr("Background removed."));
+}
+
+void OpenPakAccountDialog::ApplyBackground(const QPixmap& pixmap) {
+    static_cast<HeaderCard*>(header_card)->SetBackgroundImage(pixmap);
+}
+
+void OpenPakAccountDialog::LoadSavedBackground() {
+    const auto path = BackgroundImagePath();
+    if (!std::filesystem::exists(path)) {
+        return;
+    }
+    QPixmap pixmap(QString::fromStdString(path.string()));
+    if (!pixmap.isNull()) {
+        ApplyBackground(pixmap);
+    }
 }
 
 void OpenPakAccountDialog::OnEditUsername() {
@@ -707,19 +1999,105 @@ void OpenPakAccountDialog::ApplyFriendFilter(const QString& text) {
 
 void OpenPakAccountDialog::UpdateRequestsBadge(int count) {
     if (count <= 0) {
-        // A hidden tab button still reserves its layout space, which is what left "Requests"
-        // looking permanently off-center; detaching it entirely lets the label re-center.
-        tabs->tabBar()->setTabButton(1, QTabBar::RightSide, nullptr);
         requests_badge->hide();
+        UpdateDashboard();
         return;
     }
     requests_badge->setText(count > 99 ? QStringLiteral("99+") : QString::number(count));
-    requests_badge->setStyleSheet(
-        QStringLiteral("QLabel { background-color: #e0393e; color: white; font-size: 10px; "
-                       "font-weight: bold; border-radius: 8px; padding: 0 5px; }"));
-    requests_badge->adjustSize();
-    tabs->tabBar()->setTabButton(1, QTabBar::RightSide, requests_badge);
     requests_badge->show();
+    UpdateDashboard();
+}
+
+void OpenPakAccountDialog::UpdateDashboard() {
+    int online = 0;
+    int in_game = 0;
+    for (int row = 0; row < friends_model->rowCount(); ++row) {
+        const int presence =
+            friends_model->index(row, 0).data(OpenPakFriendItem::PresenceRole).toInt();
+        if (presence == 1) {
+            ++online;
+        } else if (presence == 2) {
+            ++online;
+            ++in_game;
+        }
+    }
+    dash_friends_online_value->setText(QString::number(online));
+    dash_in_game_value->setText(QString::number(in_game));
+
+    const int request_count = requests_model->rowCount();
+    if (request_count > 0) {
+        dash_requests_badge->setText(request_count > 9 ? QStringLiteral("9+")
+                                                        : QString::number(request_count));
+        dash_requests_badge->show();
+        const QString first_name =
+            requests_model->index(0, 0).data(OpenPakFriendItem::NameRole).toString();
+        dash_requests_preview->setText(request_count == 1
+                                           ? tr("%1 wants to be friends.").arg(first_name)
+                                           : tr("%1 and %2 more.").arg(first_name).arg(request_count - 1));
+    } else {
+        dash_requests_badge->hide();
+        dash_requests_preview->setText(tr("No pending requests"));
+    }
+
+    QLayoutItem* item;
+    while ((item = dash_friends_list_layout->takeAt(0)) != nullptr) {
+        delete item->widget();
+        delete item;
+    }
+    const int preview_count = friends_model->rowCount();
+    if (preview_count == 0) {
+        dash_friends_list_layout->addWidget(MakeDimLabel(tr("No friends yet.")));
+    }
+    for (int row = 0; row < preview_count; ++row) {
+        const QModelIndex index = friends_model->index(row, 0);
+        const QString name = index.data(OpenPakFriendItem::NameRole).toString();
+        const int presence = index.data(OpenPakFriendItem::PresenceRole).toInt();
+        const std::string avatar_b64 =
+            index.data(OpenPakFriendItem::AvatarB64Role).toString().toStdString();
+
+        auto* avatar_label = new QLabel;
+        avatar_label->setFixedSize(kPreviewAvatarSize, kPreviewAvatarSize);
+        const QPixmap avatar =
+            OpenPak::AvatarCache::Get(name.toStdString(), avatar_b64, kPreviewAvatarSize);
+        avatar_label->setPixmap(RoundedPixmap(avatar, kPreviewAvatarSize));
+
+        auto* name_label = new QLabel(name);
+        QFont name_font = name_label->font();
+        name_font.setBold(true);
+        name_label->setFont(name_font);
+
+        QString status_text;
+        switch (presence) {
+        case 1:
+            status_text = tr("Online");
+            break;
+        case 2:
+            status_text = tr("In-Game");
+            break;
+        default:
+            status_text = tr("Offline");
+            break;
+        }
+        auto* status_label = new QLabel(status_text);
+        status_label->setStyleSheet(
+            QStringLiteral("color: %1;").arg(PresenceColor(presence).name()));
+
+        auto* name_col = new QVBoxLayout;
+        name_col->setSpacing(0);
+        name_col->addWidget(name_label);
+        name_col->addWidget(status_label);
+
+        auto* row_layout = new QHBoxLayout;
+        row_layout->setContentsMargins(0, 0, 0, 0);
+        row_layout->addWidget(avatar_label);
+        row_layout->addLayout(name_col);
+        row_layout->addStretch();
+
+        auto* row_widget = new QWidget;
+        row_widget->setLayout(row_layout);
+        dash_friends_list_layout->addWidget(row_widget);
+    }
+    dash_friends_list_layout->addStretch(1);
 }
 
 void OpenPakAccountDialog::OnFriendsViewClicked(const QModelIndex& index) {
@@ -757,18 +2135,26 @@ void OpenPakAccountDialog::OnFriendsViewClicked(const QModelIndex& index) {
     }
 
 #ifdef ENABLE_WEB_SERVICE
+    const std::string avatar_b64 = index.data(OpenPakFriendItem::AvatarB64Role).toString().toStdString();
     if (is_request) {
+        const QString name = index.data(OpenPakFriendItem::NameRole).toString();
         if (hit == OpenPakFriendDelegate::ActionHit::Primary) {
+            if (!ConfirmAction(tr("Friend Request"), tr("Accept %1's friend request?").arg(name),
+                              tr("Yes"), tr("No"), avatar_b64)) {
+                return;
+            }
             RunAsync([pid] { return WebService::OpenPakApi::AcceptFriend(pid); });
         } else {
+            if (!ConfirmAction(tr("Friend Request"), tr("Decline %1's friend request?").arg(name),
+                              tr("Yes"), tr("No"), avatar_b64)) {
+                return;
+            }
             RunAsync([pid] { return WebService::OpenPakApi::DeclineFriend(pid); });
         }
     } else {
         const QString name = index.data(OpenPakFriendItem::NameRole).toString();
-        const auto confirm = QMessageBox::question(
-            this, tr("Remove Friend"), tr("Remove %1 from your friends list?").arg(name),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (confirm != QMessageBox::Yes) {
+        if (!ConfirmAction(tr("Remove Friend"), tr("Remove %1 from your friends list?").arg(name),
+                          tr("Yes"), tr("No"), avatar_b64)) {
             return;
         }
         RunAsync([pid] { return WebService::OpenPakApi::RemoveFriend(pid); });
@@ -848,6 +2234,22 @@ void OpenPakAccountDialog::RefreshFriends() {
                     return;
                 }
                 SetBusy(false);
+
+                // Preserve current row/focus across the model rebuild below.
+                const bool friends_had_focus = friends_view->hasFocus();
+                const QModelIndex friends_prev = friends_view->currentIndex();
+                const u64 friends_prev_pid =
+                    friends_prev.isValid() ? friends_prev.data(OpenPakFriendItem::PidRole).toULongLong() : 0;
+                const bool requests_had_focus = requests_view->hasFocus();
+                const QModelIndex requests_prev = requests_view->currentIndex();
+                const u64 requests_prev_pid =
+                    requests_prev.isValid() ? requests_prev.data(OpenPakFriendItem::PidRole).toULongLong() : 0;
+                const bool outgoing_had_focus = outgoing_requests_view->hasFocus();
+                const QModelIndex outgoing_prev = outgoing_requests_view->currentIndex();
+                const QString outgoing_prev_code =
+                    outgoing_prev.isValid() ? outgoing_prev.data(OpenPakFriendItem::NameRole).toString()
+                                            : QString{};
+
                 friends_model->clear();
                 requests_model->clear();
 
@@ -863,8 +2265,6 @@ void OpenPakAccountDialog::RefreshFriends() {
                         ++group_size[entry.app_id];
                     }
                 }
-                // Rank: 0 = playing what I'm playing, 1..N = other games (bigger group first),
-                // N+1 = online with no game, N+2 = offline. Name breaks ties within a rank.
                 const auto rank = [&](const WebService::OpenPakApi::Friend& f) -> int {
                     if (f.presence_status == 0) {
                         return static_cast<int>(group_size.size()) + 2;
@@ -930,6 +2330,37 @@ void OpenPakAccountDialog::RefreshFriends() {
                 friends_stack->setCurrentIndex(friends_model->rowCount() > 0 ? 0 : 1);
                 requests_stack->setCurrentIndex(requests_model->rowCount() > 0 ? 0 : 1);
                 ApplyFriendFilter(friend_search->text());
+
+                if (friends_had_focus) {
+                    for (int row = 0; row < friends_model->rowCount(); ++row) {
+                        const QModelIndex idx = friends_model->index(row, 0);
+                        if (idx.data(OpenPakFriendItem::PidRole).toULongLong() == friends_prev_pid) {
+                            friends_view->setCurrentIndex(idx);
+                            friends_view->setFocus();
+                            break;
+                        }
+                    }
+                }
+                if (requests_had_focus) {
+                    for (int row = 0; row < requests_model->rowCount(); ++row) {
+                        const QModelIndex idx = requests_model->index(row, 0);
+                        if (idx.data(OpenPakFriendItem::PidRole).toULongLong() == requests_prev_pid) {
+                            requests_view->setCurrentIndex(idx);
+                            requests_view->setFocus();
+                            break;
+                        }
+                    }
+                }
+                if (outgoing_had_focus) {
+                    for (int row = 0; row < outgoing_requests_model->rowCount(); ++row) {
+                        const QModelIndex idx = outgoing_requests_model->index(row, 0);
+                        if (idx.data(OpenPakFriendItem::NameRole).toString() == outgoing_prev_code) {
+                            outgoing_requests_view->setCurrentIndex(idx);
+                            outgoing_requests_view->setFocus();
+                            break;
+                        }
+                    }
+                }
             },
             Qt::QueuedConnection);
     }}.detach();
@@ -1028,6 +2459,7 @@ void OpenPakAccountDialog::RebuildCloudSaveTitlePicker() {
         button->setCursor(Qt::PointingHandCursor);
         button->setAutoRaise(true);
         button->setFixedWidth(104);
+        button->setFocusPolicy(Qt::StrongFocus);
         if (program_id == cloud_save_selected_title_id) {
             button->setChecked(true);
             selection_still_valid = true;
@@ -1088,9 +2520,14 @@ void OpenPakAccountDialog::RefreshHistory() {
                 if (!guard) {
                     return;
                 }
+                const bool history_had_focus = history_view->hasFocus();
+                const QModelIndex history_prev = history_view->currentIndex();
+                const QString history_prev_title =
+                    history_prev.isValid() ? history_prev.data(OpenPakHistoryItem::TitleIdRole).toString()
+                                           : QString{};
+
                 history_model->clear();
                 for (const auto& entry : list.entries) {
-                    // Prefer the locally installed game's own NACP over the server's copy.
                     const QString local_name =
                         controller ? controller->ResolveGameName(entry.title_id) : QString{};
                     const QString local_icon =
@@ -1108,6 +2545,17 @@ void OpenPakAccountDialog::RefreshHistory() {
                         QString::fromStdString(entry.last_played)));
                 }
                 history_stack->setCurrentIndex(history_model->rowCount() > 0 ? 0 : 1);
+
+                if (history_had_focus) {
+                    for (int row = 0; row < history_model->rowCount(); ++row) {
+                        const QModelIndex idx = history_model->index(row, 0);
+                        if (idx.data(OpenPakHistoryItem::TitleIdRole).toString() == history_prev_title) {
+                            history_view->setCurrentIndex(idx);
+                            history_view->setFocus();
+                            break;
+                        }
+                    }
+                }
             },
             Qt::QueuedConnection);
     }}.detach();

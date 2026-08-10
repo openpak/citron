@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QStyledItemDelegate>
 
+class QListView;
 class QPainter;
 class QRect;
 class QModelIndex;
@@ -20,7 +21,7 @@ public:
     static constexpr int kCardRadius = 10;
     static constexpr int kCardMarginV = 3;
 
-    explicit OpenPakHistoryDelegate(QObject* parent = nullptr);
+    explicit OpenPakHistoryDelegate(QListView* view, QObject* parent = nullptr);
     ~OpenPakHistoryDelegate() override;
 
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override;
@@ -31,4 +32,7 @@ private:
     QColor CardBg() const;
     QColor FgColor() const;
     QColor DimColor() const;
+    QColor AccentColor() const;
+
+    QListView* list_view;
 };

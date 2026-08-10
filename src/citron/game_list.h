@@ -139,6 +139,7 @@ public:
     void ToggleSortOrder();
 
     QStandardItemModel* GetModel() const;
+    QString GetGamePath(u64 program_id) const;
     QWidget* GetToolbarWidget() const {
         return toolbar;
     }

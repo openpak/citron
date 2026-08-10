@@ -201,6 +201,7 @@ void OpenPakToast::HideAnimated() {
 void OpenPakToast::mousePressEvent(QMouseEvent* event) {
     QWidget::mousePressEvent(event);
     auto_hide_timer.stop();
+    emit clicked(kind);
     HideAnimated();
 }
 
