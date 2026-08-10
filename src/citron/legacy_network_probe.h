@@ -3,21 +3,28 @@
 
 #pragma once
 
+#include <set>
+#include <vector>
+
+#include <QHostAddress>
 #include <QObject>
 #include <QString>
 
-class QNetworkAccessManager;
-class QNetworkReply;
 class QUdpSocket;
 class QTimer;
 
-// One-shot UPnP IGD probe (the Friends dialog's "NAT" indicator) and backend latency check (its
+// One-shot NAT-check probe (the Friends dialog's "NAT" indicator) and backend latency check (its
 // "Ping" indicator). Both are fire-and-forget; results come back via signals.
+//
+// The NAT probe speaks the same nncs (Nintendo NAT-Check) UDP protocol the console itself uses,
+// against the same nncs1/nncs2 responders games get DNS-redirected to (legacy_server_ip /
+// legacy_nat_ip) -- rather than a UPnP IGD query, which only ever reports something for players
+// whose router has UPnP enabled and says nothing about whether the NAT actually lets P2P through.
 class ExternalReferenceProbe : public QObject {
     Q_OBJECT
 
 public:
-    enum class NatStatus { Checking, Open, Unknown };
+    enum class NatStatus { Checking, Open, Strict, Unknown };
 
     explicit ExternalReferenceProbe(QObject* parent = nullptr);
     ~ExternalReferenceProbe() override;
@@ -30,15 +37,18 @@ signals:
     void PingResult(int ms); // -1 on failure
 
 private:
-    void OnSsdpReadyRead();
-    void FetchDeviceDescription(const QString& location);
-    void OnDeviceDescriptionReply(QNetworkReply* reply, QString base_url);
-    void CallGetExternalIpAddress(const QString& control_url, const QString& service_type);
-    void OnGetExternalIpReply(QNetworkReply* reply);
+    struct NatTarget {
+        QHostAddress host;
+        quint16 port;
+        bool answered = false;
+    };
+
+    void OnNatReadyRead();
     void Finish(NatStatus status);
 
-    QNetworkAccessManager* network_manager;
-    QUdpSocket* ssdp_socket = nullptr;
-    QTimer* ssdp_timeout = nullptr;
+    QUdpSocket* nat_socket = nullptr;
+    QTimer* nat_timeout = nullptr;
+    std::vector<NatTarget> nat_targets;
+    std::set<quint32> nat_external_ports;
     bool nat_resolved = false;
 };

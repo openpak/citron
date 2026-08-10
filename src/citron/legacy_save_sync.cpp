@@ -170,19 +170,24 @@ std::vector<u8> ZipDirectoryPowerShell(const FileSys::VirtualDir& dir, u64 title
     const std::filesystem::path real_dir = dir->GetFullPath();
     const std::filesystem::path tmp_zip =
         std::filesystem::temp_directory_path() / fmt::format("legacy_save_{:016x}.zip", title_id);
-    std::filesystem::remove(tmp_zip);
+    std::error_code ec;
+    std::filesystem::remove(tmp_zip, ec);
 
     const std::string cmd = "powershell -NoProfile -NonInteractive -Command \"Compress-Archive -Path \\\"" +
                              real_dir.string() + "\\*\\\" -DestinationPath \\\"" + tmp_zip.string() +
                              "\\\" -Force\"";
     if (std::system(cmd.c_str()) != 0) {
-        std::filesystem::remove(tmp_zip);
+        std::filesystem::remove(tmp_zip, ec);
         return {};
     }
 
-    std::ifstream in(tmp_zip, std::ios::binary);
-    std::vector<u8> out((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    std::filesystem::remove(tmp_zip);
+    std::vector<u8> out;
+    {
+        // Windows can't delete a file with an open handle (unlike POSIX) -- close in first.
+        std::ifstream in(tmp_zip, std::ios::binary);
+        out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    std::filesystem::remove(tmp_zip, ec);
     return out;
 }
 
@@ -204,7 +209,8 @@ bool UnzipToDirectoryPowerShell(std::span<const u8> zip_data, const std::filesys
                              tmp_zip.string() + "\\\" -DestinationPath \\\"" + dest.string() +
                              "\\\" -Force\"";
     const bool ok = std::system(cmd.c_str()) == 0;
-    std::filesystem::remove(tmp_zip);
+    std::error_code ec;
+    std::filesystem::remove(tmp_zip, ec);
     return ok;
 }
 

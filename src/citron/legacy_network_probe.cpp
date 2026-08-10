@@ -3,44 +3,40 @@
 
 #include "citron/legacy_network_probe.h"
 
+#include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <thread>
 
-#include <QHostAddress>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
+#include <QNetworkDatagram>
 #include <QTimer>
 #include <QUdpSocket>
-#include <QXmlStreamReader>
+
+#include "common/settings.h"
 
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/legacy_api.h"
 #endif
 
 namespace {
-constexpr int kSsdpTimeoutMs = 3000;
-constexpr quint16 kSsdpPort = 1900;
+constexpr int kNatProbeTimeoutMs = 3000;
+constexpr quint32 kNatTestId = 101;
+constexpr std::array<quint16, 2> kNatPorts{10025, 10125};
 
-QByteArray SsdpSearchRequest() {
-    return QByteArrayLiteral("M-SEARCH * HTTP/1.1\r\n"
-                             "HOST: 239.255.255.250:1900\r\n"
-                             "MAN: \"ssdp:discover\"\r\n"
-                             "MX: 2\r\n"
-                             "ST: upnp:rootdevice\r\n\r\n");
-}
-
-QString ExtractHeader(const QString& response, const QString& header) {
-    for (const QString& line : response.split(QStringLiteral("\r\n"))) {
-        if (line.startsWith(header, Qt::CaseInsensitive)) {
-            return line.mid(header.size()).trimmed();
-        }
+// Same fallback chain sfdnsres.cpp uses for the in-game DNS redirect: the two nncs responders
+// share the account/game server's IP by default, with their own env var to split them off.
+QString GetConfiguredHost(const std::string& setting, const char* env_var) {
+    if (!setting.empty()) {
+        return QString::fromStdString(setting);
     }
-    return {};
+    if (const char* env = std::getenv(env_var); env && *env) {
+        return QString::fromLatin1(env);
+    }
+    return QStringLiteral("127.0.0.1");
 }
 } // namespace
 
-ExternalReferenceProbe::ExternalReferenceProbe(QObject* parent)
-    : QObject(parent), network_manager(new QNetworkAccessManager(this)) {}
+ExternalReferenceProbe::ExternalReferenceProbe(QObject* parent) : QObject(parent) {}
 
 ExternalReferenceProbe::~ExternalReferenceProbe() = default;
 
@@ -48,100 +44,78 @@ void ExternalReferenceProbe::ProbeNat() {
     nat_resolved = false;
     emit NatStatusChanged(NatStatus::Checking);
 
-    delete ssdp_socket;
-    ssdp_socket = new QUdpSocket(this);
-    ssdp_socket->bind(QHostAddress::AnyIPv4, 0);
-    connect(ssdp_socket, &QUdpSocket::readyRead, this, &ExternalReferenceProbe::OnSsdpReadyRead);
-    ssdp_socket->writeDatagram(SsdpSearchRequest(), QHostAddress(QStringLiteral("239.255.255.250")),
-                               kSsdpPort);
+    delete nat_socket;
+    nat_socket = new QUdpSocket(this);
+    nat_socket->bind(QHostAddress::AnyIPv4, 0);
+    connect(nat_socket, &QUdpSocket::readyRead, this, &ExternalReferenceProbe::OnNatReadyRead);
 
-    delete ssdp_timeout;
-    ssdp_timeout = new QTimer(this);
-    ssdp_timeout->setSingleShot(true);
-    connect(ssdp_timeout, &QTimer::timeout, this, [this] { Finish(NatStatus::Unknown); });
-    ssdp_timeout->start(kSsdpTimeoutMs);
-}
+    const QHostAddress host1(
+        GetConfiguredHost(Settings::values.legacy_server_ip.GetValue(), "OPENPAK_LEGACY_SERVER_IP"));
+    const QHostAddress host2(
+        GetConfiguredHost(Settings::values.legacy_nat_ip.GetValue(), "OPENPAK_LEGACY_NAT_IP"));
 
-void ExternalReferenceProbe::OnSsdpReadyRead() {
-    while (ssdp_socket && ssdp_socket->hasPendingDatagrams()) {
-        QByteArray datagram;
-        datagram.resize(static_cast<int>(ssdp_socket->pendingDatagramSize()));
-        ssdp_socket->readDatagram(datagram.data(), datagram.size());
-        if (nat_resolved) {
-            continue;
-        }
-        const QString location =
-            ExtractHeader(QString::fromLatin1(datagram), QStringLiteral("LOCATION:"));
-        if (!location.isEmpty()) {
-            FetchDeviceDescription(location);
+    nat_targets.clear();
+    nat_external_ports.clear();
+    for (const QHostAddress& host : {host1, host2}) {
+        for (quint16 port : kNatPorts) {
+            nat_targets.push_back(NatTarget{host, port, false});
         }
     }
-}
 
-void ExternalReferenceProbe::FetchDeviceDescription(const QString& location) {
-    const QUrl url(location);
-    auto* reply = network_manager->get(QNetworkRequest(url));
-    const QString base_url = url.scheme() + QStringLiteral("://") + url.authority();
-    connect(reply, &QNetworkReply::finished, this,
-            [this, reply, base_url] { OnDeviceDescriptionReply(reply, base_url); });
-}
-
-void ExternalReferenceProbe::OnDeviceDescriptionReply(QNetworkReply* reply, QString base_url) {
-    reply->deleteLater();
-    if (nat_resolved || reply->error() != QNetworkReply::NoError) {
-        return;
+    QByteArray probe(16, '\0');
+    probe[3] = static_cast<char>(kNatTestId); // big-endian test id at offset 0
+    for (const NatTarget& target : nat_targets) {
+        nat_socket->writeDatagram(probe, target.host, target.port);
     }
 
-    QXmlStreamReader reader(reply->readAll());
-    QString service_type;
-    while (!reader.atEnd()) {
-        reader.readNext();
-        if (!reader.isStartElement()) {
+    delete nat_timeout;
+    nat_timeout = new QTimer(this);
+    nat_timeout->setSingleShot(true);
+    connect(nat_timeout, &QTimer::timeout, this, [this] {
+        const auto answered = std::count_if(nat_targets.begin(), nat_targets.end(),
+                                            [](const NatTarget& t) { return t.answered; });
+        // At least two distinct destinations have to answer to compare mapping at all.
+        if (answered < 2) {
+            Finish(NatStatus::Unknown);
+        } else {
+            Finish(nat_external_ports.size() == 1 ? NatStatus::Open : NatStatus::Strict);
+        }
+    });
+    nat_timeout->start(kNatProbeTimeoutMs);
+}
+
+void ExternalReferenceProbe::OnNatReadyRead() {
+    while (nat_socket && nat_socket->hasPendingDatagrams()) {
+        const QNetworkDatagram datagram = nat_socket->receiveDatagram();
+        if (nat_resolved || !datagram.isValid()) {
             continue;
         }
-        if (reader.name().compare(QStringLiteral("serviceType"), Qt::CaseInsensitive) == 0) {
-            service_type = reader.readElementText();
-        } else if (reader.name().compare(QStringLiteral("controlURL"), Qt::CaseInsensitive) == 0) {
-            const QString control_url = reader.readElementText();
-            if (service_type.contains(QStringLiteral("WANIPConnection")) ||
-                service_type.contains(QStringLiteral("WANPPPConnection"))) {
-                const QString full_url = control_url.startsWith(QStringLiteral("http"))
-                                             ? control_url
-                                             : base_url + control_url;
-                CallGetExternalIpAddress(full_url, service_type);
-                return;
+        const QByteArray data = datagram.data();
+        if (data.size() < 16) {
+            continue;
+        }
+        const auto read_u32_be = [&data](int offset) {
+            return (static_cast<quint32>(static_cast<quint8>(data[offset])) << 24) |
+                  (static_cast<quint32>(static_cast<quint8>(data[offset + 1])) << 16) |
+                  (static_cast<quint32>(static_cast<quint8>(data[offset + 2])) << 8) |
+                  static_cast<quint32>(static_cast<quint8>(data[offset + 3]));
+        };
+        if (read_u32_be(0) != kNatTestId) {
+            continue;
+        }
+
+        // Only a reply from a target we actually probed counts, and only once per target --
+        // otherwise a stray or duplicate datagram could skew the mapping comparison.
+        for (NatTarget& target : nat_targets) {
+            if (target.answered || target.host != datagram.senderAddress() ||
+                target.port != datagram.senderPort()) {
+                continue;
             }
+            target.answered = true;
+            nat_external_ports.insert(read_u32_be(4));
+            break;
         }
     }
-}
-
-void ExternalReferenceProbe::CallGetExternalIpAddress(const QString& control_url,
-                                                     const QString& service_type) {
-    QNetworkRequest request{QUrl(control_url)};
-    request.setHeader(QNetworkRequest::ContentTypeHeader,
-                      QStringLiteral("text/xml; charset=\"utf-8\""));
-    request.setRawHeader("SOAPAction",
-                         (QStringLiteral("\"") + service_type + QStringLiteral("#GetExternalIPAddress\""))
-                             .toUtf8());
-
-    const QString body =
-        QStringLiteral("<?xml version=\"1.0\"?><s:Envelope "
-                       "xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
-                       "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-                       "<s:Body><u:GetExternalIPAddress xmlns:u=\"%1\"/></s:Body></s:Envelope>")
-            .arg(service_type);
-
-    auto* reply = network_manager->post(request, body.toUtf8());
-    connect(reply, &QNetworkReply::finished, this, [this, reply] { OnGetExternalIpReply(reply); });
-}
-
-void ExternalReferenceProbe::OnGetExternalIpReply(QNetworkReply* reply) {
-    reply->deleteLater();
-    if (nat_resolved) {
-        return;
-    }
-    // A successful SOAP reply from the router's WAN service is evidence of a live UPnP IGD.
-    Finish(reply->error() == QNetworkReply::NoError ? NatStatus::Open : NatStatus::Unknown);
 }
 
 void ExternalReferenceProbe::Finish(NatStatus status) {
@@ -149,12 +123,12 @@ void ExternalReferenceProbe::Finish(NatStatus status) {
         return;
     }
     nat_resolved = true;
-    if (ssdp_timeout) {
-        ssdp_timeout->stop();
+    if (nat_timeout) {
+        nat_timeout->stop();
     }
-    if (ssdp_socket) {
-        ssdp_socket->deleteLater();
-        ssdp_socket = nullptr;
+    if (nat_socket) {
+        nat_socket->deleteLater();
+        nat_socket = nullptr;
     }
     emit NatStatusChanged(status);
 }

@@ -1348,6 +1348,13 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
                         "background: rgba(50,195,85,40); color: #32c355; font-weight: 600; "
                         "border-radius: 9px; padding: 2px 10px;"));
                     break;
+                case ExternalReferenceProbe::NatStatus::Strict:
+                    nat_checking = false;
+                    nat_label->setText(tr("Strict"));
+                    nat_label->setStyleSheet(QStringLiteral(
+                        "background: rgba(232,131,62,40); color: #e8833e; font-weight: 600; "
+                        "border-radius: 9px; padding: 2px 10px;"));
+                    break;
                 case ExternalReferenceProbe::NatStatus::Unknown:
                     nat_checking = false;
                     nat_label->setText(tr("Unknown"));
