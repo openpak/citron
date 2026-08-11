@@ -92,19 +92,16 @@ void PushPresence(s32 status, const std::string& app_field, const std::string& a
 
 // Downloads the BCAT schedule seed (a zip of vsdata/coopdata/fesdata) for titles that need one
 // locally to go online (Splatoon 2). title_id_hex is 16 uppercase hex digits. Empty on failure.
+//
+// Always fetches the full zip rather than relying on a conditional GET (If-Modified-Since):
+// this endpoint's Last-Modified handling isn't reliable enough to trust as the sole freshness
+// signal (Ryujinx-Reference hits the same server and has the same finding), so the caller should
+// hash the returned bytes with HashBcatSeedHex and compare against what's locally installed.
 std::vector<u8> DownloadBcatSeed(const std::string& title_id_hex);
 
-struct BcatSeedCheck {
-    bool not_modified = false;   // true: server confirmed no change since if_modified_since
-    std::string last_modified;   // server's current Last-Modified; store this and send it back
-    std::vector<u8> zip_bytes;   // populated only when not_modified is false and the GET succeeded
-};
-
-// Same seed as DownloadBcatSeed, but conditional: pass the Last-Modified value stored from a
-// previous call (empty if none stored yet) and the server answers 304 instead of resending the
-// zip when nothing changed, so a stale local rotation schedule doesn't stick around forever.
-BcatSeedCheck DownloadBcatSeedIfNewer(const std::string& title_id_hex,
-                                      const std::string& if_modified_since);
+// Lowercase hex SHA-256 of the given bytes, for comparing a freshly downloaded BCAT seed zip
+// against the hash of what's currently installed locally.
+std::string HashBcatSeedHex(const std::vector<u8>& data);
 
 // Public, unauthenticated. Maps lowercase-hex title id -> currently connected player count.
 std::map<std::string, int> GetOnlineCounts();

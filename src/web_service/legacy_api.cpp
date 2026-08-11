@@ -508,36 +508,10 @@ std::vector<u8> DownloadBcatSeed(const std::string& title_id_hex) {
     return std::vector<u8>(result->body.begin(), result->body.end());
 }
 
-BcatSeedCheck DownloadBcatSeedIfNewer(const std::string& title_id_hex,
-                                      const std::string& if_modified_since) {
-    const std::string token = Common::OpenPakAccount::GetToken();
-    httplib::Headers extra;
-    if (!if_modified_since.empty()) {
-        extra.emplace("If-Modified-Since", if_modified_since);
-    }
-    const auto result = Send("GET", "/api/bcat/" + title_id_hex, {}, token, extra);
-
-    BcatSeedCheck check;
-    if (ClearSessionIfRejected(result)) {
-        return check;
-    }
-    if (!result) {
-        LOG_WARNING(WebService, "OpenPak BCAT freshness check failed (no response)");
-        return check;
-    }
-    if (result->status == 304) {
-        check.not_modified = true;
-        return check;
-    }
-    if (result->status != 200) {
-        LOG_WARNING(WebService, "OpenPak BCAT seed download failed (HTTP {})", result->status);
-        return check;
-    }
-    if (const auto it = result->headers.find("Last-Modified"); it != result->headers.end()) {
-        check.last_modified = it->second;
-    }
-    check.zip_bytes.assign(result->body.begin(), result->body.end());
-    return check;
+std::string HashBcatSeedHex(const std::vector<u8>& data) {
+    const auto digest = Sha256(std::string_view{reinterpret_cast<const char*>(data.data()),
+                                                 data.size()});
+    return Common::HexToString(digest, false);
 }
 
 std::optional<std::vector<u8>> PullSave(const std::string& title_id_hex) {
