@@ -142,6 +142,7 @@ public:
                 LOG_CRITICAL(Core_ARM,
                              "Fatal: fault at {:#016x} (consecutive={}), suspending thread",
                              pc, m_consecutive_faults);
+                m_parent.LogBacktrace(m_process);
             }
 
             ReturnException(pc, PrefetchAbort);
