@@ -89,6 +89,7 @@
 #include "citron/util/confetti.h"
 #include "citron/util/controller_navigation.h"
 #include "citron/util/cup_shuffle_widget.h"
+#include "web_service/ssbu_mod_installer.h"
 #include "citron/util/dice_widget.h"
 #include "citron/util/plinko_widget.h"
 #include "citron/util/steam_grid_db.h"
@@ -3301,6 +3302,10 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
         main_window->OpenPakByamlDownloadEnabled()) {
         download_online_schedule = context_menu.addAction(tr("Download Online Schedule"));
     }
+    QAction* install_ssbu_mods = nullptr;
+    if (main_window && WebService::SkylineMods::IsSsbuTitleId(program_id)) {
+        install_ssbu_mods = context_menu.addAction(tr("Install/Update Skyline Mods"));
+    }
     QAction* start_game = context_menu.addAction(tr("Start Game"));
     QAction* start_game_global =
         context_menu.addAction(tr("Start Game without Custom Configuration"));
@@ -3618,6 +3623,13 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
         connect(download_online_schedule, &QAction::triggered, [this, program_id]() {
             if (main_window) {
                 main_window->OpenPakByamlDownloadFromMenu(program_id);
+            }
+        });
+    }
+    if (install_ssbu_mods) {
+        connect(install_ssbu_mods, &QAction::triggered, [this, program_id]() {
+            if (main_window) {
+                main_window->InstallSsbuSkylineMods(program_id);
             }
         });
     }

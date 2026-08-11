@@ -9,6 +9,8 @@ add_library(web_service STATIC
     population_scraper_client.cpp
     population_scraper_client.h
     precompiled_headers.h
+    ssbu_mod_installer.cpp
+    ssbu_mod_installer.h
     verify_login.cpp
     verify_login.h
     verify_user_jwt.cpp

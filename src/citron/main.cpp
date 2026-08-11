@@ -5,6 +5,7 @@
 
 #include <cinttypes>
 #include <clocale>
+#include <ctime>
 #include <random>
 #include "citron/theme.h"
 #include <cmath>
@@ -174,6 +175,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "common/settings.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/legacy_api.h"
+#include "web_service/ssbu_mod_installer.h"
 #endif
 #include "common/string_util.h"
 #include "common/xci_trimmer.h"
@@ -7297,6 +7299,65 @@ void OpenPakByamlWriteLastModified(const std::string& title_id_hex, const std::s
         file << value;
     }
 }
+
+// ExtractZipToDirectory doesn't reject ".." entries; pre-scan since one zip source is
+// matched by a version-tagged filename rather than a fixed, previously-verified name.
+#ifdef CITRON_ENABLE_LIBARCHIVE
+bool ZipContainsPathTraversal(const std::filesystem::path& zip_path) {
+    struct archive* a = archive_read_new();
+    if (!a) {
+        return true;
+    }
+    archive_read_support_format_zip(a);
+    archive_read_support_filter_all(a);
+
+    if (archive_read_open_filename(a, zip_path.string().c_str(), 10240) != ARCHIVE_OK) {
+        archive_read_free(a);
+        return true;
+    }
+
+    bool unsafe = false;
+    struct archive_entry* entry;
+    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        const std::filesystem::path entry_path{archive_entry_pathname(entry)};
+        if (entry_path.is_absolute()) {
+            unsafe = true;
+            break;
+        }
+        for (const auto& component : entry_path) {
+            if (component == "..") {
+                unsafe = true;
+                break;
+            }
+        }
+        if (unsafe) {
+            break;
+        }
+    }
+    archive_read_free(a);
+    return unsafe;
+}
+#else
+bool ZipContainsPathTraversal(const std::filesystem::path&) {
+    return false;
+}
+#endif
+
+// Different mod release zips nest "atmosphere/" at different depths (some at the archive
+// root, some under an extra version-tagged folder), so search for it instead of assuming.
+std::filesystem::path FindAtmosphereDir(const std::filesystem::path& root) {
+    if (root.filename() == "atmosphere") {
+        return root;
+    }
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(root, ec);
+        !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (it->is_directory() && it->path().filename() == "atmosphere") {
+            return it->path();
+        }
+    }
+    return {};
+}
 } // namespace
 
 bool GMainWindow::OpenPakByamlDownload(u64 title_id) {
@@ -7373,6 +7434,183 @@ void GMainWindow::RunOpenPakByamlDownloadWithProgress(u64 title_id) {
 void GMainWindow::OpenPakByamlDownloadFromMenu(u64 title_id) {
 #ifdef ENABLE_WEB_SERVICE
     RunOpenPakByamlDownloadWithProgress(title_id);
+#endif
+}
+
+GMainWindow::SsbuModInstallOutcome GMainWindow::InstallSsbuSkylineModsBlocking(u64 program_id) {
+    SsbuModInstallOutcome outcome{};
+#ifdef ENABLE_WEB_SERVICE
+    const auto sdmc_root = Common::FS::GetCitronPath(Common::FS::CitronPath::SDMCDir);
+    const auto title_dir =
+        sdmc_root / "atmosphere" / "contents" / fmt::format("{:016X}", program_id);
+    const auto skyline_dir = title_dir / "romfs" / "skyline";
+    const auto plugins_dir = skyline_dir / "plugins";
+
+    std::error_code ec;
+    if (std::filesystem::exists(skyline_dir, ec) &&
+        !std::filesystem::is_empty(skyline_dir, ec)) {
+        const auto backup_path = skyline_dir.parent_path() /
+                                 fmt::format("skyline.backup_{}",
+                                             static_cast<s64>(std::time(nullptr)));
+        std::filesystem::rename(skyline_dir, backup_path, ec);
+        if (ec) {
+            ec.clear();
+            std::filesystem::copy(skyline_dir, backup_path,
+                                  std::filesystem::copy_options::recursive, ec);
+            if (!ec) {
+                std::filesystem::remove_all(skyline_dir, ec);
+            }
+        }
+        if (!ec) {
+            outcome.backup_made = true;
+            outcome.backup_path = backup_path;
+        } else {
+            LOG_ERROR(Frontend,
+                      "SSBU mod install: failed to back up existing skyline folder ({}): {}",
+                      skyline_dir.string(), ec.message());
+        }
+    }
+
+    std::filesystem::create_directories(plugins_dir, ec);
+
+    const auto results = WebService::SkylineMods::FetchAllSkylineModAssets();
+    const auto cache_dir = Common::FS::GetCitronPath(Common::FS::CitronPath::CacheDir);
+
+    for (const auto& result : results) {
+        if (!result.success) {
+            outcome.failed.emplace_back(result.display_name, result.error);
+            continue;
+        }
+
+        const auto tmp_path = cache_dir / fmt::format("ssbu_mod_{}.tmp", result.display_name);
+        {
+            std::ofstream out{tmp_path, std::ios::binary};
+            if (!out) {
+                outcome.failed.emplace_back(result.display_name,
+                                            "failed to write temporary download file");
+                continue;
+            }
+            out.write(reinterpret_cast<const char*>(result.data.data()),
+                      static_cast<std::streamsize>(result.data.size()));
+        }
+
+        bool ok = false;
+        std::string fail_reason = "failed to install downloaded file";
+        if (result.is_zip) {
+            if (ZipContainsPathTraversal(tmp_path)) {
+                fail_reason = "downloaded archive contains unsafe paths, refusing to extract";
+            } else {
+                const auto scratch_dir =
+                    cache_dir / fmt::format("ssbu_mod_extract_{}", result.display_name);
+                std::error_code rm_ec;
+                std::filesystem::remove_all(scratch_dir, rm_ec);
+
+                if (!ExtractZipToDirectory(tmp_path, scratch_dir)) {
+                    fail_reason = "failed to extract archive";
+                } else {
+                    const auto atmosphere_dir = FindAtmosphereDir(scratch_dir);
+                    if (atmosphere_dir.empty()) {
+                        fail_reason = "no atmosphere/ folder found in archive";
+                    } else {
+                        std::error_code copy_ec;
+                        std::filesystem::copy(atmosphere_dir, sdmc_root / "atmosphere",
+                                              std::filesystem::copy_options::recursive |
+                                                  std::filesystem::copy_options::overwrite_existing,
+                                              copy_ec);
+                        ok = !copy_ec;
+                        if (!ok) {
+                            fail_reason = "failed to merge archive into SD card: " + copy_ec.message();
+                        }
+                    }
+                }
+                std::filesystem::remove_all(scratch_dir, rm_ec);
+            }
+        } else {
+            std::error_code copy_ec;
+            std::filesystem::copy_file(tmp_path, plugins_dir / result.filename,
+                                       std::filesystem::copy_options::overwrite_existing,
+                                       copy_ec);
+            ok = !copy_ec;
+            if (!ok) {
+                fail_reason = "failed to copy file: " + copy_ec.message();
+            }
+        }
+        std::filesystem::remove(tmp_path);
+
+        if (ok) {
+            outcome.installed.push_back(result.display_name);
+        } else {
+            LOG_ERROR(Frontend, "SSBU mod install: {} failed: {}", result.display_name,
+                      fail_reason);
+            outcome.failed.emplace_back(result.display_name, fail_reason);
+        }
+    }
+#else
+    (void)program_id;
+#endif
+    return outcome;
+}
+
+void GMainWindow::RunSsbuSkylineModsInstallWithProgress(u64 program_id) {
+#ifdef ENABLE_WEB_SERVICE
+    QProgressDialog progress(tr("Installing Skyline mods for Super Smash Bros. Ultimate..."),
+                             QString{}, 0, 0, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setCancelButton(nullptr);
+    progress.show();
+
+    auto future = QtConcurrent::run(
+        [this, program_id] { return InstallSsbuSkylineModsBlocking(program_id); });
+    while (!future.isFinished()) {
+        QCoreApplication::processEvents();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    progress.close();
+
+    const auto outcome = future.result();
+    QString summary = tr("%1/%2 mods installed.")
+                          .arg(outcome.installed.size())
+                          .arg(outcome.installed.size() + outcome.failed.size());
+    if (!outcome.failed.empty()) {
+        summary += tr("\n\nFailed:");
+        for (const auto& [name, reason] : outcome.failed) {
+            summary += QStringLiteral("\n• %1: %2")
+                          .arg(QString::fromStdString(name), QString::fromStdString(reason));
+        }
+    }
+    if (outcome.backup_made) {
+        summary += tr("\n\nYour previous skyline folder was backed up to:\n%1")
+                      .arg(QString::fromStdString(outcome.backup_path.string()));
+    }
+
+    if (outcome.failed.empty()) {
+        QMessageBox::information(this, tr("Skyline Mods"), summary);
+    } else {
+        QMessageBox::warning(this, tr("Skyline Mods"), summary);
+    }
+#else
+    (void)program_id;
+#endif
+}
+
+void GMainWindow::InstallSsbuSkylineMods(u64 program_id) {
+#ifdef ENABLE_WEB_SERVICE
+    if (!WebService::SkylineMods::IsSsbuTitleId(program_id)) {
+        return;
+    }
+    if (!question(this, tr("Install Skyline Mods"),
+                 tr("This will download the latest Skyline mod plugins for Super Smash Bros. "
+                    "Ultimate Online Deluxe and replace the contents of this game's "
+                    "romfs/skyline folder on the SD card.\n\n"
+                    "Any existing skyline folder will be backed up (renamed with a timestamp) "
+                    "before anything is replaced.\n\n"
+                    "Continue?"),
+                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No)) {
+        return;
+    }
+    RunSsbuSkylineModsInstallWithProgress(program_id);
+#else
+    (void)program_id;
 #endif
 }
 
