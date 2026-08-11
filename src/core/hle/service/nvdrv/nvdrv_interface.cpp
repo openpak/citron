@@ -56,7 +56,7 @@ void NVDRV::Ioctl1(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const auto fd = rp.Pop<DeviceFD>();
     const auto command = rp.PopRaw<Ioctl>();
-    LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
+    LOG_TRACE(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
 
     if (!is_initialized) {
         ServiceError(ctx, NvResult::NotInitialized);
@@ -82,7 +82,7 @@ void NVDRV::Ioctl2(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const auto fd = rp.Pop<DeviceFD>();
     const auto command = rp.PopRaw<Ioctl>();
-    LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
+    LOG_TRACE(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
 
     if (!is_initialized) {
         ServiceError(ctx, NvResult::NotInitialized);
@@ -109,7 +109,7 @@ void NVDRV::Ioctl3(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const auto fd = rp.Pop<DeviceFD>();
     const auto command = rp.PopRaw<Ioctl>();
-    LOG_DEBUG(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
+    LOG_TRACE(Service_NVDRV, "called fd={}, ioctl=0x{:08X}", fd, command.raw);
 
     if (!is_initialized) {
         ServiceError(ctx, NvResult::NotInitialized);

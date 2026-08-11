@@ -88,7 +88,7 @@ Status BufferQueueConsumer::AcquireBuffer(BufferItem* out_buffer,
     const auto slot = front->slot;
     *out_buffer = *front;
 
-    LOG_DEBUG(Service_Nvnflinger, "acquiring slot={}", slot);
+    LOG_TRACE(Service_Nvnflinger, "acquiring slot={}", slot);
 
     // If the front buffer is still being tracked, update its slot state
     if (core->StillTracking(*front)) {
@@ -148,7 +148,7 @@ Status BufferQueueConsumer::ReleaseBuffer(s32 slot, u64 frame_number, const Fenc
 
             listener = core->connected_producer_listener;
 
-            LOG_DEBUG(Service_Nvnflinger, "releasing slot {}", slot);
+            LOG_TRACE(Service_Nvnflinger, "releasing slot {}", slot);
         } else if (slots[slot].needs_cleanup_on_release) {
             LOG_DEBUG(Service_Nvnflinger, "releasing a stale buffer slot {} (state = {})", slot,
                       slots[slot].buffer_state);

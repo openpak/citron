@@ -28,7 +28,7 @@ Result IHOSBinderDriver::TransactParcel(s32 binder_id, u32 transaction_id,
                                         InBuffer<BufferAttr_HipcMapAlias> parcel_data,
                                         OutBuffer<BufferAttr_HipcMapAlias> parcel_reply,
                                         u32 flags) {
-    LOG_DEBUG(Service_VI, "called. id={} transaction={}, flags={}", binder_id, transaction_id,
+    LOG_TRACE(Service_VI, "called. id={} transaction={}, flags={}", binder_id, transaction_id,
               flags);
 
     const auto binder = m_server->TryGetBinder(binder_id);

@@ -232,7 +232,7 @@ Status BufferQueueProducer::WaitForFreeSlotThenRelock(bool async, s32* found, St
 
 Status BufferQueueProducer::DequeueBuffer(s32* out_slot, Fence* out_fence, bool async, u32 width,
                                           u32 height, PixelFormat format, u32 usage) {
-    LOG_DEBUG(Service_Nvnflinger, "async={} w={} h={} format={}, usage={}",
+    LOG_TRACE(Service_Nvnflinger, "async={} w={} h={} format={}, usage={}",
               async ? "true" : "false", width, height, format, usage);
 
     if ((width != 0 && height == 0) || (width == 0 && height != 0)) {

@@ -75,7 +75,7 @@ public:
 
 private:
     Result IsUpdated(Out<bool> out_is_updated, SourceFlag source_flag) {
-        LOG_DEBUG(Service_Mii, "called with source_flag={}", source_flag);
+        LOG_TRACE(Service_Mii, "called with source_flag={}", source_flag);
 
         *out_is_updated = manager->IsUpdated(metadata, source_flag);
 

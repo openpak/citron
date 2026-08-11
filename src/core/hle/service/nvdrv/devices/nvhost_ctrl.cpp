@@ -87,7 +87,7 @@ NvResult nvhost_ctrl::NvOsGetConfigU32(IocGetConfigParams& params) {
 }
 
 NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_allocation) {
-    LOG_DEBUG(Service_NVDRV, "syncpt_id={}, threshold={}, timeout={}, is_allocation={}",
+    LOG_TRACE(Service_NVDRV, "syncpt_id={}, threshold={}, timeout={}, is_allocation={}",
               params.fence.id, params.fence.value, params.timeout, is_allocation);
 
     bool must_unmark_fail = !is_allocation;

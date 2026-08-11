@@ -187,7 +187,7 @@ Result ICommonStateGetter::GetBootMode(Out<PM::SystemBootMode> out_boot_mode) {
 }
 
 Result ICommonStateGetter::IsVrModeEnabled(Out<bool> out_is_vr_mode_enabled) {
-    LOG_DEBUG(Service_AM, "called");
+    LOG_TRACE(Service_AM, "called");
 
     std::scoped_lock lk{m_applet->lock};
     *out_is_vr_mode_enabled = m_applet->vr_mode_enabled;

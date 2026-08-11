@@ -73,7 +73,7 @@ Result ResetSignal(Core::System& system, Handle handle) {
 /// Wait for the given handles to synchronize, timeout after the specified nanoseconds
 Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_handles,
                            int32_t num_handles, int64_t timeout_ns) {
-    LOG_INFO(Kernel_SVC, "called user_handles={:#x}, num_handles={}, timeout_ns={}", user_handles,
+    LOG_TRACE(Kernel_SVC, "called user_handles={:#x}, num_handles={}, timeout_ns={}", user_handles,
              num_handles, timeout_ns);
 
     // Ensure number of handles is valid.
@@ -99,7 +99,7 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
                  ResultInvalidHandle);
 
         for (auto i = 0; i < num_handles; ++i) {
-            LOG_INFO(Kernel_SVC, "  handle[{}]=0x{:X} type={}", i, handles[i],
+            LOG_TRACE(Kernel_SVC, "  handle[{}]=0x{:X} type={}", i, handles[i],
                      objs[i]->GetTypeObj().GetName());
         }
     }
@@ -125,7 +125,7 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
 
     // Wait on the objects.
     Result res = KSynchronizationObject::Wait(kernel, out_index, objs.data(), num_handles, timeout);
-    LOG_INFO(Kernel_SVC, "resolved out_index={}, result=0x{:X}", *out_index, res.raw);
+    LOG_TRACE(Kernel_SVC, "resolved out_index={}, result=0x{:X}", *out_index, res.raw);
 
     R_SUCCEED_IF(res == ResultSessionClosed);
     R_RETURN(res);
