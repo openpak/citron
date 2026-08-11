@@ -573,6 +573,7 @@ stage_setup_clangcl() {
         mingw-w64-clang-x86_64-nasm mingw-w64-clang-x86_64-yasm \
         mingw-w64-clang-x86_64-glslang mingw-w64-clang-x86_64-ninja \
         mingw-w64-clang-x86_64-sccache mingw-w64-clang-x86_64-jom \
+        mingw-w64-clang-x86_64-libarchive \
         2>/dev/null || error "Failed to install required MSYS2 packages."
 
     # Locate Python 3.12 — pre-installed on CI runners, installed via winget on dev machines.
@@ -708,6 +709,7 @@ stage_setup() {
             mingw-w64-clang-x86_64-nasm \
             mingw-w64-clang-x86_64-yasm \
             mingw-w64-clang-x86_64-glslang \
+            mingw-w64-clang-x86_64-libarchive \
             2>/dev/null || warn "Some pacman packages failed — check output above."
 
         info "MSYS2: llvm-mingw is the system clang64 environment."
