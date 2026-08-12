@@ -53,15 +53,28 @@ bool ShouldLogUnmappedAccess() {
 
 // Diagnostic: dump the guest module/offset backtrace the first time this happens, since
 // unmapped writes are otherwise silently no-op'd with no indication of which module caused it.
+//
+// CurrentPhysicalCoreIndex() silently clamps to NUM_CPU_CORES - 1 when the calling context
+// isn't a recognized core thread (unlike CurrentScheduler(), which returns null in that same
+// situation), so it can hand back a real but WRONG ArmInterface here instead of failing loudly.
+// Ask the current KThread which core it's actually pinned to instead -- that can't misattribute
+// the backtrace to the wrong thread.
 void LogUnmappedWriteBacktraceOnce(Core::System& system) {
     static std::atomic<bool> done{false};
     if (done.exchange(true, std::memory_order_relaxed)) {
         return;
     }
     auto& process = Kernel::GetCurrentProcess(system.Kernel());
-    const auto core_index = system.Kernel().CurrentPhysicalCoreIndex();
-    if (auto* arm = process.GetArmInterface(core_index)) {
+    const s32 core_index = Kernel::GetCurrentCoreId(system.Kernel());
+    if (core_index < 0 || static_cast<std::size_t>(core_index) >= Core::Hardware::NUM_CPU_CORES) {
+        LOG_ERROR(HW_Memory, "Unmapped write backtrace: no valid core for current thread (core={})",
+                  core_index);
+        return;
+    }
+    if (auto* arm = process.GetArmInterface(static_cast<std::size_t>(core_index))) {
         arm->LogBacktrace(&process);
+    } else {
+        LOG_ERROR(HW_Memory, "Unmapped write backtrace: no ARM interface for core {}", core_index);
     }
 }
 } // namespace
