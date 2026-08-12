@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -24,7 +26,7 @@ public:
     explicit EventObserver(Core::System& system, WindowSystem& window_system);
     ~EventObserver();
 
-    void TrackAppletProcess(Applet& applet);
+    void TrackAppletProcess(std::shared_ptr<Applet> applet);
     void RequestUpdate();
 
 private:

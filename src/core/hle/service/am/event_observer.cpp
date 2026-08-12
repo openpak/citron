@@ -43,14 +43,16 @@ EventObserver::~EventObserver() {
     }
 }
 
-void EventObserver::TrackAppletProcess(Applet& applet) {
+void EventObserver::TrackAppletProcess(std::shared_ptr<Applet> applet) {
     // Don't observe dummy processes.
-    if (!applet.process->IsInitialized()) {
+    if (!applet->process->IsInitialized()) {
         return;
     }
 
-    // Allocate new holder.
-    auto* holder = new ProcessHolder(applet, *applet.process);
+    // Allocate new holder. Grab the Process reference before moving the shared_ptr into the
+    // holder -- argument evaluation order is otherwise unspecified.
+    Process& process = *applet->process;
+    auto* holder = new ProcessHolder(std::move(applet), process);
     holder->SetUserData(static_cast<uintptr_t>(UserDataTag::AppletProcess));
 
     // Insert into list.

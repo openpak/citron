@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "core/hle/service/os/multi_wait_holder.h"
 
 namespace Service {
@@ -15,11 +17,11 @@ struct Applet;
 
 class ProcessHolder : public MultiWaitHolder, public Common::IntrusiveListBaseNode<ProcessHolder> {
 public:
-    explicit ProcessHolder(Applet& applet, Process& process);
+    explicit ProcessHolder(std::shared_ptr<Applet> applet, Process& process);
     ~ProcessHolder();
 
     Applet& GetApplet() const {
-        return m_applet;
+        return *m_applet;
     }
 
     Process& GetProcess() const {
@@ -27,7 +29,11 @@ public:
     }
 
 private:
-    Applet& m_applet;
+    // Co-owns the Applet (rather than just referencing it) so that WindowSystem dropping its own
+    // shared_ptr (e.g. WindowSystem::PruneTerminatedAppletsLocked erasing a terminated applet from
+    // m_applets) can't free the Applet -- and the Process it owns -- while EventObserver's thread
+    // still has this holder linked and may dereference it.
+    std::shared_ptr<Applet> m_applet;
     Process& m_process;
 };
 

@@ -109,7 +109,7 @@ void WindowSystem::TrackApplet(std::shared_ptr<Applet> applet, bool is_applicati
         m_application = applet.get();
     }
 
-    m_event_observer->TrackAppletProcess(*applet);
+    m_event_observer->TrackAppletProcess(applet);
     m_applets.emplace(applet->aruid.pid, std::move(applet));
 }
 

@@ -7,8 +7,8 @@
 
 namespace Service::AM {
 
-ProcessHolder::ProcessHolder(Applet& applet, Process& process)
-    : MultiWaitHolder(process.GetHandle()), m_applet(applet), m_process(process) {}
+ProcessHolder::ProcessHolder(std::shared_ptr<Applet> applet, Process& process)
+    : MultiWaitHolder(process.GetHandle()), m_applet(std::move(applet)), m_process(process) {}
 
 ProcessHolder::~ProcessHolder() = default;
 
