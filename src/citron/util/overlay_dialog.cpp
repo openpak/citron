@@ -131,6 +131,7 @@ void OverlayDialog::InitializeRegularTextDialog(const QString& title_text, const
     ui->stackedDialog->setCurrentIndex(0);
 
     ui->label_title->setText(title_text);
+    ui->label_title->setWordWrap(true);
     ui->label_dialog->setText(body_text);
     ui->button_cancel->setText(left_button_text);
     ui->button_ok_label->setText(right_button_text);
@@ -182,6 +183,7 @@ void OverlayDialog::InitializeRichTextDialog(const QString& title_text, const QS
     ui->stackedDialog->setCurrentIndex(1);
 
     ui->label_title_rich->setText(title_text);
+    ui->label_title_rich->setWordWrap(true);
     ui->text_browser_dialog->setText(body_text);
     ui->button_cancel_rich->setText(left_button_text);
     ui->button_ok_rich->setText(right_button_text);
