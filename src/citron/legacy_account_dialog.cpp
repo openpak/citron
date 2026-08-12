@@ -741,6 +741,10 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     setWindowTitle(tr("OpenPak Account"));
     setFixedSize(999, 598);
 
+    // Otherwise the same physical controller drives both this dialog's navigation and a
+    // running game simultaneously -- restored in the destructor.
+    hid_core.SetGuestInputSuspended(true);
+
     controller_navigation = new ControllerNavigation(hid_core, this);
     WireControllerNav();
 
@@ -1452,7 +1456,9 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
 #endif
 }
 
-OpenPakAccountDialog::~OpenPakAccountDialog() = default;
+OpenPakAccountDialog::~OpenPakAccountDialog() {
+    hid_core.SetGuestInputSuspended(false);
+}
 
 bool OpenPakAccountDialog::eventFilter(QObject* watched, QEvent* event) {
     const bool is_activate_key =

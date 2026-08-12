@@ -415,8 +415,12 @@ void NPad::RequestPadStateUpdate(u64 aruid, Core::HID::NpadIdType npad_id) {
 
     auto& pad_entry = controller.npad_pad_state;
     auto& trigger_entry = controller.npad_trigger_state;
-    const auto button_state = controller.device->GetNpadButtons();
-    const auto stick_state = controller.device->GetSticks();
+    // A citron-side overlay reading the same controller (e.g. the OpenPak Account dialog
+    // during gameplay) sets this so its navigation doesn't also drive the game underneath it.
+    const auto button_state = hid_core.IsGuestInputSuspended() ? Core::HID::NpadButtonState{}
+                                                                : controller.device->GetNpadButtons();
+    const auto stick_state = hid_core.IsGuestInputSuspended() ? Core::HID::AnalogSticks{}
+                                                               : controller.device->GetSticks();
 
     using btn = Core::HID::NpadButton;
     pad_entry.npad_buttons.raw = btn::None;

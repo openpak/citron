@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <optional>
 
@@ -65,6 +66,17 @@ public:
     /// Removes all callbacks from input common
     void UnloadInputDevices();
 
+    /// Blocks the guest from seeing new NPad button/stick state (used while a citron-side
+    /// overlay like the OpenPak Account dialog is reading the same physical controller during
+    /// gameplay, so it doesn't also drive the game underneath it) without touching input
+    /// consumers that read the controller directly, like ControllerNavigation or hotkeys.
+    void SetGuestInputSuspended(bool suspended) {
+        guest_input_suspended = suspended;
+    }
+    bool IsGuestInputSuspended() const {
+        return guest_input_suspended;
+    }
+
     /// Number of emulated controllers
     static constexpr std::size_t available_controllers{10};
 
@@ -83,6 +95,7 @@ private:
     std::optional<EmulatedDevices> devices;
     NpadStyleTag supported_style_tag{NpadStyleSet::All};
     NpadIdType last_active_controller{NpadIdType::Handheld};
+    std::atomic<bool> guest_input_suspended{false};
 };
 
 } // namespace Core::HID
