@@ -737,6 +737,10 @@ set(FFmpeg_COMPONENTS
 if (UNIX AND NOT APPLE AND NOT ANDROID)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBVA libva)
+    # For the "Reactive" carousel backdrop's system-audio loopback capture: SDL's audio device
+    # enumeration only sees whatever backend it locked onto at first init (citron's own audio sink
+    # picks that), so PulseAudio's monitor sources need talking to directly instead.
+    pkg_check_modules(LIBPULSE libpulse)
 endif()
 if (NOT CITRON_USE_BUNDLED_FFMPEG)
     # Use system installed FFmpeg

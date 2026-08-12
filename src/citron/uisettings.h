@@ -169,7 +169,7 @@ namespace UISettings {
                                     // 0 = top-right, 1 = top-left, 2 = bottom-right, 3 = bottom-left. See OpenPakToast::Corner.
                                     Setting<int> legacy_notification_corner{linkage, 0, "legacy/notificationCorner", Category::Ui};
 
-                                    // 0 = Gradient, 1 = Wave, 2 = None, 3 = Image. See CinematicCarousel::BackdropTheme.
+                                    // 0 = Gradient, 1 = Wave, 2 = None, 3 = Reactive. See CinematicCarousel::BackdropTheme.
                                     Setting<int> carousel_backdrop_theme{linkage, 0, "carouselBackdropTheme", Category::Ui};
                                     // Static image or GIF shown behind the carousel when carousel_backdrop_theme == Image.
                                     Setting<std::string> carousel_backdrop_image_path{linkage, "", "carousel_backdrop_image_path", Category::Ui};

@@ -34,6 +34,8 @@ add_library(audio_core STATIC
     audio_system_manager.h
     audio_snoop_manager.cpp
     audio_snoop_manager.h
+    audio_visualizer_tap.cpp
+    audio_visualizer_tap.h
     common/audio_helpers.h
     common/audio_renderer_parameter.h
     common/common.h

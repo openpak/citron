@@ -1216,6 +1216,9 @@ GameList::GameList(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
     case 2:
         carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::None);
         break;
+    case 3:
+        carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Reactive);
+        break;
     default:
         carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Gradient);
         break;
@@ -1231,6 +1234,9 @@ GameList::GameList(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
             break;
         case 2:
             carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::None);
+            break;
+        case 3:
+            carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Reactive);
             break;
         default:
             carousel_view->SetBackdropTheme(CinematicCarousel::BackdropTheme::Gradient);

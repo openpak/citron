@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "audio_core/audio_core.h"
+#include "audio_core/audio_visualizer_tap.h"
 #include "audio_core/common/common.h"
 #include "audio_core/sink/sink_stream.h"
 #include "common/common_types.h"
@@ -268,6 +269,11 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
 
     std::memcpy(&last_frame[0], &output_buffer[(frames_written - 1) * frame_size],
                 frame_size_bytes);
+
+    if (type == StreamType::Render) {
+        AudioVisualizerTap::Feed(output_buffer.subspan(0, frames_written * frame_size),
+                                 static_cast<u32>(num_channels), TargetSampleRate);
+    }
 
     {
         std::scoped_lock lk{sample_count_lock};

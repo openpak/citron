@@ -16,7 +16,9 @@
 #include <QTimer>
 #include <QToolButton>
 
+#include "audio_core/audio_visualizer_tap.h"
 #include "citron/ui/game_carousel_view.h"
+#include "citron/ui/system_audio_loopback.h"
 #include "citron/ui/legacy_profile_chip.h"
 #include "citron/ui/legacy_status_cluster.h"
 #include "citron/game_list_p.h"
@@ -33,7 +35,8 @@ namespace {
 constexpr int kBackdropPickerRowH = 40;
 constexpr int kBackdropPickerWidth = 168;
 const QStringList& BackdropOptionLabels() {
-    static const QStringList labels{QObject::tr("Gradient"), QObject::tr("Wave"), QObject::tr("None")};
+    static const QStringList labels{QObject::tr("Gradient"), QObject::tr("Wave"), QObject::tr("None"),
+                                    QObject::tr("Reactive")};
     return labels;
 }
 
@@ -260,6 +263,11 @@ QModelIndex CinematicCarousel::currentIndex() const {
 
 void CinematicCarousel::SetBackdropTheme(BackdropTheme theme) {
     m_backdrop_theme = theme;
+    if (theme == BackdropTheme::Reactive) {
+        SystemAudioLoopback::Start();
+    } else {
+        SystemAudioLoopback::Stop();
+    }
     update();
 }
 
@@ -410,6 +418,62 @@ void CinematicCarousel::DrawBackdrop(QPainter& p, const QRectF& bg_rect) const {
         return;
     }
 
+    if (m_backdrop_theme == BackdropTheme::Reactive) {
+        const auto bands = AudioCore::AudioVisualizerTap::GetBands();
+        const qreal bass = bands.bass;
+        const qreal mid = bands.mid;
+        const qreal treble = bands.treble;
+        const qreal t = m_pulse_tick * 0.032;
+        const qreal core_hue = 355.0 - treble * 140.0;
+
+        const auto hsl = [](qreal h, qreal s, qreal l, qreal a) {
+            qreal hf = std::fmod(h, 360.0);
+            if (hf < 0.0) hf += 360.0;
+            return QColor::fromHslF(hf / 360.0, std::clamp(s, 0.0, 1.0), std::clamp(l, 0.0, 1.0),
+                                    std::clamp(a, 0.0, 1.0));
+        };
+
+        // Corner ink blooms, sharing the ring's hue (small per-corner offset only).
+        p.save();
+        p.setCompositionMode(QPainter::CompositionMode_Plus);
+        const QPointF corners[4] = {bg_rect.topLeft(), bg_rect.topRight(), bg_rect.bottomLeft(),
+                                    bg_rect.bottomRight()};
+        const qreal reach = std::min(bg_rect.width(), bg_rect.height()) * (0.30 + bass * 0.22);
+        for (int i = 0; i < 4; ++i) {
+            const qreal breathe = 0.55 + 0.45 * std::sin(t * 1.1 + i * 1.7);
+            const qreal r = std::max(2.0, reach * (0.7 + bass * 0.5) * breathe);
+            const qreal h = core_hue + (i - 1.5) * 8.0;
+            QRadialGradient grad(corners[i], r);
+            grad.setColorAt(0.0, hsl(h, 0.82, 0.56, 0.20 + bass * 0.20));
+            grad.setColorAt(1.0, hsl(h, 0.82, 0.56, 0.0));
+            p.setBrush(grad);
+            p.setPen(Qt::NoPen);
+            p.drawEllipse(corners[i], r, r);
+        }
+        p.restore();
+
+        // Concentric shock rings, pushed outward by bass with mid-driven wobble.
+        const QPointF center = bg_rect.center();
+        for (int i = 0; i < 5; ++i) {
+            const qreal wob = std::sin(t * 2.0 + i * 1.3) * 10.0 * (0.3 + mid);
+            const qreal r = std::max(2.0, 26.0 + i * (36.0 + bass * 60.0) + wob);
+            const qreal h = core_hue - i * 6.0;
+            p.setPen(QPen(hsl(h, 0.78, 0.52 + treble * 0.18, std::max(0.08, 0.55 - i * 0.09)),
+                         2.0 + bass * 7.0));
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(center, r, r);
+        }
+
+        const qreal core_r = 10.0 + bass * 34.0;
+        QRadialGradient core_grad(center, core_r * 2.2);
+        core_grad.setColorAt(0.0, hsl(core_hue, 0.90, 0.62, 1.0));
+        core_grad.setColorAt(1.0, hsl(core_hue, 0.90, 0.62, 0.0));
+        p.setBrush(core_grad);
+        p.setPen(Qt::NoPen);
+        p.drawEllipse(center, core_r * 2.2, core_r * 2.2);
+        return;
+    }
+
     QColor wash = acc;
     wash.setAlpha(14);
     p.fillRect(bg_rect, wash);
@@ -492,6 +556,7 @@ void CinematicCarousel::paintEvent(QPaintEvent* event) {
     }
 
     const bool animated = m_backdrop_theme == BackdropTheme::Wave ||
+                          m_backdrop_theme == BackdropTheme::Reactive ||
                           (m_backdrop_movie && m_backdrop_movie->isValid() &&
                            m_backdrop_movie->frameCount() != 1);
     const qint64 stale_after = animated ? 1 : 1000000;

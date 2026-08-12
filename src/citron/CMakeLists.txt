@@ -330,6 +330,8 @@ add_executable(citron
     ui/game_grid_view.h
     ui/game_carousel_view.cpp
     ui/game_carousel_view.h
+    ui/system_audio_loopback.cpp
+    ui/system_audio_loopback.h
     ui/population_bar_chart.cpp
     ui/population_bar_chart.h
     ui/legacy_profile_chip.cpp
@@ -600,6 +602,13 @@ target_link_libraries(citron PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (TARGET LibArchive::LibArchive)
     target_link_libraries(citron PRIVATE LibArchive::LibArchive)
     target_compile_definitions(citron PRIVATE CITRON_ENABLE_LIBARCHIVE)
+endif()
+
+# PulseAudio, for the "Reactive" carousel backdrop's system-audio loopback capture (Linux only).
+if (LIBPULSE_FOUND)
+    target_include_directories(citron PRIVATE ${LIBPULSE_INCLUDE_DIRS})
+    target_link_libraries(citron PRIVATE ${LIBPULSE_LIBRARIES})
+    target_compile_definitions(citron PRIVATE CITRON_ENABLE_PULSE_LOOPBACK)
 endif()
 
 target_link_libraries(citron PRIVATE Vulkan::Headers)

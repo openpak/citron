@@ -54,7 +54,7 @@ class CinematicCarousel : public QWidget {
     Q_PROPERTY(qreal focalIndex READ focalIndex WRITE setFocalIndex)
 
 public:
-    enum class BackdropTheme { Gradient, Wave, None };
+    enum class BackdropTheme { Gradient, Wave, None, Reactive };
 
     explicit CinematicCarousel(QWidget* parent = nullptr);
 
