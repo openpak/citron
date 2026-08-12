@@ -90,6 +90,7 @@ private:
 
     // Host state tracking
     Common::Event m_stopped{};
+    bool m_loop_started{};
     std::vector<std::jthread> m_threads{};
     std::stop_source m_stop_source{};
 };

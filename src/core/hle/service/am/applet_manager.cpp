@@ -244,16 +244,20 @@ void AppletManager::CreateAndInsertByFrontendAppletParameters(
 }
 
 void AppletManager::RequestExit() {
-    std::scoped_lock lk{m_lock};
-    if (m_window_system) {
-        m_window_system->OnExitRequested();
+    std::unique_lock lk{m_lock};
+    auto* const window = m_window_system;
+    lk.unlock();
+    if (window) {
+        window->OnExitRequested();
     }
 }
 
 void AppletManager::OperationModeChanged() {
-    std::scoped_lock lk{m_lock};
-    if (m_window_system) {
-        m_window_system->OnOperationModeChanged();
+    std::unique_lock lk{m_lock};
+    auto* const window = m_window_system;
+    lk.unlock();
+    if (window) {
+        window->OnOperationModeChanged();
     }
 }
 
@@ -271,8 +275,17 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
         return;
     }
 
+    // Snapshot what we need and release the lock before the rest of this function runs --
+    // it launches a whole process and can run for a while, and holding m_lock across all of
+    // that meant an abnormal termination anywhere in here (e.g. mid-shutdown) orphaned the
+    // mutex forever, since nothing else could ever lock it again.
+    WindowSystem* const window = m_window_system;
+    const auto params = m_pending_parameters;
+    auto pending_process = std::move(m_pending_process);
+    lk.unlock();
+
     if (Settings::values.qlaunch_enabled.GetValue() && m_system.IsQLaunchSession() &&
-        m_window_system->GetOverlayDisplayApplet() == nullptr) {
+        window->GetOverlayDisplayApplet() == nullptr) {
         if (auto overlay_process =
                 CreateProcess(m_system, static_cast<u64>(AppletProgramId::OverlayDisplay), 0, 0)) {
             auto overlay_applet =
@@ -284,15 +297,14 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
             overlay_applet->window_visible = true;
             overlay_applet->home_button_short_pressed_blocked = false;
             overlay_applet->home_button_long_pressed_blocked = false;
-            m_window_system->TrackApplet(overlay_applet, false);
+            window->TrackApplet(overlay_applet, false);
             overlay_applet->process->Run();
             LOG_INFO(Service_AM, "called, Overlay applet launched before application (initially "
                                  "hidden, watching home button)");
         }
     }
 
-    const auto& params = m_pending_parameters;
-    auto applet = std::make_shared<Applet>(m_system, std::move(m_pending_process),
+    auto applet = std::make_shared<Applet>(m_system, std::move(pending_process),
                                            params.applet_id == AppletId::Application);
 
     applet->program_id = params.program_id;
@@ -385,11 +397,11 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
     if (applet->applet_id == AppletId::QLaunch) {
         applet->lifecycle_manager.SetFocusHandlingMode(false);
         applet->lifecycle_manager.SetOutOfFocusSuspendingEnabled(false);
-        m_window_system->TrackApplet(applet, false);
-        m_window_system->RequestHomeMenuToGetForeground();
+        window->TrackApplet(applet, false);
+        window->RequestHomeMenuToGetForeground();
     } else {
-        m_window_system->TrackApplet(applet, true);
-        m_window_system->RequestApplicationToGetForeground();
+        window->TrackApplet(applet, true);
+        window->RequestApplicationToGetForeground();
     }
 
     applet->process->Run();
@@ -397,8 +409,10 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
 
 void AppletManager::SetHomeMenuRequestCallback(std::function<void()> callback) {
     std::unique_lock lk{m_lock};
-    if (m_window_system) {
-        m_window_system->SetHomeMenuRequestCallback(std::move(callback));
+    auto* const window = m_window_system;
+    lk.unlock();
+    if (window) {
+        window->SetHomeMenuRequestCallback(std::move(callback));
     }
 }
 

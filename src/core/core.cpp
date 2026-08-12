@@ -462,8 +462,11 @@ struct System::Impl {
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
 
-        kernel.SuspendEmulation(true);
+        // CloseServices() needs each service's own thread to still be schedulable to notice
+        // the stop request and exit -- SuspendEmulation(true) suspends every registered
+        // KProcess's threads, including each service's dedicated one, so it must come after.
         kernel.CloseServices();
+        kernel.SuspendEmulation(true);
         kernel.ShutdownCores();
 
         // Reset the cheat engine BEFORE the service manager is torn down.

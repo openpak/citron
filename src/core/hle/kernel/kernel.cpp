@@ -64,6 +64,8 @@ struct KernelCore::Impl {
     }
 
     void Initialize(KernelCore& kernel) {
+        rejecting_new_servers.store(false, std::memory_order_relaxed);
+
         hardware_timer = std::make_unique<Kernel::KHardwareTimer>(kernel);
         hardware_timer->Initialize();
 
@@ -186,9 +188,15 @@ struct KernelCore::Impl {
     }
 
     void CloseServices() {
-        // Ensures all servers gracefully shutdown.
-        std::scoped_lock lk{server_lock};
-        server_managers.clear();
+        // Block new registrations first, then destroy outside the lock so a still-starting
+        // RunServer() call can't wedge its core waiting on server_lock while we wait on it.
+        rejecting_new_servers.store(true, std::memory_order_relaxed);
+        std::vector<std::unique_ptr<Service::ServerManager>> to_destroy;
+        {
+            std::scoped_lock lk{server_lock};
+            to_destroy = std::move(server_managers);
+        }
+        to_destroy.clear();
     }
 
     void InitializePhysicalCores() {
@@ -801,6 +809,7 @@ struct KernelCore::Impl {
 
     std::mutex server_lock;
     std::vector<std::unique_ptr<Service::ServerManager>> server_managers;
+    std::atomic_bool rejecting_new_servers{};
 
     std::array<std::unique_ptr<Kernel::PhysicalCore>, Core::Hardware::NUM_CPU_CORES> cores;
 
@@ -1007,7 +1016,7 @@ void KernelCore::RunServer(std::unique_ptr<Service::ServerManager>&& server_mana
 
     {
         std::scoped_lock lk{impl->server_lock};
-        if (impl->is_shutting_down) {
+        if (impl->rejecting_new_servers) {
             return;
         }
 

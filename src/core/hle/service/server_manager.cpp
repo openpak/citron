@@ -88,8 +88,12 @@ ServerManager::~ServerManager() {
     m_stop_source.request_stop();
     m_wakeup_event->Signal();
 
-    // Wait for processing to stop.
-    m_stopped.Wait();
+    // LoopProcess() is the only thing that signals m_stopped (via its own scope exit); a
+    // manager whose RunServer() call got rejected (already shutting down) never called it, so
+    // waiting here would block forever.
+    if (m_loop_started) {
+        m_stopped.Wait();
+    }
     m_threads.clear();
 
     // Clean up ports.
@@ -243,6 +247,7 @@ void ServerManager::StartAdditionalHostThreads(const char* name, size_t num_thre
 }
 
 Result ServerManager::LoopProcess() {
+    m_loop_started = true;
     SCOPE_EXIT {
         m_stopped.Set();
     };
