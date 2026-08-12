@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <map>
 #include <QKeySequence>
 #include <QString>
@@ -49,6 +50,8 @@ private:
 
     bool is_enabled{};
     bool active{};
+    bool matched_last_poll{};
+    std::chrono::steady_clock::time_point release_started{};
     int callback_key{};
     ControllerButtonSequence button_sequence{};
     std::string name{};

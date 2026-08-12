@@ -462,6 +462,7 @@ private:
     OpenPakController* legacy_controller = nullptr;
     OpenPakToast* legacy_toast = nullptr;
     QDialog* legacy_signin_dialog = nullptr;
+    OpenPakAccountDialog* legacy_account_dialog_instance = nullptr;
     OverlayDialog* shutdown_dialog{};
     PerformanceOverlay* performance_overlay{};
     MultiplayerRoomOverlay* multiplayer_room_overlay{};

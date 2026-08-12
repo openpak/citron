@@ -2,17 +2,25 @@
 // SPDX-FileCopyrightText: 2026 Citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QModelIndex>
 #include <QShortcut>
 #include <QStandardItemModel>
 #include <QTimer>
+#include <QVBoxLayout>
 
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
@@ -28,10 +36,39 @@ constexpr int name_column = 0;
 constexpr int hotkey_column = 1;
 constexpr int controller_column = 2;
 
+namespace {
+// Order matches ConfigureHotkeys::GetButtonCombinationName and ControllerShortcut::SetKey's
+// token names -- keep both in sync with this list.
+struct ButtonEntry {
+    const char* display;
+    const char* token;
+};
+constexpr std::array<ButtonEntry, 18> kControllerButtons{{
+    {QT_TRANSLATE_NOOP("Hotkeys", "Home"), "Home"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "Screenshot"), "Screenshot"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "A"), "A"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "B"), "B"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "X"), "X"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "Y"), "Y"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "L"), "L"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "R"), "R"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "ZL"), "ZL"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "ZR"), "ZR"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "D-Pad Left"), "Dpad_Left"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "D-Pad Right"), "Dpad_Right"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "D-Pad Up"), "Dpad_Up"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "D-Pad Down"), "Dpad_Down"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "Left Stick Click"), "Left_Stick"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "Right Stick Click"), "Right_Stick"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "Minus"), "Minus"},
+    {QT_TRANSLATE_NOOP("Hotkeys", "Plus"), "Plus"},
+}};
+} // namespace
+
 ConfigureHotkeys::ConfigureHotkeys(HotkeyRegistry& registry_, Core::HID::HIDCore& hid_core,
                                    QWidget* parent)
     : QWidget(parent), ui(std::make_unique<Ui::ConfigureHotkeys>()), registry(registry_),
-      controller(new Core::HID::EmulatedController(Core::HID::NpadIdType::Player1)),
+      controller(hid_core.GetEmulatedController(Core::HID::NpadIdType::Player1)),
       timeout_timer(std::make_unique<QTimer>()), poll_timer(std::make_unique<QTimer>()) {
     ui->setupUi(this);
     setFocusPolicy(Qt::ClickFocus);
@@ -346,7 +383,7 @@ void ConfigureHotkeys::Configure(QModelIndex index) {
 
     // Controller configuration is selected
     if (index.column() == controller_column) {
-        ConfigureController(index);
+        ShowControllerComboDialog(index);
         return;
     }
 
@@ -411,6 +448,77 @@ void ConfigureHotkeys::ConfigureController(QModelIndex index) {
     poll_timer->start(100);     // Check for new inputs every 100ms
     // We need to disable configuration to be able to read npad buttons
     controller->DisableConfiguration();
+}
+
+void ConfigureHotkeys::ShowControllerComboDialog(QModelIndex index) {
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Set Controller Hotkey"));
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* label = new QLabel(tr("Choose two different buttons for this combo:"), &dialog);
+    layout->addWidget(label);
+
+    auto* combo_row = new QHBoxLayout;
+    auto* combo_a = new QComboBox(&dialog);
+    auto* plus_label = new QLabel(QStringLiteral("+"), &dialog);
+    auto* combo_b = new QComboBox(&dialog);
+    for (const auto& entry : kControllerButtons) {
+        const QString display =
+            QCoreApplication::translate("Hotkeys", entry.display);
+        combo_a->addItem(display, QString::fromLatin1(entry.token));
+        combo_b->addItem(display, QString::fromLatin1(entry.token));
+    }
+    combo_b->setCurrentIndex(1);
+    combo_row->addWidget(combo_a);
+    combo_row->addWidget(plus_label);
+    combo_row->addWidget(combo_b);
+    layout->addLayout(combo_row);
+
+    auto* button_box =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    auto* ok_button = button_box->button(QDialogButtonBox::Ok);
+    layout->addWidget(button_box);
+
+    const auto update_ok_enabled = [combo_a, combo_b, ok_button] {
+        ok_button->setEnabled(combo_a->currentData() != combo_b->currentData());
+    };
+    connect(combo_a, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, update_ok_enabled);
+    connect(combo_b, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, update_ok_enabled);
+    update_ok_enabled();
+
+    connect(button_box, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(button_box, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    // Always emit tokens in kControllerButtons order regardless of which combo box the user
+    // picked each button in, so the stored string matches GetButtonCombinationName's canonical
+    // order -- otherwise "X+Home" and "Home+X" would be treated as different combos even though
+    // ControllerShortcut::SetKey parses them identically.
+    const auto index_of = [](const QString& token) {
+        const auto it = std::ranges::find_if(kControllerButtons, [&](const ButtonEntry& entry) {
+            return token == QString::fromLatin1(entry.token);
+        });
+        return static_cast<std::size_t>(it - kControllerButtons.begin());
+    };
+    QString token_a = combo_a->currentData().toString();
+    QString token_b = combo_b->currentData().toString();
+    if (index_of(token_b) < index_of(token_a)) {
+        std::swap(token_a, token_b);
+    }
+    const QString combo_string = token_a + QStringLiteral("+") + token_b;
+
+    const auto previous_key = model->data(index);
+    const auto [key_sequence_used, used_action] = IsUsedControllerKey(combo_string);
+    if (key_sequence_used && combo_string != previous_key.toString()) {
+        QMessageBox::warning(
+            this, tr("Conflicting Button Sequence"),
+            tr("The entered button sequence is already assigned to: %1").arg(used_action));
+        return;
+    }
+    model->setData(index, combo_string);
 }
 
 void ConfigureHotkeys::SetPollingResult(const bool cancel) {

@@ -2025,7 +2025,16 @@ void GMainWindow::ConnectMenuEvents() {
             legacy_controller->SignIn();
             return;
         }
-        OpenPakAccountDialog(legacy_controller, *system, this).exec();
+        // Pressing the hotkey again while the dialog is already open closes it instead of
+        // stacking another one on top.
+        if (legacy_account_dialog_instance) {
+            legacy_account_dialog_instance->close();
+            return;
+        }
+        OpenPakAccountDialog dialog(legacy_controller, *system, this);
+        legacy_account_dialog_instance = &dialog;
+        dialog.exec();
+        legacy_account_dialog_instance = nullptr;
     });
     connect(legacy_toast, &OpenPakToast::clicked, this, [this](OpenPakToast::Kind kind) {
         if (kind != OpenPakToast::Kind::Request || !Common::OpenPakAccount::IsLinked()) {

@@ -54,6 +54,7 @@ private:
 
     void Configure(QModelIndex index);
     void ConfigureController(QModelIndex index);
+    void ShowControllerComboDialog(QModelIndex index);
     std::pair<bool, QString> IsUsedKey(QKeySequence key_sequence) const;
     std::pair<bool, QString> IsUsedControllerKey(const QString& key_sequence) const;
 
