@@ -162,6 +162,7 @@ public:
     bool OpenPakByamlSkipped(u64 title_id) const;
     bool OpenPakByamlDownloadEnabled() const;
     void InstallSsbuSkylineMods(u64 program_id);
+    void InstallMk8dCountryFlag(u64 program_id);
     bool IsConfiguring() const {
         return m_is_configuring;
     }
@@ -500,14 +501,29 @@ private:
     bool OpenPakByamlDownload(u64 title_id);
     void RunOpenPakByamlDownloadWithProgress(u64 title_id);
 
+    struct SsbuModInstallFailure {
+        std::string display_name;
+        std::string reason;
+        std::string release_page_url;
+    };
     struct SsbuModInstallOutcome {
         std::vector<std::string> installed;
-        std::vector<std::pair<std::string, std::string>> failed; // {display_name, reason}
+        std::vector<SsbuModInstallFailure> failed;
         bool backup_made = false;
         std::filesystem::path backup_path;
     };
     SsbuModInstallOutcome InstallSsbuSkylineModsBlocking(u64 program_id);
     void RunSsbuSkylineModsInstallWithProgress(u64 program_id);
+
+    struct Mk8dCountryFlagOutcome {
+        bool success = false;
+        std::string error;
+        std::string release_page_url;
+        std::string detected_version;
+    };
+    Mk8dCountryFlagOutcome InstallMk8dCountryFlagBlocking(u64 program_id,
+                                                          std::string country_code);
+    void RunMk8dCountryFlagInstallWithProgress(u64 program_id, const std::string& country_code);
 
     bool user_flag_cmd_line = false;
     bool auto_paused = false;

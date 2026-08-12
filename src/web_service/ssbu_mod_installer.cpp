@@ -95,6 +95,8 @@ std::pair<std::string, std::string> SplitUrl(const std::string& url) {
 ModFetchResult FetchOne(const ModRepoSpec& spec) {
     ModFetchResult result{};
     result.display_name = spec.display_name;
+    result.release_page_url =
+        std::string{"https://github.com/"} + spec.owner + "/" + spec.repo + "/releases/latest";
 
     httplib::Client api{"https://api.github.com"};
     api.set_connection_timeout(15);
@@ -140,11 +142,13 @@ ModFetchResult FetchOne(const ModRepoSpec& spec) {
 
     std::string download_url;
     std::string asset_name;
+    std::size_t expected_size = 0;
     for (const auto& asset : json.value("assets", nlohmann::json::array())) {
         const std::string name = asset.value("name", "");
         if (spec.matches(name)) {
             download_url = asset.value("browser_download_url", "");
             asset_name = name;
+            expected_size = asset.value("size", std::size_t{0});
             break;
         }
     }
@@ -160,9 +164,12 @@ ModFetchResult FetchOne(const ModRepoSpec& spec) {
         return result;
     }
 
-    // The signed redirect target has intermittently 403'd on the first attempt; retry.
+    // The signed redirect target intermittently 403s or truncates mid-transfer, worse for
+    // larger assets; retry with backoff and verify against the size GitHub already told us.
     httplib::Result dl_result;
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    bool size_ok = false;
+    constexpr int kMaxAttempts = 5;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         httplib::Client dl{dl_host};
         dl.set_connection_timeout(30);
         dl.set_read_timeout(30);
@@ -170,19 +177,28 @@ ModFetchResult FetchOne(const ModRepoSpec& spec) {
         ApplyCaCertPath(dl);
         dl_result =
             dl.Get(dl_path, httplib::Headers{{"User-Agent", "citron"}, {"Accept", "*/*"}});
-        if (dl_result && dl_result->status == 200) {
+        size_ok = dl_result && (expected_size == 0 || dl_result->body.size() == expected_size);
+        if (dl_result && dl_result->status == 200 && size_ok) {
             break;
         }
-        if (attempt < 2) {
-            LOG_WARNING(WebService, "SSBU mod fetch ({}): attempt {} failed (HTTP {}), retrying",
-                       spec.display_name, attempt + 1, dl_result ? dl_result->status : 0);
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (attempt < kMaxAttempts - 1) {
+            LOG_WARNING(WebService,
+                       "SSBU mod fetch ({}): attempt {} failed (HTTP {}, {} of {} bytes), retrying",
+                       spec.display_name, attempt + 1, dl_result ? dl_result->status : 0,
+                       dl_result ? dl_result->body.size() : 0, expected_size);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000 << attempt));
         }
     }
 
     if (!dl_result || dl_result->status != 200) {
         result.error = "failed to download asset (HTTP " +
                        std::to_string(dl_result ? dl_result->status : 0) + ")";
+        LOG_ERROR(WebService, "SSBU mod fetch ({}): {}", spec.display_name, result.error);
+        return result;
+    }
+    if (!size_ok) {
+        result.error = "downloaded asset was truncated (" + std::to_string(dl_result->body.size()) +
+                       " of " + std::to_string(expected_size) + " bytes)";
         LOG_ERROR(WebService, "SSBU mod fetch ({}): {}", spec.display_name, result.error);
         return result;
     }

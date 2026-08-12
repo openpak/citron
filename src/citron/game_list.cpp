@@ -89,6 +89,7 @@
 #include "citron/util/confetti.h"
 #include "citron/util/controller_navigation.h"
 #include "citron/util/cup_shuffle_widget.h"
+#include "web_service/mk8d_country_flags.h"
 #include "web_service/ssbu_mod_installer.h"
 #include "citron/util/dice_widget.h"
 #include "citron/util/plinko_widget.h"
@@ -3312,6 +3313,10 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
     if (main_window && WebService::SkylineMods::IsSsbuTitleId(program_id)) {
         install_ssbu_mods = context_menu.addAction(tr("Install/Update Skyline Mods"));
     }
+    QAction* install_mk8d_country_flag = nullptr;
+    if (main_window && WebService::Mk8dCountryFlags::IsMk8dTitleId(program_id)) {
+        install_mk8d_country_flag = context_menu.addAction(tr("Set Country Flag..."));
+    }
     QAction* start_game = context_menu.addAction(tr("Start Game"));
     QAction* start_game_global =
         context_menu.addAction(tr("Start Game without Custom Configuration"));
@@ -3319,10 +3324,7 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
     QAction* open_save_location = context_menu.addAction(tr("Open Save Data Location"));
     QAction* open_nand_location = context_menu.addAction(tr("Open NAND Location"));
     QAction* open_file_location = context_menu.addAction(tr("Open File Location"));
-    QAction* open_bcat_location = nullptr;
-    if (main_window && main_window->OpenPakByamlRequired(program_id)) {
-        open_bcat_location = context_menu.addAction(tr("Open BCAT Location"));
-    }
+    QAction* open_bcat_location = context_menu.addAction(tr("Open BCAT Location"));
     QAction* set_custom_save_path = context_menu.addAction(tr("Set Custom Save Path"));
     QAction* remove_custom_save_path = context_menu.addAction(tr("Revert to NAND Save Path"));
     QAction* disable_mirroring = context_menu.addAction(tr("Disable Mirroring"));
@@ -3636,6 +3638,13 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
         connect(install_ssbu_mods, &QAction::triggered, [this, program_id]() {
             if (main_window) {
                 main_window->InstallSsbuSkylineMods(program_id);
+            }
+        });
+    }
+    if (install_mk8d_country_flag) {
+        connect(install_mk8d_country_flag, &QAction::triggered, [this, program_id]() {
+            if (main_window) {
+                main_window->InstallMk8dCountryFlag(program_id);
             }
         });
     }

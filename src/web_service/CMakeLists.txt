@@ -4,6 +4,8 @@
 add_library(web_service STATIC
     announce_room_json.cpp
     announce_room_json.h
+    mk8d_country_flags.cpp
+    mk8d_country_flags.h
     legacy_api.cpp
     legacy_api.h
     population_scraper_client.cpp

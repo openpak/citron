@@ -241,13 +241,17 @@ void ControllerShortcut::ControllerUpdateEvent(Core::HID::ControllerTriggerType 
     const u64 player_home_buttons =
         emulated_controller->GetHomeButtons().raw & button_sequence.home.raw;
 
-    if (player_npad_buttons == button_sequence.npad.raw &&
-        player_capture_buttons == button_sequence.capture.raw &&
-        player_home_buttons == button_sequence.home.raw && !active) {
-        // Force user to press the home or capture button again
-        active = true;
-        emit Activated();
+    const bool matches = player_npad_buttons == button_sequence.npad.raw &&
+                        player_capture_buttons == button_sequence.capture.raw &&
+                        player_home_buttons == button_sequence.home.raw;
+
+    if (!matches) {
+        // Released -- allow the next full press to fire again.
+        active = false;
         return;
     }
-    active = false;
+    if (!active) {
+        active = true;
+        emit Activated();
+    }
 }

@@ -32,6 +32,7 @@ struct ModFetchResult {
     std::string filename;
     std::vector<u8> data;
     std::string error;
+    std::string release_page_url; // For a manual-download link on failure.
 };
 
 // Per-repo failures are recorded in ModFetchResult rather than thrown; the loop always
