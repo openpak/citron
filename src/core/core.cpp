@@ -455,17 +455,21 @@ struct System::Impl {
 
         if (gpu_core) {
             gpu_core->NotifyShutdown();
-            gpu_core->ShutdownThread();
         }
 
         stop_event.request_stop();
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
 
-        // CloseServices() needs each service's own thread to still be schedulable to notice
-        // the stop request and exit -- SuspendEmulation(true) suspends every registered
-        // KProcess's threads, including each service's dedicated one, so it must come after.
+        // CloseServices() needs each service's own thread to still be schedulable -- and, for
+        // anything touching nvdrv/vi/nvnflinger, the GPU thread still alive -- to notice the
+        // stop request and exit. SuspendEmulation(true) suspends every registered KProcess's
+        // threads (including each service's dedicated one) and ShutdownThread() tears down the
+        // GPU thread, so both have to come after.
         kernel.CloseServices();
+        if (gpu_core) {
+            gpu_core->ShutdownThread();
+        }
         kernel.SuspendEmulation(true);
         kernel.ShutdownCores();
 
