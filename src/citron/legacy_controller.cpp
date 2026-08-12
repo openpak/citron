@@ -179,6 +179,7 @@ void OpenPakController::SignOut() {
     Common::OpenPakAccount::Clear();
     Common::OpenPakFriends::Set({});
     last_known_status.clear();
+    offline_streak.clear();
     emit AccountUnlinked();
 }
 
@@ -281,22 +282,33 @@ void OpenPakController::PollFriends() {
 
                 std::map<u64, s32> current_status;
                 for (const auto& entry : list.friends) {
-                    current_status[entry.pid] = entry.presence_status;
-
                     const auto it = last_known_status.find(entry.pid);
-                    const bool was_offline = it == last_known_status.end() || it->second == 0;
                     const bool was_online = it != last_known_status.end() && it->second != 0;
-                    if (suppress_toasts) {
-                        continue;
+
+                    // A status of 0 on a single poll can be a mid-transition blip on the
+                    // server (e.g. switching presence when joining a match together) rather
+                    // than a real disconnect. Require it to repeat on the next poll (~20s)
+                    // before treating the friend as actually offline, so a one-poll blip can't
+                    // fire a false "went offline" or the false "came online" right after it.
+                    if (entry.presence_status == 0 && was_online) {
+                        if (++offline_streak[entry.pid] < 2) {
+                            current_status[entry.pid] = it->second;
+                            continue;
+                        }
+                        if (!suppress_toasts) {
+                            emit FriendWentOffline(entry.pid, QString::fromStdString(entry.name),
+                                                   QString::fromStdString(entry.image_base64));
+                        }
+                    } else {
+                        offline_streak.erase(entry.pid);
+                        const bool was_offline = it == last_known_status.end() || it->second == 0;
+                        if (!suppress_toasts && was_offline && entry.presence_status != 0) {
+                            emit FriendCameOnline(entry.pid, QString::fromStdString(entry.name),
+                                                  ResolveGameName(entry.app_id, entry.app_name),
+                                                  QString::fromStdString(entry.image_base64));
+                        }
                     }
-                    if (was_offline && entry.presence_status != 0) {
-                        emit FriendCameOnline(entry.pid, QString::fromStdString(entry.name),
-                                              ResolveGameName(entry.app_id, entry.app_name),
-                                              QString::fromStdString(entry.image_base64));
-                    } else if (was_online && entry.presence_status == 0) {
-                        emit FriendWentOffline(entry.pid, QString::fromStdString(entry.name),
-                                               QString::fromStdString(entry.image_base64));
-                    }
+                    current_status[entry.pid] = entry.presence_status;
                 }
                 last_known_status = std::move(current_status);
 

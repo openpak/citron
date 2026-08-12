@@ -127,18 +127,29 @@ void OpenPakFriendDelegate::AdvanceAnimations() {
     const bool mouse_moved = cursor_pos != last_cursor_pos;
     last_cursor_pos = cursor_pos;
 
+    // Whichever input actually moved most recently owns the highlight; a resting mouse (the
+    // normal state while hovering) must not hand it back to a stale controller selection just
+    // because it didn't move on this exact 40ms tick.
+    const QModelIndex current = list_view->currentIndex();
+    const bool controller_moved =
+        list_view->hasFocus() && current.isValid() && current != last_controller_index;
+    last_controller_index = current;
+    if (mouse_moved) {
+        mouse_is_driving = true;
+    } else if (controller_moved) {
+        mouse_is_driving = false;
+    }
+
+    const QPoint mp = list_view->viewport()->mapFromGlobal(cursor_pos);
+    const QModelIndex hov_raw = list_view->indexAt(mp);
+
     QPersistentModelIndex hov_key;
-    if (list_view->hasFocus() && list_view->currentIndex().isValid() && !mouse_moved) {
-        // Ignore a motionless cursor so it doesn't steal the highlight from the selection.
-        hov_key = QPersistentModelIndex(list_view->currentIndex());
-    } else {
-        const QPoint mp = list_view->viewport()->mapFromGlobal(cursor_pos);
-        const QModelIndex hov_raw = list_view->indexAt(mp);
-        if (hov_raw.isValid()) {
-            hov_key = QPersistentModelIndex(hov_raw);
-        } else if (list_view->hasFocus() && list_view->currentIndex().isValid()) {
-            hov_key = QPersistentModelIndex(list_view->currentIndex());
-        }
+    if (mouse_is_driving && hov_raw.isValid()) {
+        hov_key = QPersistentModelIndex(hov_raw);
+    } else if (list_view->hasFocus() && current.isValid()) {
+        hov_key = QPersistentModelIndex(current);
+    } else if (hov_raw.isValid()) {
+        hov_key = QPersistentModelIndex(hov_raw);
     }
 
     if (hov_key.isValid() && !hover_prog.contains(hov_key)) {

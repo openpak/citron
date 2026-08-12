@@ -68,6 +68,7 @@ private:
     QWidget* main_window;
     QTimer friend_poll_timer;
     std::map<u64, s32> last_known_status;
+    std::map<u64, int> offline_streak; // consecutive polls seen offline, not yet confirmed
     std::set<u64> last_known_requests;
     bool first_poll = true; // suppresses a toast burst for every friend already online at boot
 };

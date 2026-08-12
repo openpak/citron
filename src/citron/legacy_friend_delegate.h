@@ -60,4 +60,6 @@ private:
 
     mutable QMap<QPersistentModelIndex, qreal> hover_prog;
     mutable QPoint last_cursor_pos;
+    mutable QPersistentModelIndex last_controller_index;
+    mutable bool mouse_is_driving = true;
 };
