@@ -923,6 +923,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     dash_requests_preview = MakeDimLabel(tr("No pending requests"));
     dash_requests_preview->setWordWrap(true);
     requests_card_layout->addWidget(dash_requests_preview);
+    requests_card_layout->addStretch(1);
 
     auto* friends_card = MakeDashCard();
     auto* friends_card_layout = new QVBoxLayout(friends_card);
@@ -962,19 +963,10 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     friends_preview_scroll->verticalScrollBar()->setFocusPolicy(Qt::NoFocus);
     friends_card_layout->addWidget(friends_preview_scroll, 1);
 
-    auto* right_column = new QVBoxLayout;
-    right_column->setSpacing(12);
-    right_column->addWidget(status_card);
-    right_column->addWidget(dash_requests_card);
-    right_column->addWidget(friends_card, 1);
-
-    auto* right_column_widget = new QWidget;
-    right_column_widget->setLayout(right_column);
-    right_column_widget->setFixedWidth(300);
-
+    // Narrow sidebar card: settings stack per-row instead of one wide strip.
     auto* home_settings_card = MakeDashCard();
     auto* home_settings_layout = new QVBoxLayout(home_settings_card);
-    home_settings_layout->setContentsMargins(22, 16, 22, 16);
+    home_settings_layout->setContentsMargins(18, 16, 18, 16);
     home_settings_layout->setSpacing(2);
 
     const auto add_settings_divider = [&] {
@@ -988,7 +980,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
         QFont f = label->font();
         f.setPointSize(f.pointSize() + 4);
         label->setFont(f);
-        label->setFixedWidth(28);
+        label->setFixedWidth(24);
         label->setAlignment(Qt::AlignCenter);
         return label;
     };
@@ -1009,20 +1001,30 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
             .arg(DimColor().name()));
         return label;
     };
+    const auto make_settings_row = [&](QLayout* row) {
+        auto* row_widget = new QWidget;
+        row_widget->setLayout(row);
+        home_settings_layout->addWidget(row_widget);
+    };
 
-    auto* network_row = new QHBoxLayout;
-    network_row->setSpacing(10);
-    network_row->addStretch(1);
-    network_row->addWidget(make_row_icon(QStringLiteral("📶")));
-    network_row->addWidget(make_row_title(tr("NAT Type")));
+    auto* nat_row = new QHBoxLayout;
+    nat_row->setSpacing(8);
+    nat_row->addWidget(make_row_icon(QStringLiteral("📶")));
+    nat_row->addWidget(make_row_title(tr("NAT Type")));
+    nat_row->addStretch(1);
     nat_label = make_value_pill(tr("Not Tested"), 96);
-    network_row->addWidget(nat_label);
-    network_row->addSpacing(14);
-    network_row->addWidget(make_row_icon(QStringLiteral("⏱")));
-    network_row->addWidget(make_row_title(tr("Ping")));
+    nat_row->addWidget(nat_label);
+    make_settings_row(nat_row);
+
+    auto* ping_row = new QHBoxLayout;
+    ping_row->setSpacing(8);
+    ping_row->addWidget(make_row_icon(QStringLiteral("⏱")));
+    ping_row->addWidget(make_row_title(tr("Ping")));
+    ping_row->addStretch(1);
     ping_label = make_value_pill(QStringLiteral("--"), 96);
-    network_row->addWidget(ping_label);
-    network_row->addStretch(1);
+    ping_row->addWidget(ping_label);
+    make_settings_row(ping_row);
+    home_settings_layout->addSpacing(6);
 
     auto* test_connection_button = new QPushButton(tr("Test Connection"));
     test_connection_button->setCursor(Qt::PointingHandCursor);
@@ -1036,16 +1038,13 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
                        "QPushButton:disabled { background: rgba(128,128,128,40); "
                        "color: rgba(255,255,255,90); }")
             .arg(AccentColor().name()));
-    network_row->addWidget(test_connection_button);
+    home_settings_layout->addWidget(test_connection_button);
     home_default_focus = test_connection_button;
-
-    auto* network_row_widget = new QWidget;
-    network_row_widget->setLayout(network_row);
-    home_settings_layout->addWidget(network_row_widget);
+    home_settings_layout->addSpacing(6);
     add_settings_divider();
 
     auto* notifications_row = new QHBoxLayout;
-    notifications_row->setSpacing(10);
+    notifications_row->setSpacing(8);
     notifications_row->addWidget(make_row_icon(QStringLiteral("🔔")));
     notifications_row->addWidget(make_row_title(tr("Notifications")));
     notifications_row->addStretch(1);
@@ -1055,17 +1054,16 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
         UISettings::values.legacy_notifications_enabled.SetValue(checked);
     };
     notifications_row->addWidget(notifications_toggle);
-
-    auto* notifications_row_widget = new QWidget;
-    notifications_row_widget->setLayout(notifications_row);
-    home_settings_layout->addWidget(notifications_row_widget);
+    make_settings_row(notifications_row);
     add_settings_divider();
 
-    auto* corner_row = new QHBoxLayout;
-    corner_row->setSpacing(10);
-    corner_row->addWidget(make_row_icon(QStringLiteral("📍")));
-    corner_row->addWidget(make_row_title(tr("Notification Corner")));
-    corner_row->addStretch(1);
+    auto* corner_label_row = new QHBoxLayout;
+    corner_label_row->setSpacing(8);
+    corner_label_row->addWidget(make_row_icon(QStringLiteral("📍")));
+    corner_label_row->addWidget(make_row_title(tr("Notification Corner")));
+    corner_label_row->addStretch(1);
+    make_settings_row(corner_label_row);
+
     auto* notification_corner = new OpenPakDropdown;
     notification_corner->SetValues({tr("Top Right"), tr("Top Left"), tr("Bottom Right"),
                                     tr("Bottom Left")},
@@ -1075,16 +1073,29 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     notification_corner->on_changed = [](int index) {
         UISettings::values.legacy_notification_corner.SetValue(index);
     };
-    corner_row->addWidget(notification_corner);
+    home_settings_layout->addSpacing(4);
+    home_settings_layout->addWidget(notification_corner);
+    home_settings_layout->addStretch(1);
 
-    auto* corner_row_widget = new QWidget;
-    corner_row_widget->setLayout(corner_row);
-    home_settings_layout->addWidget(corner_row_widget);
+    auto* right_column = new QVBoxLayout;
+    right_column->setSpacing(12);
+    right_column->addWidget(status_card);
+    right_column->addWidget(home_settings_card, 1);
+
+    auto* right_column_widget = new QWidget;
+    right_column_widget->setLayout(right_column);
+    right_column_widget->setFixedWidth(300);
+
+    // Friends List (65%) and Friend Requests (35%) beneath the banner.
+    auto* below_header_row = new QHBoxLayout;
+    below_header_row->setSpacing(12);
+    below_header_row->addWidget(friends_card, 65);
+    below_header_row->addWidget(dash_requests_card, 35);
 
     auto* left_column = new QVBoxLayout;
     left_column->setSpacing(12);
-    left_column->addWidget(header_card, 1);
-    left_column->addWidget(home_settings_card);
+    left_column->addWidget(header_card);
+    left_column->addLayout(below_header_row, 1);
 
     auto* home_layout = new QHBoxLayout;
     home_layout->setSpacing(16);
@@ -2059,6 +2070,7 @@ void OpenPakAccountDialog::UpdateDashboard() {
         const QModelIndex index = friends_model->index(row, 0);
         const QString name = index.data(OpenPakFriendItem::NameRole).toString();
         const int presence = index.data(OpenPakFriendItem::PresenceRole).toInt();
+        const QString game = index.data(OpenPakFriendItem::GamePresenceRole).toString();
         const std::string avatar_b64 =
             index.data(OpenPakFriendItem::AvatarB64Role).toString().toStdString();
 
@@ -2079,7 +2091,7 @@ void OpenPakAccountDialog::UpdateDashboard() {
             status_text = tr("Online");
             break;
         case 2:
-            status_text = tr("In-Game");
+            status_text = game.isEmpty() ? tr("In a game") : tr("Playing %1").arg(game);
             break;
         default:
             status_text = tr("Offline");
