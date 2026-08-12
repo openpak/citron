@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <cstring>
 
 #include "common/hex_util.h"
@@ -129,13 +130,10 @@ public:
             if (!do_not_close_socket) {
                 LOG_ERROR(Service_SSL,
                           "do_not_close_socket was changed after setting socket; is this right?");
-            } else {
-                auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD>("bsd:u");
-                if (bsd) {
-                    auto err = bsd->CloseImpl(fd);
-                    if (err != Service::Sockets::Errno::SUCCESS) {
-                        LOG_ERROR(Service_SSL, "Failed to close duplicated socket: {}", err);
-                    }
+            } else if (fd_to_close_bsd) {
+                auto err = fd_to_close_bsd->CloseImpl(fd);
+                if (err != Service::Sockets::Errno::SUCCESS) {
+                    LOG_ERROR(Service_SSL, "Failed to close duplicated socket: {}", err);
                 }
             }
         }
@@ -146,17 +144,33 @@ private:
     std::shared_ptr<SslContextSharedData> shared_data;
     std::unique_ptr<SSLConnectionBackend> backend;
     std::optional<int> fd_to_close;
+    std::shared_ptr<Service::Sockets::BSD> fd_to_close_bsd;
     bool do_not_close_socket = false;
     bool get_server_cert_chain = false;
     std::shared_ptr<Network::SocketBase> socket;
     bool did_handshake = false;
     u32 verify_option = 0;
 
+    // fd's owning bsd:* port isn't known here; probe each instead of assuming "bsd:u".
+    std::shared_ptr<Service::Sockets::BSD> FindBsdServiceOwning(s32 fd) {
+        static constexpr std::array<const char*, 4> bsd_ports{"bsd:u", "bsd:s", "bsd:a", "bsd:nu"};
+        for (const char* port : bsd_ports) {
+            auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD>(port);
+            if (bsd && bsd->GetSocket(fd).has_value()) {
+                return bsd;
+            }
+        }
+        return nullptr;
+    }
+
     Result SetSocketDescriptorImpl(s32* out_fd, s32 fd) {
         LOG_DEBUG(Service_SSL, "called, fd={}", fd);
         ASSERT(!did_handshake);
-        auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD>("bsd:u");
-        ASSERT_OR_EXECUTE(bsd, { return ResultInternalError; });
+        auto bsd = FindBsdServiceOwning(fd);
+        if (!bsd) {
+            LOG_ERROR(Service_SSL, "invalid socket fd {}", fd);
+            return ResultInvalidSocket;
+        }
 
         // Based on https://switchbrew.org/wiki/SSL_services#SetSocketDescriptor
         if (do_not_close_socket) {
@@ -167,6 +181,7 @@ private:
             }
             fd = *res;
             fd_to_close = fd;
+            fd_to_close_bsd = bsd;
             *out_fd = fd;
         } else {
             *out_fd = -1;
@@ -1048,14 +1063,15 @@ public:
     explicit ISslServiceForSystem(Core::System& system_)
         : ServiceFramework{system_, "ssl:s"}, cert_store{system} {
         // clang-format off
+        // Shares command IDs with ISslService; system-only extensions start at 100.
         static const FunctionInfo functions[] = {
-            {0, &ISslServiceForSystem::CreateContextForSystem, "CreateContextForSystem"},
-            {1, &ISslServiceForSystem::SetThreadCoreMask, "SetThreadCoreMask"},
-            {2, &ISslServiceForSystem::GetThreadCoreMask, "GetThreadCoreMask"},
-            {3, &ISslServiceForSystem::VerifySignature, "VerifySignature"},
-            {4, nullptr, "SetCertificateAndPrivateKeyInternal"},
-            {5, &ISslServiceForSystem::FlushSessionCache, "FlushSessionCache"},
-            {100, &ISslServiceForSystem::SetInterfaceVersion, "SetInterfaceVersion"},
+            {5, &ISslServiceForSystem::SetInterfaceVersion, "SetInterfaceVersion"},
+            {6, &ISslServiceForSystem::FlushSessionCache, "FlushSessionCache"},
+            {100, &ISslServiceForSystem::CreateContextForSystem, "CreateContextForSystem"},
+            {101, &ISslServiceForSystem::SetThreadCoreMask, "SetThreadCoreMask"},
+            {102, &ISslServiceForSystem::GetThreadCoreMask, "GetThreadCoreMask"},
+            {103, &ISslServiceForSystem::VerifySignature, "VerifySignature"},
+            {104, nullptr, "SetCertificateAndPrivateKeyInternal"},
         };
         // clang-format on
 
