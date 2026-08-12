@@ -20,6 +20,7 @@ inline const std::unordered_map<u64, std::string>& Table() {
         {0x01003bc0000a0000, "5.5.2"},  // Splatoon 2 (US)
         {0x01003c700009c800, "5.5.2"},  // Splatoon 2 (JP)
         {0x01006f8002326000, "3.0.3"},  // Animal Crossing: New Horizons
+        {0x0100dca0064a6000, "1.4.0"},  // Luigi's Mansion 3
     };
     return table;
 }
