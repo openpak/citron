@@ -39,21 +39,6 @@ std::string NormalizedGamepadName(SDL_Gamepad* controller) {
     return s;
 }
 
-bool IsSonyGamepad(SDL_Gamepad* controller) {
-    if (controller == nullptr) {
-        return false;
-    }
-    const auto ctype = SDL_GetGamepadType(controller);
-    if (ctype == SDL_GAMEPAD_TYPE_PS3 || ctype == SDL_GAMEPAD_TYPE_PS4 ||
-        ctype == SDL_GAMEPAD_TYPE_PS5) {
-        return true;
-    }
-    const std::string s = NormalizedGamepadName(controller);
-    return s.find("dualshock") != std::string::npos || s.find("dualsense") != std::string::npos ||
-           s.find("ps3") != std::string::npos || s.find("ps4") != std::string::npos ||
-           s.find("ps5") != std::string::npos;
-}
-
 bool IsMicrosoftGamepad(SDL_Gamepad* controller) {
     if (controller == nullptr) {
         return false;
@@ -923,22 +908,10 @@ ButtonBindings SDLDriver::GetDefaultButtonBinding(
         srr_button = SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1;
     }
 
-    SDL_Gamepad* controller = joystick->GetSDLGameController();
-    const SDL_GamepadType controller_type =
-        controller ? SDL_GetGamepadType(controller) : SDL_GAMEPAD_TYPE_UNKNOWN;
-    const bool nintendo_layout =
-        controller_type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO ||
-        controller_type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
-        controller_type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT ||
-        controller_type == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR;
-
-    const bool sony = IsSonyGamepad(controller);
-    const SDL_GamepadButton sdl_a = sony ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST;
-    const SDL_GamepadButton sdl_b = sony ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
-    const SDL_GamepadButton sdl_x =
-        nintendo_layout ? SDL_GAMEPAD_BUTTON_WEST : SDL_GAMEPAD_BUTTON_NORTH;
-    const SDL_GamepadButton sdl_y =
-        nintendo_layout ? SDL_GAMEPAD_BUTTON_NORTH : SDL_GAMEPAD_BUTTON_WEST;
+    constexpr SDL_GamepadButton sdl_a = SDL_GAMEPAD_BUTTON_EAST;
+    constexpr SDL_GamepadButton sdl_b = SDL_GAMEPAD_BUTTON_SOUTH;
+    constexpr SDL_GamepadButton sdl_x = SDL_GAMEPAD_BUTTON_NORTH;
+    constexpr SDL_GamepadButton sdl_y = SDL_GAMEPAD_BUTTON_WEST;
 
     return {
         std::pair{Settings::NativeButton::A, sdl_a},
