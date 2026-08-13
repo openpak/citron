@@ -166,6 +166,11 @@ ModFetchResult FetchOne(const ModRepoSpec& spec) {
 
     // The signed redirect target intermittently 403s or truncates mid-transfer, worse for
     // larger assets; retry with backoff and verify against the size GitHub already told us.
+    //
+    // The asset redirect lands on GitHub's release-asset CDN (S3/Azure blob storage), which
+    // runs bot-detection that consistently 403s the non-browser "citron" UA used for the API
+    // request above -- confirmed by the response body being a fixed-size error page on every
+    // retry rather than a growing/truncated download. A browser-like UA avoids that filter.
     httplib::Result dl_result;
     bool size_ok = false;
     constexpr int kMaxAttempts = 5;
@@ -175,8 +180,12 @@ ModFetchResult FetchOne(const ModRepoSpec& spec) {
         dl.set_read_timeout(30);
         dl.set_follow_location(true);
         ApplyCaCertPath(dl);
-        dl_result =
-            dl.Get(dl_path, httplib::Headers{{"User-Agent", "citron"}, {"Accept", "*/*"}});
+        dl_result = dl.Get(
+            dl_path, httplib::Headers{
+                         {"User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                        "Chrome/131.0.0.0 Safari/537.36"},
+                         {"Accept", "*/*"}});
         size_ok = dl_result && (expected_size == 0 || dl_result->body.size() == expected_size);
         if (dl_result && dl_result->status == 200 && size_ok) {
             break;
