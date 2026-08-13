@@ -152,7 +152,7 @@
 #     --build DIR              Build directory (default: ./build)
 #     --compiler llvm-mingw|clang-cl  Toolchain (default: llvm-mingw)
 #     --jobs N                 Parallel jobs (default: nproc)
-#     --lto thin|full|none     LTO mode (default: full); MUST match across stages 1-2
+#     --lto thin|full|none     LTO mode (default: none); MUST match across stages 1-2
 #     --lite-lto               Alias for --lto thin
 #     --no-lto                 Alias for --lto none
 #     --pgo-type ir|fe|none    PGO mode (default: ir); MUST match across stages 1-2
@@ -218,7 +218,7 @@ LLVM_MINGW_VERSION="${LLVM_MINGW_VERSION:-20260224}"
 SOURCE_DIR="${SOURCE_DIR:-$(pwd)}"
 BUILD_ROOT="${BUILD_ROOT:-$(pwd)/build}"
 JOBS="${JOBS:-$(nproc)}"
-LTO_MODE="${LTO_MODE:-full}"
+LTO_MODE="${LTO_MODE:-none}"
 PGO_MODE="${PGO_MODE:-ir}"          # ir|fe|none
 UNITY_BUILD="${UNITY_BUILD:-OFF}"   # ENABLE_UNITY_BUILD
 TRACY_BUILD="${TRACY_BUILD:-OFF}"   # CITRON_ENABLE_TRACY
