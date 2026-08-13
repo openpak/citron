@@ -11,7 +11,9 @@
 #include <span>
 #include <thread>
 #include <vector>
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <windows.h>
