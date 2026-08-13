@@ -173,6 +173,11 @@ public:
         return HandleReturn("SSL_write_ex", out_size, ret);
     }
 
+    Result Pending(s32* out_pending) override {
+        *out_pending = SSL_pending(ssl);
+        return ResultSuccess;
+    }
+
     Result HandleReturn(const char* what, size_t* actual, int ret) {
         const int ssl_err = SSL_get_error(ssl, ret);
         CheckOpenSSLErrors();

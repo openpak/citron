@@ -331,6 +331,11 @@ public:
         return ResultSuccess;
     }
 
+    Result Pending(s32* out_pending) override {
+        *out_pending = static_cast<s32>(cleartext_read_buf.size());
+        return ResultSuccess;
+    }
+
     Result Read(size_t* out_size, std::span<u8> data) override {
         *out_size = 0;
         if (handshake_state != HandshakeState::Connected) {

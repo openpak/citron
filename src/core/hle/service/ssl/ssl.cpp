@@ -298,9 +298,7 @@ private:
     }
 
     Result PendingImpl(s32* out_pending) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called.");
-        *out_pending = 0;
-        return ResultSuccess;
+        return backend->Pending(out_pending);
     }
 
     void SetSocketDescriptor(HLERequestContext& ctx) {

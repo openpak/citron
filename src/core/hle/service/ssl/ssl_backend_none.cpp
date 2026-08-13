@@ -59,6 +59,13 @@ public:
         return ResultSuccess;
     }
 
+    Result Pending(s32* out_pending) override {
+        // No TLS decrypt buffer in this passthrough backend; nothing to report as pending
+        // without a socket-level peek, which SocketBase doesn't expose.
+        *out_pending = 0;
+        return ResultSuccess;
+    }
+
     Result Write(size_t* out_size, std::span<const u8> data) override {
         LOG_WARNING(Service_SSL, "(STUBBED) Write called, using raw socket");
         if (!socket) {

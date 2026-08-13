@@ -144,6 +144,13 @@ public:
         return HandleReturn("SSLWrite", out_size, status);
     }
 
+    Result Pending(s32* out_pending) override {
+        size_t buffered = 0;
+        SSLGetBufferedReadSize(context, &buffered);
+        *out_pending = static_cast<s32>(buffered);
+        return ResultSuccess;
+    }
+
     Result HandleReturn(const char* what, size_t* actual, OSStatus status) {
         switch (status) {
         case 0:
