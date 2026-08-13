@@ -4828,7 +4828,6 @@ ${sccache_stats_cmd}
 if not exist "${package_copy_win}" mkdir "${package_copy_win}"
 for %%F in ("${package_copy_win}\\*") do if exist "%%F" del /F /Q "%%F"
 for /D %%D in ("${package_copy_win}\\*") do if /I not "%%~nxD"=="user" if exist "%%D" rmdir /S /Q "%%D"
-if not exist "${package_copy_win}\\user" mkdir "${package_copy_win}\\user"
 copy /Y "${build_copy_win}\\bin\\${config}\\citron.exe" "${package_copy_win}\\citron.exe" >NUL
 if errorlevel 1 exit /b %errorlevel%
 copy /Y "${build_copy_win}\\bin\\${config}\\citron-cmd.exe" "${package_copy_win}\\citron-cmd.exe" >NUL
