@@ -2572,6 +2572,20 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
                      "Applying workaround: forcing single-core mode for Final Fantasy Tactics");
             Settings::values.use_multi_core.SetValue(false);
         }
+
+        // TEMPORARY: resolution scale above 1x doubles OpenPak online points. Clamp to 1x
+        // until the actual scaling bug is fixed. Remove this block once that's resolved.
+        switch (title_id) {
+        case 0x0100f8f0000a2000ULL: // Splatoon 2 (EU)
+        case 0x01003bc0000a0000ULL: // Splatoon 2 (US)
+        case 0x01003c700009c800ULL: // Splatoon 2 (JP)
+            LOG_INFO(Frontend, "Applying workaround: clamping resolution to 1x for Splatoon 2 "
+                               "(online points scaling bug)");
+            Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res1X);
+            break;
+        default:
+            break;
+        }
     }
 
     Settings::LogSettings();
