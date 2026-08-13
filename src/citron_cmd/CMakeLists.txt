@@ -112,13 +112,6 @@ elseif(MINGW)
     copy_mingw_deps(citron-cmd SEARCH_PATHS "${FFmpeg_PATH}/bin" "${QT_TARGET_PATH}/bin")
 endif()
 
-if(WIN32)
-    add_custom_command(TARGET citron-cmd POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:citron-cmd>/user"
-        COMMENT "Creating portable user directory for citron-cmd"
-    )
-endif()
-
 if (CITRON_USE_PRECOMPILED_HEADERS)
     target_precompile_headers(citron-cmd PRIVATE precompiled_headers.h)
 endif()

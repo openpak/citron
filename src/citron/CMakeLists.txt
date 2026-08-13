@@ -705,12 +705,6 @@ if (WIN32 AND QT_VERSION VERSION_GREATER_EQUAL 6)
         # DLL version conflicts between Qt's bundled GCC runtime and MSYS2's.
         message(STATUS "MinGW build: Qt plugins deployed by CopyMinGWDeps.cmake")
     endif()
-
-    # Create the "user" directory for portable mode
-    add_custom_command(TARGET citron POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CITRON_EXE_DIR}/user"
-        COMMENT "Creating portable user directory"
-    )
 endif()
 
 if (WIN32 AND CITRON_USE_BUNDLED_QT)
