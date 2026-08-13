@@ -20,6 +20,7 @@
 #include "core/hle/service/ssl/legacy_nat_rewrite.h"
 #include "core/hle/service/ssl/ssl.h"
 #include "core/hle/service/ssl/ssl_backend.h"
+#include "core/hle/service/ssl/ssl_pending_registry.h"
 #include "core/hle/service/ssl/ssl_types.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
@@ -125,6 +126,9 @@ public:
 
     ~ISslConnection() {
         shared_data->connection_count--;
+        if (socket) {
+            UnregisterPendingCheck(socket.get());
+        }
         if (fd_to_close.has_value()) {
             const s32 fd = *fd_to_close;
             if (!do_not_close_socket) {
@@ -193,6 +197,13 @@ private:
         }
         socket = std::move(*sock);
         backend->SetSocket(socket);
+        // Lets bsd:u's Poll report readable when this connection has already decrypted more
+        // than the game's last Read() asked for -- the raw socket alone can't tell.
+        RegisterPendingCheck(socket.get(), [this] {
+            s32 pending = 0;
+            backend->Pending(&pending);
+            return pending;
+        });
         return ResultSuccess;
     }
 

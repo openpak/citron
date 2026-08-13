@@ -22,6 +22,7 @@
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets_translate.h"
+#include "core/hle/service/ssl/ssl_pending_registry.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/socket_proxy.h"
 #include "core/internal_network/sockets.h"
@@ -1016,10 +1017,22 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
         return result;
     });
 
-    const auto result = Network::Poll(host_pollfds, timeout);
+    auto result = Network::Poll(host_pollfds, timeout);
 
     const size_t num = host_pollfds.size();
     for (size_t i = 0; i < num; ++i) {
+        // A TLS backend can decrypt an entire record in one Read(), buffering any plaintext
+        // beyond what the caller asked for internally rather than leaving it on the raw
+        // socket -- the raw poll() above has no way to see that, so it never reports this fd
+        // readable again even though there's already-decrypted data waiting.
+        if (False(host_pollfds[i].revents & Network::PollEvents::In) &&
+            True(Translate(fds[i].events) & Network::PollEvents::In) &&
+            Service::SSL::HasSslPendingData(host_pollfds[i].socket)) {
+            host_pollfds[i].revents |= Network::PollEvents::In;
+            if (result.first <= 0) {
+                result.first = 1;
+            }
+        }
         fds[i].revents = Translate(host_pollfds[i].revents);
     }
     std::memcpy(write_buffer.data(), fds.data(), nfds * sizeof(PollFD));
