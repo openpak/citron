@@ -43,9 +43,8 @@ struct ParkedUdpSocket {
 static std::mutex g_parked_udp_mutex;
 static std::vector<ParkedUdpSocket> g_parked_udp_sockets;
 
-// A parked socket still owns its port, so hold few and briefly.
-constexpr std::size_t MAX_PARKED_UDP_SOCKETS = 8;
-constexpr auto PARK_DURATION = std::chrono::seconds{5};
+constexpr std::size_t MAX_PARKED_UDP_SOCKETS = 16;
+constexpr auto PARK_DURATION = std::chrono::seconds{60};
 
 // Caller holds g_parked_udp_mutex.
 static void DropExpiredParkedUdpSockets(std::chrono::steady_clock::time_point now) {

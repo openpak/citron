@@ -15,12 +15,14 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #elif defined(__unix__) || defined(__APPLE__)
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -709,14 +711,45 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int option, T value) {
     return GetAndLogLastError();
 }
 
+namespace {
+void EnableAggressiveTcpKeepAlive(SOCKET fd) {
+    constexpr u32 enable = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&enable),
+               sizeof(enable));
+
+#ifdef _WIN32
+    tcp_keepalive vals{1, 5000, 5000};
+    DWORD bytes_returned = 0;
+    WSAIoctl(fd, SIO_KEEPALIVE_VALS, &vals, sizeof(vals), nullptr, 0, &bytes_returned, nullptr,
+             nullptr);
+#elif defined(__unix__) || defined(__APPLE__)
+    constexpr u32 idle = 5;
+    constexpr u32 interval = 5;
+    constexpr u32 count = 3;
+#ifdef __APPLE__
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle));
+#else
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#endif
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+#endif
+}
+} // Anonymous namespace
+
 Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
     fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type),
                 TranslateProtocolToNative(protocol));
-    if (fd != INVALID_SOCKET) {
-        return Errno::SUCCESS;
+    if (fd == INVALID_SOCKET) {
+        return GetAndLogLastError();
     }
 
-    return GetAndLogLastError();
+    // Stay ahead of NAT/firewall idle-connection drops regardless of whether the game asked.
+    if (type == Type::STREAM) {
+        EnableAggressiveTcpKeepAlive(fd);
+    }
+
+    return Errno::SUCCESS;
 }
 
 std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
