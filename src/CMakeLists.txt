@@ -4,6 +4,8 @@
 # Enable modules to include each other's files
 include_directories(.)
 
+include(CheckCXXCompilerFlag)
+
 if (ENABLE_UNITY_BUILD)
     set(CMAKE_UNITY_BUILD ON)
     set(CMAKE_UNITY_BUILD_BATCH_SIZE 9999)
@@ -105,8 +107,16 @@ if (MSVC)
             /clang:-Wno-braced-scalar-init
             /clang:-Wno-unused-private-field
             /clang:-Wno-c++11-narrowing
-            /clang:-Wno-cast-function-type-mismatch
         )
+        # -Wcast-function-type-mismatch doesn't exist in older clang-cl releases
+        # (e.g. clang 16.0.5, as shipped by VS2022's "C++ Clang tools for Windows"
+        # component) -- an unrecognized -Wno- flag is itself a hard error under /WX.
+        set(CMAKE_REQUIRED_FLAGS "/WX")
+        check_cxx_compiler_flag("/clang:-Wno-cast-function-type-mismatch" CITRON_CLANGCL_HAS_CAST_FUNCTION_TYPE_MISMATCH)
+        unset(CMAKE_REQUIRED_FLAGS)
+        if (CITRON_CLANGCL_HAS_CAST_FUNCTION_TYPE_MISMATCH)
+            add_compile_options(/clang:-Wno-cast-function-type-mismatch)
+        endif()
         if (ARCHITECTURE_x86_64)
             add_compile_options(/clang:-mcx16)
         endif()
