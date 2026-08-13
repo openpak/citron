@@ -10,6 +10,7 @@
 #include <random>
 #include "citron/theme.h"
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -5234,17 +5235,32 @@ bool GMainWindow::ExtractZipToDirectory(const std::filesystem::path& zip_path,
 
     std::string powershell_cmd =
         "powershell -NoProfile -NonInteractive -Command \"Expand-Archive -Path \\\"" +
-        zip_path.string() + "\\\" -DestinationPath \\\"" + extract_path.string() + "\\\" -Force\"";
+        zip_path.string() + "\\\" -DestinationPath \\\"" + extract_path.string() +
+        "\\\" -Force 2>&1\"";
 
-    LOG_INFO(Frontend, "Extracting firmware ZIP with PowerShell: {}", powershell_cmd);
+    LOG_INFO(Frontend, "Extracting ZIP with PowerShell: {}", powershell_cmd);
 
-    int result = std::system(powershell_cmd.c_str());
+    // std::system() discards PowerShell's stdout/stderr entirely, so a failure here used to
+    // produce no information beyond "it failed". Use _popen so the actual PowerShell error
+    // (bad zip, path issue, etc.) ends up in the log instead of being thrown away.
+    std::string output;
+    FILE* pipe = _popen(powershell_cmd.c_str(), "r");
+    if (!pipe) {
+        LOG_ERROR(Frontend, "Failed to launch PowerShell for ZIP extraction");
+        return false;
+    }
+    char buffer[256];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        output += buffer;
+    }
+    const int result = _pclose(pipe);
+
     if (result == 0) {
-        LOG_INFO(Frontend, "Firmware ZIP extracted successfully");
+        LOG_INFO(Frontend, "ZIP extracted successfully");
         return true;
     }
 
-    LOG_ERROR(Frontend, "Failed to extract firmware ZIP file");
+    LOG_ERROR(Frontend, "Failed to extract ZIP file (exit code {}): {}", result, output);
     return false;
 #else
     // On other platforms, require libarchive
@@ -7552,7 +7568,12 @@ GMainWindow::SsbuModInstallOutcome GMainWindow::InstallSsbuSkylineModsBlocking(u
             continue;
         }
 
-        const auto tmp_path = cache_dir / fmt::format("ssbu_mod_{}.tmp", result.display_name);
+        // Expand-Archive determines archive type from the file extension, not content, and
+        // refuses anything not literally named ".zip" -- a generic ".tmp" here silently fails
+        // extraction even though the downloaded data is a perfectly valid zip.
+        const char* tmp_extension = result.is_zip ? ".zip" : ".tmp";
+        const auto tmp_path =
+            cache_dir / fmt::format("ssbu_mod_{}{}", result.display_name, tmp_extension);
         {
             std::ofstream out{tmp_path, std::ios::binary};
             if (!out) {
