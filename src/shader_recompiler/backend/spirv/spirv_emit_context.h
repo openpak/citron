@@ -5,7 +5,6 @@
 
 #include <array>
 
-#include <ankerl/unordered_dense.h>
 #include <sirit/sirit.h>
 
 #include "shader_recompiler/backend/bindings.h"
@@ -214,10 +213,6 @@ public:
     const Profile& profile;
     const RuntimeInfo& runtime_info;
     Stage stage{};
-
-    // Maps an id to its NonUniform-decorated copy, so decoration never
-    // mutates the original id.
-    ankerl::unordered_dense::map<u32, Id> non_uniform_ids;
 
     Id void_id{};
     Id U1{};

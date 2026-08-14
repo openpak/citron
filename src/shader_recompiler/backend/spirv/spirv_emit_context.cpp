@@ -1364,11 +1364,6 @@ void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
             .pointer_type = pointer_type,
             .count = desc.count,
         });
-        if (desc.count > 1 && profile.support_uniform_texel_buffer_array_non_uniform_indexing) {
-            AddExtension("SPV_EXT_descriptor_indexing");
-            AddCapability(spv::Capability::ShaderNonUniformEXT);
-            AddCapability(spv::Capability::UniformTexelBufferArrayNonUniformIndexingEXT);
-        }
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
         }
@@ -1397,11 +1392,6 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             .count = desc.count,
             .is_integer = desc.is_integer,
         });
-        if (desc.count > 1 && profile.support_storage_texel_buffer_array_non_uniform_indexing) {
-            AddExtension("SPV_EXT_descriptor_indexing");
-            AddCapability(spv::Capability::ShaderNonUniformEXT);
-            AddCapability(spv::Capability::StorageTexelBufferArrayNonUniformIndexingEXT);
-        }
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
         }
@@ -1428,11 +1418,6 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
             .count = desc.count,
             .is_multisample = desc.is_multisample,
         });
-        if (desc.count > 1 && profile.support_sampled_image_array_non_uniform_indexing) {
-            AddExtension("SPV_EXT_descriptor_indexing");
-            AddCapability(spv::Capability::ShaderNonUniformEXT);
-            AddCapability(spv::Capability::SampledImageArrayNonUniformIndexingEXT);
-        }
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
         }
@@ -1463,11 +1448,6 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
             .count = desc.count,
             .is_integer = desc.is_integer,
         });
-        if (desc.count > 1 && profile.support_storage_image_array_non_uniform_indexing) {
-            AddExtension("SPV_EXT_descriptor_indexing");
-            AddCapability(spv::Capability::ShaderNonUniformEXT);
-            AddCapability(spv::Capability::StorageImageArrayNonUniformIndexingEXT);
-        }
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
         }

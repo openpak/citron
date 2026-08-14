@@ -350,14 +350,6 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .unified_descriptor_binding = true,
         .has_split_descriptor_sets = device.IsKhrPushDescriptorSupported(),
         .support_descriptor_aliasing = device.IsDescriptorAliasingSupported(),
-        .support_sampled_image_array_non_uniform_indexing =
-            device.IsSampledImageArrayNonUniformIndexingSupported(),
-        .support_storage_image_array_non_uniform_indexing =
-            device.IsStorageImageArrayNonUniformIndexingSupported(),
-        .support_uniform_texel_buffer_array_non_uniform_indexing =
-            device.IsUniformTexelBufferArrayNonUniformIndexingSupported(),
-        .support_storage_texel_buffer_array_non_uniform_indexing =
-            device.IsStorageTexelBufferArrayNonUniformIndexingSupported(),
         .support_int8 = device.IsInt8Supported(),
         .support_int16 = device.IsShaderInt16Supported(),
         .support_int64 = device.IsShaderInt64Supported(),
@@ -487,8 +479,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
             if (next->IsFailed()) {
-                current_pipeline = next;
-                return nullptr;
+                return CurrentGraphicsPipelineSlowPath();
             }
             current_pipeline = next;
             return BuiltPipeline(current_pipeline);
@@ -673,7 +664,14 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     GraphicsPipeline* transition_source = current_pipeline;
-    if (is_new) {
+    if (!is_new && pipeline && pipeline->IsFailed()) {
+        if (current_pipeline == pipeline.get()) {
+            current_pipeline = nullptr;
+            transition_source = nullptr;
+        }
+        retired_graphics_pipelines.push_back(std::move(pipeline));
+    }
+    if (is_new || !pipeline) {
         pipeline = CreateGraphicsPipeline();
     }
     if (!pipeline) {
