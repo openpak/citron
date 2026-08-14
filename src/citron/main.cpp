@@ -5367,11 +5367,20 @@ void GMainWindow::OnInstallFirmwareFromZip() {
 
     // Locate and erase the content of nand/system/Content/registered/*.nca, if any.
     auto sysnand_content_vdir = system->GetFileSystemController().GetSystemNANDContentDirectory();
+    if (sysnand_content_vdir == nullptr) {
+        progress.close();
+        std::filesystem::remove_all(temp_extract_path);
+        QMessageBox::critical(this, tr("Firmware install failed"),
+                              tr("System NAND content directory is unavailable."));
+        return;
+    }
     if (!sysnand_content_vdir->CleanSubdirectoryRecursive("registered")) {
         progress.close();
         std::filesystem::remove_all(temp_extract_path);
         QMessageBox::critical(this, tr("Firmware install failed"),
                               tr("Failed to delete one or more firmware file."));
+        system->GetFileSystemController().InitializeContentSystem(*vfs);
+        OnCheckFirmwareDecryption();
         return;
     }
 
@@ -5405,6 +5414,8 @@ void GMainWindow::OnInstallFirmwareFromZip() {
                 this, tr("Firmware install failed"),
                 tr("Firmware installation cancelled, firmware may be in bad state, "
                    "restart citron or re-install firmware."));
+            system->GetFileSystemController().InitializeContentSystem(*vfs);
+            OnCheckFirmwareDecryption();
             return;
         }
     }
@@ -5416,6 +5427,8 @@ void GMainWindow::OnInstallFirmwareFromZip() {
         progress.close();
         QMessageBox::critical(this, tr("Firmware install failed"),
                               tr("One or more firmware files failed to copy into NAND."));
+        system->GetFileSystemController().InitializeContentSystem(*vfs);
+        OnCheckFirmwareDecryption();
         return;
     }
 
@@ -5437,6 +5450,7 @@ void GMainWindow::OnInstallFirmwareFromZip() {
         QMessageBox::critical(
             this, tr("Firmware integrity verification failed!"),
             tr("Verification failed for the following files:\n\n%1").arg(failed_names));
+        OnCheckFirmwareDecryption();
         return;
     }
 
@@ -5536,10 +5550,18 @@ void GMainWindow::OnInstallFirmware() {
 
     // Locate and erase the content of nand/system/Content/registered/*.nca, if any.
     auto sysnand_content_vdir = system->GetFileSystemController().GetSystemNANDContentDirectory();
+    if (sysnand_content_vdir == nullptr) {
+        progress.close();
+        QMessageBox::critical(this, tr("Firmware install failed"),
+                              tr("System NAND content directory is unavailable."));
+        return;
+    }
     if (!sysnand_content_vdir->CleanSubdirectoryRecursive("registered")) {
         progress.close();
         QMessageBox::critical(this, tr("Firmware install failed"),
                               tr("Failed to delete one or more firmware file."));
+        system->GetFileSystemController().InitializeContentSystem(*vfs);
+        OnCheckFirmwareDecryption();
         return;
     }
 
@@ -5572,6 +5594,8 @@ void GMainWindow::OnInstallFirmware() {
                 this, tr("Firmware install failed"),
                 tr("Firmware installation cancelled, firmware may be in bad state, "
                    "restart citron or re-install firmware."));
+            system->GetFileSystemController().InitializeContentSystem(*vfs);
+            OnCheckFirmwareDecryption();
             return;
         }
     }
@@ -5580,6 +5604,8 @@ void GMainWindow::OnInstallFirmware() {
         progress.close();
         QMessageBox::critical(this, tr("Firmware install failed"),
                               tr("One or more firmware files failed to copy into NAND."));
+        system->GetFileSystemController().InitializeContentSystem(*vfs);
+        OnCheckFirmwareDecryption();
         return;
     }
 
@@ -5601,6 +5627,7 @@ void GMainWindow::OnInstallFirmware() {
         QMessageBox::critical(
             this, tr("Firmware integrity verification failed!"),
             tr("Verification failed for the following files:\n\n%1").arg(failed_names));
+        OnCheckFirmwareDecryption();
         return;
     }
 
@@ -6357,7 +6384,6 @@ void GMainWindow::OnMouseActivity() {
 }
 
 void GMainWindow::OnCheckFirmwareDecryption() {
-    system->GetFileSystemController().InitializeContentSystem(*vfs);
     if (!ContentManager::AreKeysPresent()) {
         QMessageBox::warning(this, tr("Derivation Components Missing"),
                              tr("Encryption keys are missing. "

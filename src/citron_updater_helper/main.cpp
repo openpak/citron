@@ -238,6 +238,11 @@ bool ExtractToScratch(const std::filesystem::path& zip_path, const std::filesyst
 
 bool MoveExtractedFiles(const std::filesystem::path& scratch_dir, const std::filesystem::path& app_dir,
                         size_t& moved_count, std::wstring& detail_out) {
+    wchar_t self_path_buf[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, self_path_buf, MAX_PATH);
+    std::error_code self_ec;
+    const std::filesystem::path self_path = std::filesystem::canonical(self_path_buf, self_ec);
+
     std::error_code ec;
     moved_count = 0;
     for (auto it = std::filesystem::recursive_directory_iterator(scratch_dir, ec);
@@ -251,8 +256,24 @@ bool MoveExtractedFiles(const std::filesystem::path& scratch_dir, const std::fil
         }
         const std::filesystem::path dest = app_dir / rel;
         std::filesystem::create_directories(dest.parent_path(), ec);
-        std::filesystem::remove(dest, ec);
-        ec.clear();
+
+        std::error_code dest_ec;
+        const bool dest_is_self = !self_ec && std::filesystem::exists(dest, dest_ec) &&
+                                  std::filesystem::equivalent(dest, self_path, dest_ec);
+        if (dest_is_self) {
+            // Can't delete/overwrite our own running executable's file in place, but Windows
+            // allows renaming it out of the way while it's still mapped in.
+            std::filesystem::path retired = dest;
+            retired += L".old";
+            std::error_code retire_ec;
+            std::filesystem::remove(retired, retire_ec);
+            retire_ec.clear();
+            std::filesystem::rename(dest, retired, retire_ec);
+        } else {
+            std::filesystem::remove(dest, ec);
+            ec.clear();
+        }
+
         std::filesystem::rename(it->path(), dest, ec);
         if (ec) {
             ec.clear();
