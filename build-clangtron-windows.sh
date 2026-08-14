@@ -4803,6 +4803,7 @@ ${sccache_cmake_args}
   -DCITRON_CLANGCL=ON -DCITRON_USE_BUNDLED_QT=ON -DCITRON_USE_BUNDLED_FFMPEG=ON ^
   -DBUILD_TESTING=OFF -DCITRON_TESTS=OFF -DCITRON_SHADER_TOOL=OFF ^
   -DCITRON_CRASH_DUMPS=OFF ^
+  -DCITRON_USE_AUTO_UPDATER=ON ^
   -DENABLE_UNITY_BUILD=${UNITY_BUILD} ^
   -DPython3_EXECUTABLE="${python_win}" ^
   -DPERL_EXECUTABLE="${perl_win}" ^
@@ -4834,6 +4835,10 @@ copy /Y "${build_copy_win}\\bin\\${config}\\citron-cmd.exe" "${package_copy_win}
 if errorlevel 1 exit /b %errorlevel%
 copy /Y "${build_copy_win}\\bin\\${config}\\citron-room.exe" "${package_copy_win}\\citron-room.exe" >NUL
 if errorlevel 1 exit /b %errorlevel%
+if exist "${build_copy_win}\\bin\\${config}\\citron-updater-helper.exe" (
+  copy /Y "${build_copy_win}\\bin\\${config}\\citron-updater-helper.exe" "${package_copy_win}\\citron-updater-helper.exe" >NUL
+  if errorlevel 1 exit /b 1
+)
 if exist "${build_copy_win}\\bin\\${config}\\*.dll" (
   copy /Y "${build_copy_win}\\bin\\${config}\\*.dll" "${package_copy_win}\\" >NUL
   if errorlevel 1 exit /b 1

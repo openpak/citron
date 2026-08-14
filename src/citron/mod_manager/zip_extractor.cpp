@@ -9,6 +9,11 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 
+#ifdef CITRON_ENABLE_LIBARCHIVE
+#include <archive.h>
+#include <archive_entry.h>
+#endif
+
 #include "citron/mod_manager/zip_extractor.h"
 #include "common/fs/fs.h"
 #include "common/logging.h"
@@ -16,6 +21,9 @@
 namespace ModManager {
 
 bool ZipExtractor::CanExtract() {
+#ifdef CITRON_ENABLE_LIBARCHIVE
+    return true;
+#endif
 #ifdef _WIN32
     // Check for PowerShell (built-in) or 7z
     if (!QStandardPaths::findExecutable(QStringLiteral("powershell")).isEmpty()) {
@@ -44,6 +52,64 @@ bool ZipExtractor::CanExtract() {
 
 bool ZipExtractor::ExtractToPath(const QString& zip_path, const QString& dest_path) {
     QDir().mkpath(dest_path);
+
+#ifdef CITRON_ENABLE_LIBARCHIVE
+    {
+        struct archive* a = archive_read_new();
+        struct archive* ext = archive_write_disk_new();
+        if (!a || !ext) {
+            if (a)
+                archive_read_free(a);
+            if (ext)
+                archive_write_free(ext);
+            return false;
+        }
+
+        archive_read_support_format_zip(a);
+        archive_read_support_filter_all(a);
+        archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM);
+        archive_write_disk_set_standard_lookup(ext);
+
+        const std::string zip_path_std = zip_path.toStdString();
+        if (archive_read_open_filename(a, zip_path_std.c_str(), 10240) != ARCHIVE_OK) {
+            archive_read_free(a);
+            archive_write_free(ext);
+            return false;
+        }
+
+        const std::filesystem::path dest_root(dest_path.toStdString());
+        struct archive_entry* entry;
+        bool any_entry = false;
+        while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+            any_entry = true;
+            const std::filesystem::path entry_path = dest_root / archive_entry_pathname(entry);
+            archive_entry_set_pathname(entry, entry_path.string().c_str());
+
+            if (archive_write_header(ext, entry) != ARCHIVE_OK) {
+                continue;
+            }
+            if (archive_entry_size(entry) > 0) {
+                const void* buff;
+                size_t size;
+                la_int64_t offset;
+                while (archive_read_data_block(a, &buff, &size, &offset) == ARCHIVE_OK) {
+                    if (archive_write_data_block(ext, buff, size, offset) != ARCHIVE_OK) {
+                        break;
+                    }
+                }
+            }
+            archive_write_finish_entry(ext);
+        }
+
+        archive_read_free(a);
+        archive_write_free(ext);
+        if (any_entry) {
+            return true;
+        }
+        // Fall through to the external-tool paths below if libarchive found nothing
+        // (e.g. a format it doesn't recognize) rather than silently reporting success.
+    }
+#endif
 
 #ifdef _WIN32
     // On Windows, use PowerShell's Expand-Archive for .zip, or 7z for others
@@ -130,6 +196,30 @@ bool ZipExtractor::ExtractToPath(const QString& zip_path, const QString& dest_pa
 
 QStringList ZipExtractor::ListContents(const QString& zip_path) {
     QStringList contents;
+
+#ifdef CITRON_ENABLE_LIBARCHIVE
+    {
+        struct archive* a = archive_read_new();
+        if (a) {
+            archive_read_support_format_zip(a);
+            archive_read_support_filter_all(a);
+
+            const std::string zip_path_std = zip_path.toStdString();
+            if (archive_read_open_filename(a, zip_path_std.c_str(), 10240) == ARCHIVE_OK) {
+                struct archive_entry* entry;
+                while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+                    contents.append(QString::fromUtf8(archive_entry_pathname(entry)));
+                    archive_read_data_skip(a);
+                }
+            }
+            archive_read_free(a);
+        }
+        if (!contents.isEmpty()) {
+            return contents;
+        }
+        // Fall through to the external-tool paths below if libarchive couldn't read it.
+    }
+#endif
 
 #ifdef _WIN32
     QString p7z = QStandardPaths::findExecutable(QStringLiteral("7z"));

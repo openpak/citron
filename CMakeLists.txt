@@ -916,6 +916,9 @@ if(CITRON_CLANGCL)
     if(TARGET citron-room)
         list(APPEND _citron_runtime_deps citron-room)
     endif()
+    if(TARGET citron-updater-helper)
+        list(APPEND _citron_runtime_deps citron-updater-helper)
+    endif()
 
     # PGO flags applied per-target to first-party targets only — never via global
     # CMAKE_C/CXX_FLAGS, which SDL2 and other CPM sub-targets inherit. A PGO-instrumented

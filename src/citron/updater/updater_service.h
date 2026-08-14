@@ -64,7 +64,7 @@ public:
     void AbortCheck();
     std::string GetCurrentVersion() const;
     bool IsUpdateInProgress() const;
-    bool IsPgoBuild() const;
+    static bool IsPgoBuild();
     static bool CheckPgoWarning(QWidget* parent);
 
     static bool HasStagedUpdate(const std::filesystem::path& app_directory);
@@ -72,6 +72,7 @@ public:
 
 #ifdef _WIN32
     bool LaunchUpdateHelper();
+    std::filesystem::path GetPendingBackupPath() const;
 #endif
 
 signals:
@@ -92,18 +93,6 @@ private:
     void ParseUpdateResponse(const QByteArray& response, const QString& channel);
     bool CompareVersions(const std::string& current, const std::string& latest) const;
 
-#ifdef _WIN32
-    bool ExtractArchive(const std::filesystem::path& archive_path,
-                        const std::filesystem::path& extract_path);
-#ifndef CITRON_ENABLE_LIBARCHIVE
-    bool ExtractArchiveWindows(const std::filesystem::path& archive_path,
-                               const std::filesystem::path& extract_path);
-#endif
-    bool InstallUpdate(const std::filesystem::path& update_path);
-    bool CreateBackup();
-    bool RestoreBackup();
-    bool CreateUpdateHelperScript(const std::filesystem::path& staging_path);
-#endif
     bool CleanupFiles();
     std::filesystem::path GetTempDirectory() const;
     std::filesystem::path GetApplicationDirectory() const;
@@ -118,6 +107,7 @@ private:
     std::filesystem::path app_directory;
     std::filesystem::path temp_download_path;
     std::filesystem::path backup_path;
+    std::filesystem::path pending_update_zip_path;
 
     static constexpr const char* CITRON_VERSION_FILE = "version.txt";
     static constexpr const char* BACKUP_DIRECTORY = "backup";

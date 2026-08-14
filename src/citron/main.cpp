@@ -5692,12 +5692,7 @@ void GMainWindow::OnAbout() {
 }
 
 void GMainWindow::OnCheckForUpdates() {
-#ifdef _WIN32
-    // The in-app updater is broken for multiple Windows users right now — point them at the
-    // CI releases page instead until it's fixed. See Updater::UpdaterDialog/UpdaterService for
-    // the disabled flow.
-    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/CollectingW/CI/releases")));
-#elif defined(CITRON_USE_AUTO_UPDATER)
+#ifdef CITRON_USE_AUTO_UPDATER
     auto* updater_dialog = new Updater::UpdaterDialog(this);
     updater_dialog->setAttribute(Qt::WA_DeleteOnClose);
     updater_dialog->show();
@@ -7239,12 +7234,40 @@ int main(int argc, char* argv[]) {
         std::filesystem::path(QCoreApplication::applicationDirPath().toStdString());
 
 #ifdef _WIN32
-    // On Windows, updates are applied by the helper script after the app exits.
-    std::filesystem::path staging_path = app_dir / "update_staging";
-    if (std::filesystem::exists(staging_path)) {
-        try {
-            std::filesystem::remove_all(staging_path);
-        } catch (...) {
+    std::filesystem::path update_result_path = app_dir / "update_result.txt";
+    if (std::filesystem::exists(update_result_path)) {
+        std::ifstream result_file(update_result_path);
+        std::string line;
+        std::string status, backup_dir, detail;
+        while (std::getline(result_file, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos)
+                continue;
+            const std::string key = line.substr(0, eq);
+            const std::string value = line.substr(eq + 1);
+            if (key == "STATUS")
+                status = value;
+            else if (key == "BACKUP_DIR")
+                backup_dir = value;
+            else if (key == "DETAIL")
+                detail = value;
+        }
+        result_file.close();
+        std::filesystem::remove(update_result_path);
+
+        if (status == "SUCCESS") {
+            QMessageBox::information(
+                nullptr, QObject::tr("Update Applied"),
+                QObject::tr("Citron Neo has been updated successfully!\n\n"
+                            "Your previous version was backed up to:\n%1")
+                    .arg(QString::fromStdString(backup_dir)));
+        } else if (!status.empty()) {
+            QMessageBox::warning(
+                nullptr, QObject::tr("Update Failed"),
+                QObject::tr("The update could not be applied and was rolled back.\n\n%1\n\n"
+                            "Your previous version is unchanged. A backup is also available at:\n%2")
+                    .arg(QString::fromStdString(detail))
+                    .arg(QString::fromStdString(backup_dir)));
         }
     }
 #else

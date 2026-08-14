@@ -25,12 +25,6 @@
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QStandardPaths>
-#include <QTimer>
-
-#ifdef CITRON_ENABLE_LIBARCHIVE
-#include <archive.h>
-#include <archive_entry.h>
-#endif
 
 #include <fstream>
 #include <regex>
@@ -42,7 +36,15 @@
 
 namespace Updater {
 
-const std::string NIGHTLY_UPDATE_URL = "https://api.github.com/repos/CollectingW/CI/releases";
+// /releases omits nightly-windows entirely even though it's fetchable by tag -- fetch by tag.
+const std::string NIGHTLY_UPDATE_URL =
+#if defined(_WIN32)
+    "https://api.github.com/repos/CollectingW/CI/releases/tags/nightly-windows";
+#elif defined(__linux__)
+    "https://api.github.com/repos/CollectingW/CI/releases/tags/nightly-linux";
+#else
+    "https://api.github.com/repos/CollectingW/CI/releases";
+#endif
 
 std::string ExtractCommitHash(const std::string& version_string) {
     // Hashes in git describe often start with 'g'.
@@ -192,18 +194,13 @@ void UpdaterService::DownloadAndInstallUpdate(const std::string& download_url) {
 
     LOG_INFO(Frontend, "Starting update download from {}", download_url);
 
-#ifdef _WIN32
-    if (!CreateBackup()) {
-        emit UpdateCompleted(UpdateResult::PermissionError,
-                             QStringLiteral("Failed to create backup"));
-        update_in_progress.store(false);
-        return;
-    }
-#endif
-
     QUrl url(QString::fromStdString(download_url));
     QNetworkRequest request(url);
-    request.setRawHeader("User-Agent", QByteArrayLiteral("Citron-Updater/1.0"));
+    // GitHub's release CDN blocks non-browser User-Agents; see ssbu_mod_installer.cpp.
+    request.setRawHeader("User-Agent",
+                         QByteArrayLiteral("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                           "Chrome/131.0.0.0 Safari/537.36"));
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setTransferTimeout(30000);
@@ -296,7 +293,7 @@ bool UpdaterService::IsUpdateInProgress() const {
     return update_in_progress.load();
 }
 
-bool UpdaterService::IsPgoBuild() const {
+bool UpdaterService::IsPgoBuild() {
 #ifdef CITRON_ENABLE_PGO_USE
     return true;
 #else
@@ -305,7 +302,7 @@ bool UpdaterService::IsPgoBuild() const {
 }
 
 bool UpdaterService::CheckPgoWarning(QWidget* parent) {
-    if (!UpdaterService().IsPgoBuild()) {
+    if (!IsPgoBuild()) {
         return true;
     }
     QMessageBox::StandardButton answer =
@@ -348,33 +345,14 @@ void UpdaterService::OnDownloadFinished() {
     file.close();
     LOG_INFO(Frontend, "Download completed: {}", download_path.string());
 
-    QTimer::singleShot(100, this, [this, download_path]() {
-        if (cancel_requested.load()) {
-            update_in_progress.store(false);
-            return;
-        }
-        emit UpdateInstallProgress(10, QStringLiteral("Extracting update archive..."));
-        std::filesystem::path extract_path = temp_download_path / "extracted";
-        if (!ExtractArchive(download_path, extract_path)) {
-            emit UpdateCompleted(UpdateResult::ExtractionError,
-                                 QStringLiteral("Failed to extract update archive"));
-            update_in_progress.store(false);
-            return;
-        }
-        emit UpdateInstallProgress(70, QStringLiteral("Installing update..."));
-        if (!InstallUpdate(extract_path)) {
-            RestoreBackup();
-            emit UpdateCompleted(UpdateResult::Failed, QStringLiteral("Failed to install update"));
-            update_in_progress.store(false);
-            return;
-        }
-        emit UpdateInstallProgress(100, QStringLiteral("Update completed successfully!"));
-        emit UpdateCompleted(
-            UpdateResult::Success,
-            QStringLiteral("Update installed successfully. Please restart the application."));
-        update_in_progress.store(false);
-        CleanupFiles();
-    });
+    pending_update_zip_path = download_path;
+    const QString backup_path_str = QString::fromStdString(GetPendingBackupPath().string());
+    emit UpdateInstallProgress(
+        100, QStringLiteral("Your current version will be backed up to:\n%1").arg(backup_path_str));
+    emit UpdateCompleted(
+        UpdateResult::Success,
+        QStringLiteral("Update downloaded successfully. Citron Neo will restart to apply it."));
+    update_in_progress.store(false);
 #elif defined(__linux__)
 
     LOG_INFO(Frontend, "AppImage download completed.");
@@ -518,7 +496,7 @@ void UpdaterService::OnDownloadError(QNetworkReply::NetworkError) {
 void UpdaterService::ParseUpdateResponse(const QByteArray& response, const QString& channel) {
     QJsonParseError error;
     QJsonDocument doc = QJsonDocument::fromJson(response, &error);
-    if (error.error != QJsonParseError::NoError || !doc.isArray()) {
+    if (error.error != QJsonParseError::NoError || !doc.isObject()) {
         emit UpdateError(QStringLiteral("Failed to parse update response."));
         return;
     }
@@ -536,62 +514,49 @@ void UpdaterService::ParseUpdateResponse(const QByteArray& response, const QStri
     }
 #endif
 
-    for (const QJsonValue& release_value : doc.array()) {
-        QJsonObject release_obj = release_value.toObject();
-        std::string latest_version;
-        if (channel == QStringLiteral("Stable")) {
-            latest_version = release_obj.value(QStringLiteral("tag_name")).toString().toStdString();
-        } else {
-            latest_version = ExtractCommitHash(
-                release_obj.value(QStringLiteral("name")).toString().toStdString());
-        }
+    // NIGHTLY_UPDATE_URL already points at this platform's specific release-by-tag, so the
+    // response is a single release object, not a list to scan.
+    QJsonObject release_obj = doc.object();
+    std::string latest_version;
+    if (channel == QStringLiteral("Stable")) {
+        latest_version = release_obj.value(QStringLiteral("tag_name")).toString().toStdString();
+    } else {
+        latest_version = ExtractCommitHash(
+            release_obj.value(QStringLiteral("name")).toString().toStdString());
+    }
 
-        if (latest_version.empty())
-            continue;
+    if (latest_version.empty()) {
+        emit UpdateError(QStringLiteral("Could not find a recent update for your platform."));
+        return;
+    }
 
-        UpdateInfo update_info;
-        update_info.version = latest_version;
-        update_info.changelog = release_obj.value(QStringLiteral("body")).toString().toStdString();
-        update_info.release_date =
-            release_obj.value(QStringLiteral("published_at")).toString().toStdString();
+    UpdateInfo update_info;
+    update_info.version = latest_version;
+    update_info.changelog = release_obj.value(QStringLiteral("body")).toString().toStdString();
+    update_info.release_date =
+        release_obj.value(QStringLiteral("published_at")).toString().toStdString();
 
-        QJsonArray assets = release_obj.value(QStringLiteral("assets")).toArray();
-        for (const QJsonValue& asset_value : assets) {
-            QJsonObject asset_obj = asset_value.toObject();
-            QString asset_name = asset_obj.value(QStringLiteral("name")).toString();
+    QJsonArray assets = release_obj.value(QStringLiteral("assets")).toArray();
+    for (const QJsonValue& asset_value : assets) {
+        QJsonObject asset_obj = asset_value.toObject();
+        QString asset_name = asset_obj.value(QStringLiteral("name")).toString();
 
 #if defined(__linux__)
-            if (asset_name.endsWith(QStringLiteral(".AppImage"), Qt::CaseInsensitive)) {
-                bool match_variant = false;
-                if (current_variant == QStringLiteral("x86_64_v3")) {
-                    match_variant =
-                        asset_name.contains(QStringLiteral("x86_64_v3"), Qt::CaseInsensitive);
-                } else if (current_variant == QStringLiteral("aarch64")) {
-                    match_variant =
-                        asset_name.contains(QStringLiteral("aarch64"), Qt::CaseInsensitive) ||
-                        asset_name.contains(QStringLiteral("arm64"), Qt::CaseInsensitive);
-                } else {
-                    match_variant =
-                        asset_name.contains(QStringLiteral("x86_64"), Qt::CaseInsensitive) &&
-                        !asset_name.contains(QStringLiteral("x86_64_v3"), Qt::CaseInsensitive);
-                }
-                if (match_variant) {
-                    std::string asset_hash = ExtractCommitHash(asset_name.toStdString());
-                    if (!asset_hash.empty()) {
-                        update_info.version = asset_hash;
-                    }
-                    DownloadOption option;
-                    option.name = asset_name.toStdString();
-                    option.url = asset_obj.value(QStringLiteral("browser_download_url"))
-                                     .toString()
-                                     .toStdString();
-                    update_info.download_options.push_back(option);
-                }
+        if (asset_name.endsWith(QStringLiteral(".AppImage"), Qt::CaseInsensitive)) {
+            bool match_variant = false;
+            if (current_variant == QStringLiteral("x86_64_v3")) {
+                match_variant =
+                    asset_name.contains(QStringLiteral("x86_64_v3"), Qt::CaseInsensitive);
+            } else if (current_variant == QStringLiteral("aarch64")) {
+                match_variant =
+                    asset_name.contains(QStringLiteral("aarch64"), Qt::CaseInsensitive) ||
+                    asset_name.contains(QStringLiteral("arm64"), Qt::CaseInsensitive);
+            } else {
+                match_variant =
+                    asset_name.contains(QStringLiteral("x86_64"), Qt::CaseInsensitive) &&
+                    !asset_name.contains(QStringLiteral("x86_64_v3"), Qt::CaseInsensitive);
             }
-#elif defined(_WIN32)
-            // For Windows, find the .zip file but explicitly skip PGO builds.
-            if (asset_name.endsWith(QStringLiteral(".zip")) &&
-                !asset_name.contains(QStringLiteral("PGO"), Qt::CaseInsensitive)) {
+            if (match_variant) {
                 std::string asset_hash = ExtractCommitHash(asset_name.toStdString());
                 if (!asset_hash.empty()) {
                     update_info.version = asset_hash;
@@ -603,16 +568,30 @@ void UpdaterService::ParseUpdateResponse(const QByteArray& response, const QStri
                                  .toStdString();
                 update_info.download_options.push_back(option);
             }
+        }
+#elif defined(_WIN32)
+        // For Windows, find the .zip file but explicitly skip PGO builds.
+        if (asset_name.endsWith(QStringLiteral(".zip")) &&
+            !asset_name.contains(QStringLiteral("PGO"), Qt::CaseInsensitive)) {
+            std::string asset_hash = ExtractCommitHash(asset_name.toStdString());
+            if (!asset_hash.empty()) {
+                update_info.version = asset_hash;
+            }
+            DownloadOption option;
+            option.name = asset_name.toStdString();
+            option.url = asset_obj.value(QStringLiteral("browser_download_url"))
+                             .toString()
+                             .toStdString();
+            update_info.download_options.push_back(option);
+        }
 #endif
-        }
+    }
 
-        if (!update_info.download_options.empty()) {
-            update_info.is_newer_version =
-                CompareVersions(GetCurrentVersion(), update_info.version);
-            current_update_info = update_info;
-            emit UpdateCheckCompleted(update_info.is_newer_version, update_info);
-            return;
-        }
+    if (!update_info.download_options.empty()) {
+        update_info.is_newer_version = CompareVersions(GetCurrentVersion(), update_info.version);
+        current_update_info = update_info;
+        emit UpdateCheckCompleted(update_info.is_newer_version, update_info);
+        return;
     }
     emit UpdateError(QStringLiteral("Could not find a recent update for your platform."));
 }
@@ -630,353 +609,44 @@ bool UpdaterService::CompareVersions(const std::string& current, const std::stri
 }
 
 #ifdef _WIN32
-bool UpdaterService::ExtractArchive(const std::filesystem::path& archive_path,
-                                    const std::filesystem::path& extract_path) {
-#ifdef CITRON_ENABLE_LIBARCHIVE
-    struct archive* a = archive_read_new();
-    struct archive* ext = archive_write_disk_new();
-    if (!a || !ext)
-        return false;
-    archive_read_support_format_7zip(a);
-    archive_read_support_filter_all(a);
-    archive_write_disk_set_options(ext, ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM);
-    archive_write_disk_set_standard_lookup(ext);
-    if (archive_read_open_filename(a, archive_path.string().c_str(), 10240) != ARCHIVE_OK)
-        return false;
-    EnsureDirectoryExists(extract_path);
-    struct archive_entry* entry;
-    while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-        if (cancel_requested.load())
-            break;
-        std::filesystem::path entry_path = extract_path / archive_entry_pathname(entry);
-        archive_entry_set_pathname(entry, entry_path.string().c_str());
-        if (archive_write_header(ext, entry) != ARCHIVE_OK)
-            continue;
-        const void* buff;
-        size_t size;
-        la_int64_t offset;
-        while (archive_read_data_block(a, &buff, &size, &offset) == ARCHIVE_OK) {
-            if (cancel_requested.load())
-                break;
-            archive_write_data_block(ext, buff, size, offset);
-        }
-        archive_write_finish_entry(ext);
-    }
-    archive_read_close(a);
-    archive_read_free(a);
-    archive_write_close(ext);
-    archive_write_free(ext);
-    return !cancel_requested.load();
-#else
-    return ExtractArchiveWindows(archive_path, extract_path);
-#endif
-}
-
-#if !defined(CITRON_ENABLE_LIBARCHIVE)
-bool UpdaterService::ExtractArchiveWindows(const std::filesystem::path& archive_path,
-                                           const std::filesystem::path& extract_path) {
-    EnsureDirectoryExists(extract_path);
-    std::string sevenzip_cmd =
-        "7z x \"" + archive_path.string() + "\" -o\"" + extract_path.string() + "\" -y";
-    if (std::system(sevenzip_cmd.c_str()) == 0)
-        return true;
-    std::string powershell_cmd = "powershell -Command \"Expand-Archive -Path \\\"" +
-                                 archive_path.string() + "\\\" -DestinationPath \\\"" +
-                                 extract_path.string() + "\\\" -Force\"";
-    if (std::system(powershell_cmd.c_str()) == 0)
-        return true;
-    LOG_ERROR(Frontend, "Failed to extract archive automatically.");
-    return false;
-}
-#endif
-
-bool UpdaterService::InstallUpdate(const std::filesystem::path& update_path) {
-    try {
-        std::filesystem::path source_path = update_path;
-        std::vector<std::filesystem::path> top_level_items;
-        for (const auto& entry : std::filesystem::directory_iterator(update_path)) {
-            top_level_items.push_back(entry.path());
-        }
-        if (top_level_items.size() == 1 && std::filesystem::is_directory(top_level_items[0])) {
-            source_path = top_level_items[0];
-        }
-        std::filesystem::path staging_path = app_directory / "update_staging";
-        EnsureDirectoryExists(staging_path);
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(source_path)) {
-            if (cancel_requested.load())
-                return false;
-            if (entry.is_regular_file()) {
-                std::filesystem::path relative_path =
-                    std::filesystem::relative(entry.path(), source_path);
-                std::filesystem::path staging_dest = staging_path / relative_path;
-                std::filesystem::create_directories(staging_dest.parent_path());
-                std::filesystem::copy_file(entry.path(), staging_dest,
-                                           std::filesystem::copy_options::overwrite_existing);
-            }
-        }
-        std::filesystem::path manifest_file = staging_path / "update_manifest.txt";
-        std::ofstream manifest(manifest_file);
-        if (manifest.is_open()) {
-            manifest << "UPDATE_VERSION=" << current_update_info.version << "\n";
-            manifest << "UPDATE_TIMESTAMP=" << std::time(nullptr) << "\n";
-            manifest << "APP_DIRECTORY=" << app_directory.string() << "\n";
-        }
-
-        // Create the update helper script for deferred update application
-        if (!CreateUpdateHelperScript(staging_path)) {
-            LOG_ERROR(Frontend, "Failed to create update helper script");
-            return false;
-        }
-
-        LOG_INFO(Frontend, "Update staged successfully.");
-        return true;
-    } catch (const std::exception& e) {
-        LOG_ERROR(Frontend, "Failed to install update: {}", e.what());
-        return false;
-    }
-}
-
-bool UpdaterService::CreateBackup() {
-    try {
-        std::filesystem::path backup_dir = backup_path / ("backup_" + GetCurrentVersion());
-        if (std::filesystem::exists(backup_dir)) {
-            std::filesystem::remove_all(backup_dir);
-        }
-        std::filesystem::create_directories(backup_dir);
-        std::vector<std::string> backup_patterns = {"citron.exe", "citron_cmd.exe", "*.dll",
-                                                    "*.pdb"};
-        for (const auto& entry : std::filesystem::directory_iterator(app_directory)) {
-            if (entry.is_regular_file()) {
-                std::string filename = entry.path().filename().string();
-                std::string extension = entry.path().extension().string();
-                bool should_backup = false;
-                for (const auto& pattern : backup_patterns) {
-                    if (pattern == filename ||
-                        (pattern.starts_with("*") && pattern.substr(1) == extension)) {
-                        should_backup = true;
-                        break;
-                    }
-                }
-                if (should_backup) {
-                    std::filesystem::copy_file(entry.path(), backup_dir / filename);
-                }
-            }
-        }
-        LOG_INFO(Frontend, "Backup created: {}", backup_dir.string());
-        return true;
-    } catch (const std::exception& e) {
-        LOG_ERROR(Frontend, "Failed to create backup: {}", e.what());
-        return false;
-    }
-}
-
-bool UpdaterService::RestoreBackup() {
-    try {
-        std::filesystem::path backup_dir = backup_path / ("backup_" + GetCurrentVersion());
-        if (!std::filesystem::exists(backup_dir))
-            return false;
-        for (const auto& entry : std::filesystem::directory_iterator(backup_dir)) {
-            if (entry.is_regular_file()) {
-                std::filesystem::path dest_path = app_directory / entry.path().filename();
-                std::filesystem::copy_file(entry.path(), dest_path,
-                                           std::filesystem::copy_options::overwrite_existing);
-            }
-        }
-        LOG_INFO(Frontend, "Backup restored successfully");
-        return true;
-    } catch (const std::exception& e) {
-        LOG_ERROR(Frontend, "Failed to restore backup: {}", e.what());
-        return false;
-    }
-}
-
-bool UpdaterService::CreateUpdateHelperScript(const std::filesystem::path& staging_path) {
-    try {
-        std::filesystem::path script_path = staging_path / "apply_update.bat";
-        LOG_INFO(Frontend, "Creating update helper script at: {}", script_path.string());
-
-        if (!std::filesystem::exists(staging_path)) {
-            LOG_ERROR(Frontend, "Staging path does not exist: {}", staging_path.string());
-            return false;
-        }
-
-        std::ofstream script(script_path, std::ios::out | std::ios::trunc);
-        if (!script.is_open()) {
-            LOG_ERROR(Frontend, "Failed to open file for writing: {}", script_path.string());
-            return false;
-        }
-
-        std::string staging_path_str = staging_path.string();
-        std::string app_path_str = app_directory.string();
-        std::string exe_path_str = (app_directory / "citron.exe").string();
-
-        for (auto& ch : staging_path_str)
-            if (ch == '/')
-                ch = '\\';
-        for (auto& ch : app_path_str)
-            if (ch == '/')
-                ch = '\\';
-        for (auto& ch : exe_path_str)
-            if (ch == '/')
-                ch = '\\';
-
-        script << "@echo off\n";
-        script << "setlocal enabledelayedexpansion\n";
-        script << "REM Citron Auto-Updater Helper Script\n\n";
-
-        script << "echo Waiting for Citron to close...\n";
-
-        // Wait for citron.exe to close, with a longer timeout
-        script << "set /a wait_count=0\n";
-        script << ":wait_loop\n";
-        script << "tasklist /FI \"IMAGENAME eq citron.exe\" | find /I \"citron.exe\" >nul 2>&1\n";
-        script << "if not errorlevel 1 (\n";
-        script << "    set /a wait_count+=1\n";
-        script << "    if !wait_count! gtr 60 (\n";
-        script << "        echo Warning: Citron process still running after 60 seconds, proceeding "
-                  "anyway...\n";
-        script << "        goto wait_done\n";
-        script << "    )\n";
-        script << "    timeout /t 1 /nobreak >nul\n";
-        script << "    goto wait_loop\n";
-        script << ")\n";
-        script << ":wait_done\n";
-        script << "timeout /t 2 /nobreak >nul\n";
-        script << "echo Citron has closed. Preparing update...\n\n";
-
-        // Remove read-only attributes from all files in the destination directory
-        script << "echo Removing read-only attributes from existing files...\n";
-        script << "attrib -R \"" << app_path_str << "\\*.*\" /S /D >nul 2>&1\n";
-        script << "if exist \"" << app_path_str << "\\citron.exe\" attrib -R \"" << app_path_str
-               << "\\citron.exe\" >nul 2>&1\n";
-        script << "if exist \"" << app_path_str << "\\citron_cmd.exe\" attrib -R \"" << app_path_str
-               << "\\citron_cmd.exe\" >nul 2>&1\n\n";
-
-        // Use robocopy for more reliable copying (available on Windows Vista+)
-        script << "echo Copying update files...\n";
-        script << "set /a copy_retries=0\n";
-        script << ":copy_loop\n";
-        script << "robocopy \"" << staging_path_str << "\" \"" << app_path_str
-               << "\" /E /IS /IT /R:3 /W:1 /NP /NFL /NDL >nul 2>&1\n";
-        script << "set /a robocopy_exit=!errorlevel!\n";
-        script << "REM Robocopy returns 0-7 for success, 8+ for errors\n";
-        script << "if !robocopy_exit! geq 8 (\n";
-        script << "    set /a copy_retries+=1\n";
-        script << "    if !copy_retries! lss 3 (\n";
-        script << "        echo Copy attempt !copy_retries! failed, retrying...\n";
-        script << "        timeout /t 2 /nobreak >nul\n";
-        script << "        REM Try removing read-only again\n";
-        script << "        attrib -R \"" << app_path_str << "\\*.*\" /S /D >nul 2>&1\n";
-        script << "        goto copy_loop\n";
-        script << "    ) else (\n";
-        script << "        echo ERROR: Failed to copy update files after 3 attempts.\n";
-        script << "        echo Error code: !robocopy_exit!\n";
-        script << "        echo.\n";
-        script << "        echo Update failed. Please restart Citron manually.\n";
-        script << "        echo You may need to run this script as Administrator.\n";
-        script << "        pause\n";
-        script << "        exit /b 1\n";
-        script << "    )\n";
-        script << ")\n\n";
-
-        // Verify critical files were copied
-        script << "if not exist \"" << exe_path_str << "\" (\n";
-        script << "    echo ERROR: citron.exe was not copied successfully.\n";
-        script << "    echo Update failed. Please restart Citron manually.\n";
-        script << "    pause\n";
-        script << "    exit /b 1\n";
-        script << ")\n\n";
-
-        script << "echo Update applied successfully!\n";
-        script << "echo Restarting Citron...\n";
-        script << "timeout /t 1 /nobreak >nul\n";
-        script << "start \"\" \"" << exe_path_str << "\"\n\n";
-
-        // Clean up staging directory with retry
-        script << "REM Cleaning up staging directory...\n";
-        script << "set /a cleanup_retries=0\n";
-        script << ":cleanup_loop\n";
-        script << "rd /s /q \"" << staging_path_str << "\" >nul 2>&1\n";
-        script << "if exist \"" << staging_path_str << "\" (\n";
-        script << "    set /a cleanup_retries+=1\n";
-        script << "    if !cleanup_retries! lss 5 (\n";
-        script << "        timeout /t 1 /nobreak >nul\n";
-        script << "        goto cleanup_loop\n";
-        script << "    )\n";
-        script << ")\n\n";
-
-        script << "REM Delete this script (with retry)\n";
-        script << "set /a del_retries=0\n";
-        script << ":del_script_loop\n";
-        script << "del \"%~f0\" >nul 2>&1\n";
-        script << "if exist \"%~f0\" (\n";
-        script << "    set /a del_retries+=1\n";
-        script << "    if !del_retries! lss 3 (\n";
-        script << "        timeout /t 1 /nobreak >nul\n";
-        script << "        goto del_script_loop\n";
-        script << "    )\n";
-        script << ")\n";
-        script << "exit /b 0\n";
-
-        script.flush();
-        script.close();
-
-        LOG_INFO(Frontend, "Update helper script created successfully: {}", script_path.string());
-        return true;
-    } catch (const std::exception& e) {
-        LOG_ERROR(Frontend, "Exception creating update helper script: {}", e.what());
-        return false;
-    }
+std::filesystem::path UpdaterService::GetPendingBackupPath() const {
+    return backup_path / ("backup_" + current_update_info.version);
 }
 
 bool UpdaterService::LaunchUpdateHelper() {
-    try {
-        std::filesystem::path staging_path = app_directory / "update_staging";
-        std::filesystem::path script_path = staging_path / "apply_update.bat";
-
-        if (!std::filesystem::exists(script_path)) {
-            LOG_ERROR(Frontend, "Update helper script not found at: {}", script_path.string());
-            return false;
-        }
-
-        // Verify the script is readable
-        std::ifstream test_read(script_path);
-        if (!test_read.good()) {
-            LOG_ERROR(Frontend, "Update helper script exists but cannot be read");
-            return false;
-        }
-        test_read.close();
-
-        // Launch the batch script as a detached process
-        QString script_path_str = QString::fromStdString(script_path.string());
-        QStringList arguments;
-        arguments << QStringLiteral("/C");
-        arguments << script_path_str;
-
-        // Use cmd.exe to run the batch file
-        // Note: We don't hide the window so users can see progress and any errors
-        bool launched = QProcess::startDetached(QStringLiteral("cmd.exe"), arguments);
-
-        if (launched) {
-            LOG_INFO(Frontend, "Update helper script launched successfully from: {}",
-                     script_path.string());
-            return true;
-        } else {
-            LOG_ERROR(
-                Frontend,
-                "Failed to launch update helper script. QProcess::startDetached returned false");
-            return false;
-        }
-    } catch (const std::exception& e) {
-        LOG_ERROR(Frontend, "Exception launching update helper: {}", e.what());
+    const std::filesystem::path helper_path = app_directory / "citron-updater-helper.exe";
+    if (!std::filesystem::exists(helper_path)) {
+        LOG_ERROR(Frontend, "Update helper executable not found at: {}", helper_path.string());
         return false;
     }
+    if (pending_update_zip_path.empty() || !std::filesystem::exists(pending_update_zip_path)) {
+        LOG_ERROR(Frontend, "No pending update archive to hand off to the helper.");
+        return false;
+    }
+
+    QStringList arguments;
+    arguments << QStringLiteral("--pid") << QString::number(QCoreApplication::applicationPid());
+    arguments << QStringLiteral("--zip")
+              << QString::fromStdString(pending_update_zip_path.string());
+    arguments << QStringLiteral("--app-dir") << QString::fromStdString(app_directory.string());
+    arguments << QStringLiteral("--version")
+              << QString::fromStdString(current_update_info.version);
+
+    const bool launched =
+        QProcess::startDetached(QString::fromStdString(helper_path.string()), arguments);
+    if (launched) {
+        LOG_INFO(Frontend, "Update helper launched successfully: {}", helper_path.string());
+    } else {
+        LOG_ERROR(Frontend, "Failed to launch update helper executable.");
+    }
+    return launched;
 }
 #endif
 
 bool UpdaterService::CleanupFiles() {
     try {
-        if (std::filesystem::exists(temp_download_path)) {
+        // Skip while handed off to the helper -- don't delete the archive out from under it.
+        if (pending_update_zip_path.empty() && std::filesystem::exists(temp_download_path)) {
             std::filesystem::remove_all(temp_download_path);
         }
 #ifdef _WIN32

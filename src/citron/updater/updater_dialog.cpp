@@ -437,9 +437,11 @@ void UpdaterDialog::ShowCompletedState() {
     current_state = State::Completed;
 
 #ifdef _WIN32
-    // On Windows, launch the update helper script and exit immediately
     ui->titleLabel->setText(QStringLiteral("Update ready!"));
-    ui->statusLabel->setText(QStringLiteral("Citron Neo will now restart to apply the update..."));
+    ui->statusLabel->setText(
+        QStringLiteral("Citron Neo will now restart to apply the update.\n\n"
+                       "Your current version is being backed up to:\n%1")
+            .arg(QString::fromStdString(updater_service->GetPendingBackupPath().string())));
     ui->progressGroup->setVisible(false);
     ui->downloadButton->setVisible(false);
     ui->cancelButton->setVisible(false);
@@ -449,15 +451,14 @@ void UpdaterDialog::ShowCompletedState() {
     ui->appImageSelectorLabel->setVisible(false);
     ui->appImageSelector->setVisible(false);
 
-    // Give the user a moment to see the message
-    QTimer::singleShot(1500, this, [this]() {
+    QTimer::singleShot(3000, this, [this]() {
         if (updater_service->LaunchUpdateHelper()) {
             QApplication::quit();
         } else {
             ShowErrorState();
             ui->statusLabel->setText(
-                QStringLiteral("Failed to launch update helper. Please restart Citron manually to "
-                               "apply the update."));
+                QStringLiteral("Failed to launch the update helper (citron-updater-helper.exe "
+                               "missing or failed to start). Please update manually."));
         }
     });
 #else

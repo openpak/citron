@@ -160,6 +160,65 @@ if (NOT TARGET zstd::libzstd_static)
     endif()
 endif()
 
+# ── libarchive (Windows only) ──────────────────────────────────────────────────
+# find_package(LibArchive) at the bottom of the top-level CMakeLists.txt has nothing to find
+# on Windows: vcpkg is disabled for the CPM build (CITRON_USE_BUNDLED_VCPKG=OFF), and MSYS2's
+# pacman-installed libarchive is MinGW-ABI, incompatible with clang-cl. Without it, ZIP
+# extraction (firmware, SSBU mods, and anything else routed through ExtractZipToDirectory)
+# falls back to shelling out to PowerShell's Expand-Archive, which determines archive type
+# from the file extension rather than content and offers no useful error reporting on failure.
+# Fetch and build a minimal libarchive (zip/deflate only, matching the version the vendored
+# vcpkg port already pins) via CPM instead, same as every other Windows dependency here.
+if (WIN32 AND NOT TARGET LibArchive::LibArchive)
+    # libarchive's own CMakeLists.txt does a plain FIND_PACKAGE(ZLIB), unaware of the
+    # ZLIB::ZLIB target above -- pre-seed the cache vars that module-mode search checks first
+    # so it picks up the CPM-built zlib instead of silently building without deflate support.
+    if (TARGET zlibstatic)
+        set(ZLIB_INCLUDE_DIR "${ZLIB_SOURCE_DIR};${ZLIB_BINARY_DIR}" CACHE PATH "" FORCE)
+        set(ZLIB_LIBRARY zlibstatic CACHE STRING "" FORCE)
+    endif()
+    CPMAddPackage(
+        NAME libarchive
+        GITHUB_REPOSITORY libarchive/libarchive
+        GIT_TAG v3.8.6
+        OPTIONS
+            "ENABLE_ZLIB ON"
+            "ENABLE_BZip2 OFF"
+            "ENABLE_LIBXML2 OFF"
+            "ENABLE_EXPAT OFF"
+            "ENABLE_LZMA OFF"
+            "ENABLE_LZO OFF"
+            "ENABLE_LZ4 OFF"
+            "ENABLE_ZSTD OFF"
+            "ENABLE_OPENSSL OFF"
+            "ENABLE_MBEDTLS OFF"
+            "ENABLE_NETTLE OFF"
+            "ENABLE_PCREPOSIX OFF"
+            "ENABLE_LibGCC OFF"
+            "ENABLE_CNG OFF"
+            "ENABLE_TAR OFF"
+            "ENABLE_CPIO OFF"
+            "ENABLE_CAT OFF"
+            "ENABLE_UNZIP OFF"
+            "ENABLE_XATTR OFF"
+            "ENABLE_ACL OFF"
+            "ENABLE_ICONV OFF"
+            "ENABLE_LIBB2 OFF"
+            "ENABLE_TEST OFF"
+            "ENABLE_WERROR OFF"
+            "ENABLE_INSTALL OFF"
+            "BUILD_SHARED_LIBS OFF"
+    )
+    if (TARGET archive_static AND NOT TARGET LibArchive::LibArchive)
+        # archive.h declares every function __declspec(dllimport) unless LIBARCHIVE_STATIC is
+        # defined for consumers; without this, linking against the static lib fails with
+        # "undefined symbol: __declspec(dllimport) archive_read_new" and similar for every symbol.
+        target_compile_definitions(archive_static PUBLIC LIBARCHIVE_STATIC)
+        add_library(LibArchive::LibArchive ALIAS archive_static)
+        set(LibArchive_FOUND TRUE CACHE BOOL "" FORCE)
+    endif()
+endif()
+
 # ── OpenSSL ───────────────────────────────────────────────────────────────────
 if (ENABLE_OPENSSL OR ENABLE_WEB_SERVICE)
     include(${CMAKE_SOURCE_DIR}/CMakeModules/openssl_build.cmake)

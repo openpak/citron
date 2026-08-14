@@ -267,6 +267,10 @@ if (ENABLE_SDL2)
     add_subdirectory_without_clangcl_pgo(citron_cmd)
 endif()
 
+if (WIN32)
+    add_subdirectory_without_clangcl_pgo(citron_updater_helper)
+endif()
+
 if (ENABLE_QT)
     add_subdirectory(citron)
 endif()
