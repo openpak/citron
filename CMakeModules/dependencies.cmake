@@ -160,7 +160,7 @@ if (NOT TARGET zstd::libzstd_static)
     endif()
 endif()
 
-# ── libarchive (Windows only) ──────────────────────────────────────────────────
+# ── libarchive (Windows only) ─────────────────────────────────────────────────
 # find_package(LibArchive) at the bottom of the top-level CMakeLists.txt has nothing to find
 # on Windows: vcpkg is disabled for the CPM build (CITRON_USE_BUNDLED_VCPKG=OFF), and MSYS2's
 # pacman-installed libarchive is MinGW-ABI, incompatible with clang-cl. Without it, ZIP
