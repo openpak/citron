@@ -665,6 +665,15 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
 }
 
 GMainWindow::~GMainWindow() {
+    // system is a plain data member, destroyed (along with the RoomNetwork it owns) during
+    // GMainWindow's own implicit member teardown, which runs before Qt's base-class destructor
+    // gets around to deleting Qt-parented children like multiplayer_room_overlay. Left to Qt's
+    // own cleanup order, MultiplayerRoomOverlay::~MultiplayerRoomOverlay (-> DisconnectFromRoom
+    // -> ChatRoom::Shutdown) would run after RoomNetwork is already gone and crash dereferencing
+    // it. Delete it explicitly here, first, while system is still alive.
+    delete multiplayer_room_overlay;
+    multiplayer_room_overlay = nullptr;
+
     delete game_list;
     game_list = nullptr;
     // will get automatically deleted otherwise
