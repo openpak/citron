@@ -20,6 +20,7 @@ namespace {
 // the headers define an enum containing Network and Service as enumerators
 // (which clash with the correspondingly named namespaces).
 #define SECURITY_WIN32
+#include <schannel.h>
 #include <schnlsp.h>
 #include <security.h>
 #include <wincrypt.h>
@@ -210,8 +211,33 @@ public:
             req |= ISC_REQ_MANUAL_CRED_VALIDATION;
         }
         unsigned long attr;
+        bool initial_call_done = handshake_state != HandshakeState::Initial;
+
+        // [OpenPak] NEX (MK8/Splatoon 2) uses PRUDP over WebSocket which requires HTTP/1.1
+        // Upgrade. Force ALPN to http/1.1 only so HTTP/2 is never negotiated, matching the
+        // OpenSSL backend. Only valid in the client's first ClientHello.
+        static constexpr u8 kAlpnProtocolList[] = "\x08http/1.1";
+        std::array<u8, 4 + 4 + 2 + (sizeof(kAlpnProtocolList) - 1)> alpn_buf;
+        if (!initial_call_done) {
+            size_t off = 0;
+            const u32 list_size = static_cast<u32>(4 + 2 + (sizeof(kAlpnProtocolList) - 1));
+            const auto put_u32 = [&](u32 v) {
+                alpn_buf[off + 0] = static_cast<u8>(v);
+                alpn_buf[off + 1] = static_cast<u8>(v >> 8);
+                alpn_buf[off + 2] = static_cast<u8>(v >> 16);
+                alpn_buf[off + 3] = static_cast<u8>(v >> 24);
+                off += 4;
+            };
+            put_u32(list_size);                                 // ProtocolListsSize
+            put_u32(SecApplicationProtocolNegotiationExt_ALPN);  // ProtoNegoExt
+            alpn_buf[off + 0] = static_cast<u8>(sizeof(kAlpnProtocolList) - 1);
+            alpn_buf[off + 1] = 0; // ProtocolListSize (u16 LE)
+            off += 2;
+            std::memcpy(alpn_buf.data() + off, kAlpnProtocolList, sizeof(kAlpnProtocolList) - 1);
+        }
+
         // https://learn.microsoft.com/en-us/windows/win32/secauthn/initializesecuritycontext--schannel
-        std::array<SecBuffer, 2> input_buffers{{
+        std::array<SecBuffer, 3> input_buffers{{
             // only used if `initial_call_done`
             {
                 // [0]
@@ -226,6 +252,12 @@ public:
                 .cbBuffer = 0,
                 .BufferType = SECBUFFER_EMPTY,
                 .pvBuffer = nullptr,
+            },
+            {
+                // [2] ALPN offer; only populated on the initial call.
+                .cbBuffer = initial_call_done ? 0ul : static_cast<unsigned long>(alpn_buf.size()),
+                .BufferType = initial_call_done ? SECBUFFER_EMPTY : SECBUFFER_APPLICATION_PROTOCOLS,
+                .pvBuffer = initial_call_done ? nullptr : alpn_buf.data(),
             },
         }};
         std::array<SecBuffer, 2> output_buffers{{
@@ -254,7 +286,6 @@ public:
             input_buffers[0].cbBuffer == ciphertext_read_buf.size(),
             { return ResultInternalError; }, "read buffer too large");
 
-        bool initial_call_done = handshake_state != HandshakeState::Initial;
         if (initial_call_done) {
             LOG_DEBUG(Service_SSL, "Passing {} bytes into InitializeSecurityContext",
                       ciphertext_read_buf.size());
@@ -332,7 +363,16 @@ public:
     }
 
     Result Pending(s32* out_pending) override {
-        *out_pending = static_cast<s32>(cleartext_read_buf.size());
+        // DecryptMessage() only ever processes one TLS record per call, and Read() returns as
+        // soon as any cleartext is available -- so a second record the server already sent can
+        // sit fully-received but still-encrypted in ciphertext_read_buf. Counting only
+        // cleartext_read_buf here (as before) makes that invisible to HasSslPendingData(), so
+        // bsd:u's Poll never reports the fd readable again and the game can wait forever for
+        // data that already arrived. OpenSSL's SSL_pending() accounts for this internally;
+        // this doesn't decrypt eagerly, but a nonzero ciphertext_read_buf is enough to get the
+        // game to call Read() again, which will decrypt it (or return WouldBlock if the
+        // buffered bytes turn out to be an incomplete record).
+        *out_pending = static_cast<s32>(cleartext_read_buf.size() + ciphertext_read_buf.size());
         return ResultSuccess;
     }
 
