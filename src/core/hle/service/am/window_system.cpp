@@ -41,7 +41,7 @@ WindowSystem::DisplayParams WindowSystem::ComputeStandardDisplayParams(
     Applet& applet, bool is_foreground, bool input_intercepted) const {
     DisplayParams dp{};
 
-    const bool active = applet.is_process_running && is_foreground;
+    const bool active = is_foreground;
 
     dp.visible = active && applet.window_visible;
     dp.interactible = active && applet.window_visible && !input_intercepted;
