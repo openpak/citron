@@ -236,6 +236,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QWidget* parent) {
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, limit_shader_workers, tr("Limit shader compilation threads"),
+           tr("Caps the number of parallel shader compilation threads to 8.\nSome GPU drivers can "
+              "crash or become unstable when too many shader compiles are dispatched at once; "
+              "enable this if you experience crashes while a game is compiling shaders."));
     INSERT(
         Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
         tr("Enable compute pipelines, required by some games.\nThis setting only exists for Intel "

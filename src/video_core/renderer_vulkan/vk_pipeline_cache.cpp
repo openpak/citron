@@ -301,6 +301,10 @@ size_t GetTotalPipelineWorkers() {
     }
     return max_core_threads - free_cores;
 #else
+    if (Settings::values.limit_shader_workers.GetValue()) {
+        constexpr size_t max_limited_workers = 8ULL;
+        return std::min(max_core_threads, max_limited_workers);
+    }
     return max_core_threads;
 #endif
 }

@@ -1149,6 +1149,7 @@ public:
                                    "   padding: 1px 8px; font-size: 10pt; "
                                    "   font-family: 'Outfit', 'Inter', sans-serif; "
                                    "}"));
+                widget->adjustSize();
             }
         }
 

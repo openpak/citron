@@ -506,6 +506,8 @@ struct Values {
                                                              Specialization::Default,
                                                              true,
                                                              true};
+    SwitchableSetting<bool> limit_shader_workers{linkage, false, "limit_shader_workers",
+                                                 Category::RendererAdvanced};
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
     SwitchableSetting<bool> use_video_framerate{linkage, false, "use_video_framerate",
