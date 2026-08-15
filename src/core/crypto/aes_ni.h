@@ -513,6 +513,15 @@ private:
 
 } // namespace detail
 
+// Public helper: true if hardware AES (AES-NI) is available on this CPU.
+// Callers outside this header that use EcbEncBlock/EcbDecBlock/Xts128Enc/
+// Xts128Dec/KeyExpand*/Cmac128 directly must check this first and fall back
+// to a software implementation (e.g. OpenSSL EVP) if false — unlike Ctr128()
+// below, those functions have no built-in dispatch/fallback of their own.
+inline bool HasAesNi() {
+    return detail::CpuFeatures::get().aes_ni;
+}
+
 // ── CTR public interface: runtime dispatch ────────────────────────────────────
 //
 // Dispatch order (widest/fastest first):

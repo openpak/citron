@@ -67,17 +67,21 @@ AESCipher<Key, KeySize>::AESCipher(Key key, Mode mode)
 #ifdef ARCHITECTURE_x86_64
     if constexpr (KeySize == AesNi::kKeySize128) {
         ctx->rounds = static_cast<int>(AesNi::kRoundKeys128);
-        AesNi::KeyExpand128Enc(key.data(), ctx->ks_enc);
-        AesNi::KeyExpand128Dec(ctx->ks_enc, ctx->ks_dec);
         // For XTS: raw_key[16..31] mirrors [0..15] (same key for data and tweak).
+        // Needed by both the AES-NI path and the OpenSSL XTS fallback below.
         std::memcpy(ctx->raw_key + 16, key.data(), AesNi::kKeySize128);
 
-        if (mode == Mode::XTS) {
-            // Key128 + XTS: same 16-byte key for data and tweak.
-            // Non-standard but matches existing yuzu/citron behaviour;
-            // in practice Key128+XTS is never instantiated (all XTS callers
-            // use Key256).
-            AesNi::KeyExpand128Enc(key.data(), ctx->ks_tweak);
+        if (AesNi::HasAesNi()) {
+            AesNi::KeyExpand128Enc(key.data(), ctx->ks_enc);
+            AesNi::KeyExpand128Dec(ctx->ks_enc, ctx->ks_dec);
+
+            if (mode == Mode::XTS) {
+                // Key128 + XTS: same 16-byte key for data and tweak.
+                // Non-standard but matches existing yuzu/citron behaviour;
+                // in practice Key128+XTS is never instantiated (all XTS callers
+                // use Key256).
+                AesNi::KeyExpand128Enc(key.data(), ctx->ks_tweak);
+            }
         }
     } else {
         // AES-256 key material — but XTS-AES-128 uses two independent 128-bit
@@ -85,17 +89,22 @@ AESCipher<Key, KeySize>::AESCipher(Key key, Mode mode)
         // AES-128 (11 round keys each). The full 256-bit AES-256 key schedule
         // is never used in XTS mode.
         ctx->rounds = static_cast<int>(AesNi::kRoundKeys256);
-        if (mode == Mode::XTS) {
-            // XTS: data key = key[0..15], tweak key = key[16..31], both AES-128.
-            AesNi::KeyExpand128Enc(key.data(), ctx->ks_enc);
-            AesNi::KeyExpand128Dec(ctx->ks_enc, ctx->ks_dec);
-            AesNi::KeyExpand128Enc(key.data() + AesNi::kKeySize128, ctx->ks_tweak);
-        } else {
-            // ECB/CTR: use full AES-256 key schedule.
-            AesNi::KeyExpand256Enc(key.data(), ctx->ks_enc);
-            AesNi::KeyExpand256Dec(ctx->ks_enc, ctx->ks_dec);
+        if (AesNi::HasAesNi()) {
+            if (mode == Mode::XTS) {
+                // XTS: data key = key[0..15], tweak key = key[16..31], both AES-128.
+                AesNi::KeyExpand128Enc(key.data(), ctx->ks_enc);
+                AesNi::KeyExpand128Dec(ctx->ks_enc, ctx->ks_dec);
+                AesNi::KeyExpand128Enc(key.data() + AesNi::kKeySize128, ctx->ks_tweak);
+            } else {
+                // ECB/CTR: use full AES-256 key schedule.
+                AesNi::KeyExpand256Enc(key.data(), ctx->ks_enc);
+                AesNi::KeyExpand256Dec(ctx->ks_enc, ctx->ks_dec);
+            }
         }
     }
+    // If AES-NI is unavailable, ks_enc/ks_dec/ks_tweak are left unset here;
+    // Transcode() below checks AesNi::HasAesNi() before ever reading them,
+    // using the OpenSSL EVP fallback (over ctx->raw_key) instead.
 #endif // ARCHITECTURE_x86_64
 }
 
@@ -114,39 +123,42 @@ void AESCipher<Key, KeySize>::Transcode(const u8* src, std::size_t size, u8* des
     switch (ctx->mode) {
     case Mode::ECB: {
 #ifdef ARCHITECTURE_x86_64
-        if (size < AesNi::kBlockSize) {
-            u8 block[AesNi::kBlockSize] = {};
-            std::memcpy(block, src, size);
-            if (op == Op::Encrypt)
-                AesNi::EcbEncBlock(ctx->ks_enc, ctx->rounds, block, block);
-            else
-                AesNi::EcbDecBlock(ctx->ks_dec, ctx->rounds, block, block);
-            std::memcpy(dest, block, size);
-            return;
-        }
-        for (std::size_t off = 0; off < size; off += AesNi::kBlockSize) {
-            const std::size_t chunk = std::min(AesNi::kBlockSize, size - off);
-            if (chunk < AesNi::kBlockSize) {
+        if (AesNi::HasAesNi()) {
+            if (size < AesNi::kBlockSize) {
                 u8 block[AesNi::kBlockSize] = {};
-                std::memcpy(block, src + off, chunk);
+                std::memcpy(block, src, size);
                 if (op == Op::Encrypt)
                     AesNi::EcbEncBlock(ctx->ks_enc, ctx->rounds, block, block);
                 else
                     AesNi::EcbDecBlock(ctx->ks_dec, ctx->rounds, block, block);
-                std::memcpy(dest + off, block, chunk);
-            } else {
-                if (op == Op::Encrypt)
-                    AesNi::EcbEncBlock(ctx->ks_enc, ctx->rounds, src + off, dest + off);
-                else
-                    AesNi::EcbDecBlock(ctx->ks_dec, ctx->rounds, src + off, dest + off);
+                std::memcpy(dest, block, size);
+                return;
             }
+            for (std::size_t off = 0; off < size; off += AesNi::kBlockSize) {
+                const std::size_t chunk = std::min(AesNi::kBlockSize, size - off);
+                if (chunk < AesNi::kBlockSize) {
+                    u8 block[AesNi::kBlockSize] = {};
+                    std::memcpy(block, src + off, chunk);
+                    if (op == Op::Encrypt)
+                        AesNi::EcbEncBlock(ctx->ks_enc, ctx->rounds, block, block);
+                    else
+                        AesNi::EcbDecBlock(ctx->ks_dec, ctx->rounds, block, block);
+                    std::memcpy(dest + off, block, chunk);
+                } else {
+                    if (op == Op::Encrypt)
+                        AesNi::EcbEncBlock(ctx->ks_enc, ctx->rounds, src + off, dest + off);
+                    else
+                        AesNi::EcbDecBlock(ctx->ks_dec, ctx->rounds, src + off, dest + off);
+                }
+            }
+            break;
         }
-#else
-        // Non-x86: OpenSSL EVP ECB
+#endif
+        // OpenSSL EVP ECB: used on non-x86_64, and on x86_64 when AES-NI is
+        // unavailable at runtime (see AesNi::HasAesNi() above).
         {
-            const EVP_CIPHER* cipher = (ctx->key_size == 16)
-                ? (op == Op::Encrypt ? EVP_aes_128_ecb() : EVP_aes_128_ecb())
-                : (op == Op::Encrypt ? EVP_aes_256_ecb() : EVP_aes_256_ecb());
+            const EVP_CIPHER* cipher =
+                (ctx->key_size == 16) ? EVP_aes_128_ecb() : EVP_aes_256_ecb();
             EVP_CIPHER_CTX* evp = EVP_CIPHER_CTX_new();
             if (op == Op::Encrypt) {
                 EVP_EncryptInit_ex(evp, cipher, nullptr, ctx->raw_key, nullptr);
@@ -171,7 +183,6 @@ void AESCipher<Key, KeySize>::Transcode(const u8* src, std::size_t size, u8* des
             }
             EVP_CIPHER_CTX_free(evp);
         }
-#endif
         break;
     }
     case Mode::CTR: {
@@ -195,8 +206,8 @@ void AESCipher<Key, KeySize>::Transcode(const u8* src, std::size_t size, u8* des
     case Mode::XTS: {
 #ifdef ARCHITECTURE_x86_64
         // Below kXtsOsslThreshold: intrinsic loop wins (zero EVP overhead).
-        // Above it: OpenSSL's 6-block-interleaved asm is faster.
-        if (size <= AesNi::kXtsOsslThreshold) {
+        // Above it, or when AES-NI isn't available at runtime: OpenSSL EVP.
+        if (AesNi::HasAesNi() && size <= AesNi::kXtsOsslThreshold) {
             if (op == Op::Encrypt)
                 AesNi::Xts128Enc(ctx->ks_enc, ctx->ks_tweak, ctx->iv, src, dest, size);
             else

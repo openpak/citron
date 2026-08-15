@@ -1046,25 +1046,31 @@ void KeyManager::DeriveSDSeedLazy() {
 static Key128 CalculateCMAC(const u8* source, size_t size, const Key128& key) {
     Key128 out{};
 #ifdef ARCHITECTURE_x86_64
-    __m128i ks[AesNi::kRoundKeys128];
-    AesNi::KeyExpand128Enc(key.data(), ks);
-    AesNi::Cmac128(ks, source, size, out.data());
-#else
-    EVP_MAC* mac = EVP_MAC_fetch(nullptr, "CMAC", nullptr);
-    EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(mac);
-    EVP_MAC_free(mac);
-    OSSL_PARAM params[] = {
-        OSSL_PARAM_construct_utf8_string("cipher",
-            const_cast<char*>("AES-128-CBC"), 0),
-        OSSL_PARAM_construct_end()
-    };
-    EVP_MAC_init(ctx, key.data(), 16, params);
-    if (source && size > 0)
-        EVP_MAC_update(ctx, source, size);
-    size_t outlen = 16;
-    EVP_MAC_final(ctx, out.data(), &outlen, 16);
-    EVP_MAC_CTX_free(ctx);
+    if (AesNi::HasAesNi()) {
+        __m128i ks[AesNi::kRoundKeys128];
+        AesNi::KeyExpand128Enc(key.data(), ks);
+        AesNi::Cmac128(ks, source, size, out.data());
+        return out;
+    }
 #endif
+    // OpenSSL EVP CMAC: used on non-x86_64, and on x86_64 when AES-NI is
+    // unavailable at runtime (see AesNi::HasAesNi() above).
+    {
+        EVP_MAC* mac = EVP_MAC_fetch(nullptr, "CMAC", nullptr);
+        EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(mac);
+        EVP_MAC_free(mac);
+        OSSL_PARAM params[] = {
+            OSSL_PARAM_construct_utf8_string("cipher",
+                const_cast<char*>("AES-128-CBC"), 0),
+            OSSL_PARAM_construct_end()
+        };
+        EVP_MAC_init(ctx, key.data(), 16, params);
+        if (source && size > 0)
+            EVP_MAC_update(ctx, source, size);
+        size_t outlen = 16;
+        EVP_MAC_final(ctx, out.data(), &outlen, 16);
+        EVP_MAC_CTX_free(ctx);
+    }
     return out;
 }
 

@@ -325,21 +325,24 @@ void Cipher(const DerivedKeys& keys, const NTAG215File& in_data, NTAG215File& ou
     constexpr std::size_t encrypted_data_size = HMAC_TAG_START - SETTINGS_START;
 
 #ifdef ARCHITECTURE_x86_64
-    // Build the AES-128-CTR key schedule and run the single-pass intrinsic CTR.
-    __m128i ks[AesNi::kRoundKeys128];
-    AesNi::KeyExpand128Enc(keys.aes_key.data(), ks);
+    if (AesNi::HasAesNi()) {
+        // Build the AES-128-CTR key schedule and run the single-pass intrinsic CTR.
+        __m128i ks[AesNi::kRoundKeys128];
+        AesNi::KeyExpand128Enc(keys.aes_key.data(), ks);
 
-    uint8_t ctr[AesNi::kBlockSize];
-    std::memcpy(ctr, keys.aes_iv.data(), AesNi::kBlockSize);
+        uint8_t ctr[AesNi::kBlockSize];
+        std::memcpy(ctr, keys.aes_iv.data(), AesNi::kBlockSize);
 
-    AesNi::Ctr128(ks,
-                  reinterpret_cast<const uint8_t*>(&in_data.settings),
-                  reinterpret_cast<uint8_t*>(&out_data.settings),
-                  encrypted_data_size,
-                  ctr);
-#else
-    // Non-x86: OpenSSL EVP AES-128-CTR
+        AesNi::Ctr128(ks,
+                      reinterpret_cast<const uint8_t*>(&in_data.settings),
+                      reinterpret_cast<uint8_t*>(&out_data.settings),
+                      encrypted_data_size,
+                      ctr);
+    } else
+#endif
     {
+        // OpenSSL EVP AES-128-CTR: used on non-x86_64, and on x86_64 when
+        // AES-NI is unavailable at runtime (see AesNi::HasAesNi() above).
         EVP_CIPHER_CTX* evp = EVP_CIPHER_CTX_new();
         EVP_EncryptInit_ex(evp, EVP_aes_128_ctr(), nullptr,
                            keys.aes_key.data(), keys.aes_iv.data());
@@ -350,7 +353,6 @@ void Cipher(const DerivedKeys& keys, const NTAG215File& in_data, NTAG215File& ou
                           static_cast<int>(encrypted_data_size));
         EVP_CIPHER_CTX_free(evp);
     }
-#endif
 
     // Copy the rest of the data directly
     out_data.uid = in_data.uid;
