@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -35,10 +37,63 @@ namespace Service::Sockets {
 
 namespace {
 
+// A parked socket's peer can keep sending real P2P data (island/session traffic, not just NAT
+// probes) while nothing is reading it. The original parking scheme only survived being
+// reclaimed once: a second close-without-rebind left the socket parked forever with no thread
+// ever calling RecvFrom on it again, so the guest simply stopped seeing data that was arriving
+// fine at the OS level (confirmed via a live ACNH repro: real data flowed for ~1.5s, the game
+// closed the socket a second time, and every packet afterward vanished into the void). This
+// drain thread keeps consuming datagrams the whole time a socket is parked, so a second close
+// degrades to "temporarily buffered" instead of "silently dropped forever".
+struct ParkedUdpDrain {
+    std::mutex mutex;
+    std::deque<std::pair<std::vector<u8>, Network::SockAddrIn>> queued;
+    std::atomic<bool> stop{false};
+    std::thread thread;
+};
+
+constexpr std::size_t MAX_PARKED_UDP_QUEUE = 256;
+// SO_RCVTIMEO takes milliseconds (Socket::SetRcvTimeo forwards this value straight into
+// setsockopt), NOT microseconds — 200 here, not 200'000, or StopDrain()'s join() can block
+// the caller (a guest service-thread Bind()/Close() call) for the better part of 200 SECONDS
+// waiting on a blocking RecvFrom that has nothing to receive.
+constexpr u32 PARKED_DRAIN_POLL_TIMEOUT_MS = 200;
+
+static void StopDrain(ParkedUdpDrain& drain) {
+    drain.stop.store(true, std::memory_order_relaxed);
+    if (drain.thread.joinable()) {
+        drain.thread.join();
+    }
+}
+
+static void StartDrain(ParkedUdpDrain& drain, std::shared_ptr<Network::SocketBase> socket) {
+    socket->SetRcvTimeo(PARKED_DRAIN_POLL_TIMEOUT_MS);
+    drain.thread = std::thread([&drain, socket = std::move(socket)] {
+        while (!drain.stop.load(std::memory_order_relaxed)) {
+            std::vector<u8> buffer(2048);
+            Network::SockAddrIn addr{};
+            const auto [ret, err] = socket->RecvFrom(0, buffer, &addr);
+            if (ret <= 0) {
+                // Timeout (nothing arrived this poll) or the socket genuinely died — either
+                // way, loop back and check `stop` again rather than spinning on an error.
+                continue;
+            }
+            buffer.resize(static_cast<size_t>(ret));
+
+            std::lock_guard lock(drain.mutex);
+            if (drain.queued.size() >= MAX_PARKED_UDP_QUEUE) {
+                drain.queued.pop_front();
+            }
+            drain.queued.emplace_back(std::move(buffer), addr);
+        }
+    });
+}
+
 struct ParkedUdpSocket {
     std::shared_ptr<Network::SocketBase> socket;
     u16 port;
     std::chrono::steady_clock::time_point park_time;
+    std::unique_ptr<ParkedUdpDrain> drain;
 };
 
 static std::mutex g_parked_udp_mutex;
@@ -49,10 +104,11 @@ constexpr auto PARK_DURATION = std::chrono::seconds{60};
 
 // Caller holds g_parked_udp_mutex.
 static void DropExpiredParkedUdpSockets(std::chrono::steady_clock::time_point now) {
-    std::erase_if(g_parked_udp_sockets, [now](const ParkedUdpSocket& p) {
+    std::erase_if(g_parked_udp_sockets, [now](ParkedUdpSocket& p) {
         if (now - p.park_time <= PARK_DURATION) {
             return false;
         }
+        StopDrain(*p.drain);
         p.socket->Close();
         return true;
     });
@@ -71,19 +127,26 @@ static bool ParkUdpSocket(std::shared_ptr<Network::SocketBase> socket, u16 port)
     const auto existing = std::ranges::find_if(
         g_parked_udp_sockets, [port](const ParkedUdpSocket& p) { return p.port == port; });
     if (existing != g_parked_udp_sockets.end()) {
+        StopDrain(*existing->drain);
         existing->socket->Close();
         g_parked_udp_sockets.erase(existing);
     } else if (g_parked_udp_sockets.size() >= MAX_PARKED_UDP_SOCKETS) {
         return false;
     }
 
-    g_parked_udp_sockets.push_back({std::move(socket), port, now});
+    auto drain = std::make_unique<ParkedUdpDrain>();
+    StartDrain(*drain, socket);
+    g_parked_udp_sockets.push_back({std::move(socket), port, now, std::move(drain)});
     return true;
 }
 
-static std::shared_ptr<Network::SocketBase> TakeParkedUdpSocket(u16 port) {
+// Returns the reclaimed socket plus whatever datagrams its drain thread buffered while parked,
+// oldest first, so the caller can replay them ahead of any new live read.
+static std::pair<std::shared_ptr<Network::SocketBase>,
+                  std::deque<std::pair<std::vector<u8>, Network::SockAddrIn>>>
+TakeParkedUdpSocket(u16 port) {
     if (port == 0) {
-        return nullptr;
+        return {};
     }
 
     std::lock_guard lock(g_parked_udp_mutex);
@@ -93,17 +156,20 @@ static std::shared_ptr<Network::SocketBase> TakeParkedUdpSocket(u16 port) {
     const auto it = std::ranges::find_if(
         g_parked_udp_sockets, [port](const ParkedUdpSocket& p) { return p.port == port; });
     if (it == g_parked_udp_sockets.end()) {
-        return nullptr;
+        return {};
     }
 
+    StopDrain(*it->drain);
     auto socket = it->socket;
+    auto queued = std::move(it->drain->queued);
     g_parked_udp_sockets.erase(it);
-    return socket;
+    return {std::move(socket), std::move(queued)};
 }
 
 void ClearParkedUdpSockets() {
     std::lock_guard lock(g_parked_udp_mutex);
     for (auto& parked : g_parked_udp_sockets) {
+        StopDrain(*parked.drain);
         parked.socket->Close();
     }
     g_parked_udp_sockets.clear();
@@ -116,7 +182,9 @@ std::string DescribePrudpLite(std::span<const u8> data) {
     static constexpr std::array<const char*, 5> type_names{"SYN", "CONNECT", "DATA", "DISCONNECT",
                                                             "PING"};
     if (data.size() < 12 || data[0] != 0x80) {
-        const auto head = data.subspan(0, std::min<size_t>(data.size(), 16));
+        // TEMPORARY DIAGNOSTIC: dump the full packet (not just a 16-byte prefix) so a non-PRUDP-Lite
+        // protocol (e.g. Pia P2P) can actually be read back out of the log instead of guessed at.
+        const auto head = data.subspan(0, std::min<size_t>(data.size(), 1500));
         return fmt::format("raw[{}]={}", data.size(), Common::HexToString(head, false));
     }
     const u16 type_flags = static_cast<u16>(data[8] | (data[9] << 8));
@@ -944,6 +1012,17 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
     } else {
         descriptor.socket = std::make_shared<Network::Socket>();
         descriptor.socket->Initialize(descriptor.domain, descriptor.type, descriptor.protocol);
+        if (type == Type::DGRAM) {
+            // Guest P2P (Pia) traffic can arrive as a burst of several large datagrams within
+            // single-digit milliseconds of each other (observed: a friend-island-visit payload
+            // delivered as ~5 fragments up to 880 bytes each, back-to-back). The OS default
+            // SO_RCVBUF is small enough that a burst like this can silently overflow it before
+            // the guest's own poll loop drains it, dropping datagrams with no trace on either
+            // side. Request a generous buffer up front; this only widens headroom and cannot
+            // change any protocol behavior, so it's safe even if this guess turns out wrong.
+            constexpr u32 kGenerousUdpRcvBuf = 1024 * 1024;
+            descriptor.socket->SetRcvBuf(kGenerousUdpRcvBuf);
+        }
     }
 
     return {fd, Errno::SUCCESS};
@@ -1199,15 +1278,22 @@ Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
 
     FileDescriptor& descriptor = *file_descriptors[fd];
     if (descriptor.type == Network::Type::DGRAM && addr_in.portno > 0) {
-        auto parked = TakeParkedUdpSocket(addr_in.portno);
+        auto [parked, queued] = TakeParkedUdpSocket(addr_in.portno);
         if (parked) {
-            LOG_INFO(Service, "[OpenPak] Reusing parked UDP socket for port {}", addr_in.portno);
+            LOG_INFO(Service,
+                     "[OpenPak] Reusing parked UDP socket for port {} ({} buffered datagram(s))",
+                     addr_in.portno, queued.size());
             // Close the displaced socket, or every adopt leaks a host descriptor.
             if (descriptor.socket) {
                 descriptor.socket->Close();
             }
             descriptor.socket = std::move(parked);
             descriptor.bound_port = addr_in.portno;
+            // Datagrams the drain thread caught while this socket sat parked go first, so
+            // RecvFrom serves them before anything read live off the socket from here on.
+            for (auto& datagram : queued) {
+                descriptor.pending_datagrams.push_back(std::move(datagram));
+            }
             return Errno::SUCCESS;
         }
         descriptor.bound_port = addr_in.portno;
@@ -1496,6 +1582,28 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         // Datagram (UDP): receive the sender's address. (Previously this path returned
         // AGAIN unconditionally, which silently broke all UDP recvfrom/MSG_PEEK.)
         p_addr_in = &addr_in;
+    }
+
+    // Serve anything a parked socket's drain thread buffered for this fd before touching the
+    // live socket, oldest first — otherwise a reused parked socket would silently skip straight
+    // past data that arrived during the close/park/rebind gap.
+    if (!descriptor.pending_datagrams.empty()) {
+        auto [buffered_data, buffered_addr] = std::move(descriptor.pending_datagrams.front());
+        descriptor.pending_datagrams.pop_front();
+
+        const s32 ret = static_cast<s32>(std::min(message.size(), buffered_data.size()));
+        std::copy_n(buffered_data.begin(), ret, message.begin());
+
+        if (p_addr_in) {
+            ASSERT(addr.size() == sizeof(SockAddrIn));
+            PutValue(addr, Translate(buffered_addr));
+            LOG_DEBUG(Service, "RecvFrom fd={} <- {}:{} len={} (buffered) {}", fd,
+                      Network::IPv4AddressToRedactedString(buffered_addr.ip),
+                      buffered_addr.portno, ret,
+                      DescribePrudpLite(
+                          std::span<const u8>{message.data(), static_cast<size_t>(ret)}));
+        }
+        return {ret, Errno::SUCCESS};
     }
 
     // Apply flags

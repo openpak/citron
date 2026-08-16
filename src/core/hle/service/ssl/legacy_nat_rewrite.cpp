@@ -96,7 +96,8 @@ struct Match {
 
 // Locates by content marker rather than parsing Register's u32-counted list vs. ReplaceURL's
 // two bare strings -- works for both without caring which.
-std::vector<Match> FindMatches(std::span<const u8> body, std::array<u8, 4> ext_ip) {
+std::vector<Match> FindMatches(std::span<const u8> body, std::array<u8, 4> ext_ip,
+                                const char* method_name) {
     std::vector<Match> matches;
     std::string_view body_view{reinterpret_cast<const char*>(body.data()), body.size()};
 
@@ -117,12 +118,26 @@ std::vector<Match> FindMatches(std::span<const u8> body, std::array<u8, 4> ext_i
             continue;
         }
         const std::string_view station = body_view.substr(marker_pos, str_len);
+        // TEMPORARY DIAGNOSTIC: log every station this rewrite pass looks at, whether or not
+        // it ends up being rewritten, so a real failing join can be inspected end-to-end.
+        LOG_INFO(Service_SSL, "[OpenPak] [diag] {} saw station: {}", method_name, station);
         if (StationNeedsExternalIp(station)) {
             matches.push_back({
                 .length_field_pos = length_field_pos,
                 .old_total = 2 + static_cast<size_t>(str_len),
                 .new_string = SubstituteAddress(station, ext_ip),
             });
+        } else {
+            const auto addr_pos = station.find("address=");
+            const auto addr_start = addr_pos == std::string_view::npos ? 0 : addr_pos + 8;
+            const auto addr_end = station.find(';', addr_start);
+            const auto addr_only = addr_pos == std::string_view::npos
+                                        ? std::string_view{}
+                                        : station.substr(addr_start, addr_end - addr_start);
+            LOG_INFO(Service_SSL, "[OpenPak] [diag] {} station NOT rewritten (address={}, "
+                                   "private={}, natf found={})",
+                     method_name, addr_only, IsPrivateIPv4(addr_only),
+                     station.find("natf=") != std::string_view::npos);
         }
         search_from = marker_pos + str_len;
     }
@@ -160,23 +175,36 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
     if ((input[0] & 0x80) == 0 || (input[0] & 0x0F) != 0x2) {
         return false; // only a single, complete, unfragmented binary frame
     }
+    // TEMPORARY DIAGNOSTIC: from here on this looked like a real WS binary frame -- log every
+    // rejection reason downstream so a call that never reaches FindMatches can still be traced.
+    LOG_INFO(Service_SSL, "[OpenPak] [diag2] WS binary frame candidate, {} bytes", input.size());
     const bool masked = (input[1] & 0x80) != 0;
     u64 ws_len = input[1] & 0x7F;
     size_t pos = 2;
     if (ws_len == 126) {
-        if (input.size() < pos + 2) return false;
+        if (input.size() < pos + 2) {
+            LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: truncated ext length");
+            return false;
+        }
         ws_len = (static_cast<u64>(input[pos]) << 8) | input[pos + 1];
         pos += 2;
     } else if (ws_len == 127) {
+        LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: 64-bit ext length (ws_len==127)");
         return false; // not expected for these small RMC packets; don't guess
     }
     std::array<u8, 4> mask_key{};
     if (masked) {
-        if (input.size() < pos + 4) return false;
+        if (input.size() < pos + 4) {
+            LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: truncated mask key");
+            return false;
+        }
         std::memcpy(mask_key.data(), input.data() + pos, 4);
         pos += 4;
     }
     if (input.size() != pos + ws_len) {
+        LOG_INFO(Service_SSL,
+                 "[OpenPak] [diag2] reject: frame size mismatch (input={}, pos={}, ws_len={})",
+                 input.size(), pos, ws_len);
         return false; // buffer must be exactly one frame, no leftovers
     }
 
@@ -189,16 +217,24 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
 
     // --- PRUDP-Lite ---
     if (ws_payload.size() < 12 || ws_payload[0] != 0x80) {
+        LOG_INFO(Service_SSL,
+                 "[OpenPak] [diag2] reject: not PRUDP-Lite (payload={} bytes, first byte=0x{:02x})",
+                 ws_payload.size(), ws_payload.empty() ? 0 : ws_payload[0]);
         return false;
     }
     const u8 opt_size = ws_payload[1];
     const u16 payload_size = ReadU16LE(ws_payload, 2);
     const size_t prudp_total = 12u + opt_size + payload_size;
     if (ws_payload.size() != prudp_total) {
+        LOG_INFO(Service_SSL,
+                 "[OpenPak] [diag2] reject: PRUDP size mismatch (payload={}, expected total={})",
+                 ws_payload.size(), prudp_total);
         return false;
     }
     const u16 type_flags = ReadU16LE(ws_payload, 8);
     if ((type_flags & 0xF) != 2) {
+        LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: not a DATA packet (type_flags=0x{:04x})",
+                 type_flags);
         return false; // only DATA packets carry RMC
     }
     const size_t prudp_payload_start = 12u + opt_size;
@@ -206,38 +242,61 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
 
     // --- RMC ---
     if (rmc.size() < 5) {
+        LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: RMC too short ({} bytes)", rmc.size());
         return false;
     }
     const u32 rmc_len = ReadU32LE(rmc, 0);
     if (rmc_len != rmc.size() - 4) {
+        LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: RMC length mismatch (rmc_len={}, actual={})",
+                 rmc_len, rmc.size() - 4);
         return false;
     }
     const u8 proto_byte = rmc[4];
     if ((proto_byte & 0x80) == 0) {
+        LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: RMC response, not request (proto_byte=0x{:02x})",
+                 proto_byte);
         return false; // only requests carry an outgoing station -- not a response
     }
     const u16 protocol = proto_byte & 0x7F;
     if (protocol != 0x0B && protocol != 0x6D) {
+        LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: protocol 0x{:02x} not SecureConnection/MatchmakeExtension",
+                 protocol);
         return false; // SecureConnection or MatchmakeExtension only
     }
     if (rmc.size() < 5 + 8) {
+        LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: RMC too short for method field");
         return false;
     }
     const u32 method = ReadU32LE(rmc, 9);
+    LOG_INFO(Service_SSL, "[OpenPak] [diag2] RMC request: protocol=0x{:02x} method=0x{:x}", protocol,
+             method);
     if (protocol == 0x0B) {
         if (method != 0x1 && method != 0x7) {
+            LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: SecureConnection method 0x{:x} not Register/ReplaceURL",
+                     method);
             return false; // Register(1) / ReplaceURL(7) only
         }
     } else {
         // MatchmakeExtension(0x6D): CreateMatchmakeSessionWithParam(0x26) / JoinMatchmakeSessionWithParam(0x27) only.
         if (method != 0x26 && method != 0x27) {
+            LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: MatchmakeExtension method 0x{:x} not Create/Join",
+                     method);
             return false;
         }
     }
     const size_t body_start = 5 + 8;
     std::span<const u8> body = rmc.subspan(body_start);
 
-    const auto matches = FindMatches(body, *ext_ip_opt);
+    const char* method_name = protocol == 0x0B
+                                  ? (method == 0x1 ? "SecureConnection.Register" : "SecureConnection.ReplaceURL")
+                                  : (method == 0x26 ? "MatchmakeExtension.CreateMatchmakeSessionWithParam"
+                                                    : "MatchmakeExtension.JoinMatchmakeSessionWithParam");
+    // TEMPORARY DIAGNOSTIC: confirm this packet type is actually being intercepted at all,
+    // independent of whether any station inside it needs rewriting.
+    LOG_INFO(Service_SSL, "[OpenPak] [diag] intercepted outgoing {} ({} byte body)", method_name,
+              body.size());
+
+    const auto matches = FindMatches(body, *ext_ip_opt, method_name);
     if (matches.empty()) {
         return false;
     }
@@ -284,10 +343,6 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
     }
     output.insert(output.end(), new_ws_payload.begin(), new_ws_payload.end());
 
-    const char* method_name = protocol == 0x0B
-                                  ? (method == 0x1 ? "SecureConnection.Register" : "SecureConnection.ReplaceURL")
-                                  : (method == 0x26 ? "MatchmakeExtension.CreateMatchmakeSessionWithParam"
-                                                    : "MatchmakeExtension.JoinMatchmakeSessionWithParam");
     LOG_INFO(Service_SSL,
              "[OpenPak] Rewrote {} station address(es) in outgoing {} "
              "to this console's real external IP ({}.{}.{}.{})",

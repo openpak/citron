@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <span>
 #include <vector>
@@ -53,6 +54,10 @@ private:
         u16 bound_port = 0;
         bool sni_injected = false;
         bool connected = false;
+        // Datagrams a parked UDP socket's background drain thread received before this fd
+        // reclaimed it (see ParkUdpSocket in bsd.cpp) — served before any live socket read so
+        // nothing arriving during the close/park/rebind gap is lost.
+        std::deque<std::pair<std::vector<u8>, Network::SockAddrIn>> pending_datagrams;
     };
 
     struct PollWork {
