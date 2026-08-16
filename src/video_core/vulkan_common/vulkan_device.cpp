@@ -24,9 +24,36 @@
 #include <adrenotools/bcenabler.h>
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace Vulkan {
 using namespace Common::Literals;
 namespace {
+
+#if defined(_WIN32)
+// Guards a single vkGetDeviceFaultInfoEXT call with SEH. Real crash hit
+// 2026-08-16: after a genuine VK_ERROR_DEVICE_LOST, querying VK_EXT_device_fault
+// for a human-readable reason crashed hard *inside the NVIDIA driver itself*
+// (nvoglv64.dll, access violation reading a near-null pointer) rather than
+// returning an error VkResult — turning a recoverable device-lost event into a
+// process-ending crash, on top of losing the very diagnostics this call exists
+// to gather. __try/__except can only wrap a call with no C++ objects requiring
+// unwinding in scope (MSVC/clang-cl reject __try otherwise), so this stays a
+// bare leaf function — no vectors, no strings, just the raw driver call.
+[[nodiscard]] bool SafeGetDeviceFaultInfo(PFN_vkGetDeviceFaultInfoEXT fn, VkDevice device,
+                                           VkDeviceFaultCountsEXT* counts,
+                                           VkDeviceFaultInfoEXT* info) {
+    __try {
+        fn(device, counts, info);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+#endif
+
 namespace Alternatives {
 constexpr std::array STENCIL8_UINT{
     VK_FORMAT_D16_UNORM_S8_UINT,
@@ -843,10 +870,28 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
 void Device::ReportLoss() const {
     LOG_CRITICAL(Render_Vulkan, "Device loss occurred!");
     if (extensions.device_fault) {
+        const VkDevice device{VkDevice(GetLogical().address())};
         VkDeviceFaultCountsEXT fault_counts{
             .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT
         };
-        dld.vkGetDeviceFaultInfoEXT(VkDevice(GetLogical().address()), &fault_counts, nullptr);
+#if defined(_WIN32)
+        if (!SafeGetDeviceFaultInfo(dld.vkGetDeviceFaultInfoEXT, device, &fault_counts, nullptr)) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "Driver crashed while querying device fault counts after device loss; "
+                         "no further diagnostics available");
+            return;
+        }
+#else
+        dld.vkGetDeviceFaultInfoEXT(device, &fault_counts, nullptr);
+#endif
+        // Bound what we trust from the driver before allocating: the device is
+        // already known-lost at this point, so a corrupted/garbage count here
+        // is plausible and shouldn't be handed straight to a vector constructor.
+        static constexpr u32 MaxFaultEntries{4096};
+        fault_counts.addressInfoCount = std::min(fault_counts.addressInfoCount, MaxFaultEntries);
+        fault_counts.vendorInfoCount = std::min(fault_counts.vendorInfoCount, MaxFaultEntries);
+        fault_counts.vendorBinarySize =
+            std::min(fault_counts.vendorBinarySize, VkDeviceSize{16_MiB});
         std::vector<VkDeviceFaultAddressInfoEXT> address_info(fault_counts.addressInfoCount);
         std::vector<VkDeviceFaultVendorInfoEXT> vendor_info(fault_counts.vendorInfoCount);
         std::vector<u8> vendor_binary_data(fault_counts.vendorBinarySize);
@@ -856,7 +901,17 @@ void Device::ReportLoss() const {
             .pVendorInfos = vendor_info.data(),
             .pVendorBinaryData = vendor_binary_data.data()
         };
-        dld.vkGetDeviceFaultInfoEXT(VkDevice(GetLogical().address()), &fault_counts, &fault_info);
+#if defined(_WIN32)
+        if (!SafeGetDeviceFaultInfo(dld.vkGetDeviceFaultInfoEXT, device, &fault_counts,
+                                     &fault_info)) {
+            LOG_CRITICAL(Render_Vulkan,
+                         "Driver crashed while querying device fault info after device loss; "
+                         "no further diagnostics available");
+            return;
+        }
+#else
+        dld.vkGetDeviceFaultInfoEXT(device, &fault_counts, &fault_info);
+#endif
         std::string s = "Fault report\n";
         if (address_info.size() > 0) {
             s += "address-info\n";
@@ -888,6 +943,9 @@ void Device::ReportLoss() const {
                 s += fmt::format("{:02x} ", vendor_binary_data[i]);
             s += "\n";
         }
+        // This used to be built and discarded: nothing ever logged it, so a
+        // successful (non-crashing) fault query still reported nothing.
+        LOG_CRITICAL(Render_Vulkan, "{}", s);
     }
     // Wait for the log to flush and for Nsight Aftermath to dump the results
     std::this_thread::sleep_for(std::chrono::seconds{15});
