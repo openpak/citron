@@ -36,7 +36,7 @@
 #include "citron/game_list.h"
 #include "citron/game_list_delegate.h"
 #include "citron/game_list_p.h"
-#include "citron/legacy_compatible_titles.h"
+#include "common/legacy_compatible_titles.h"
 #include "citron/legacy_online_counts.h"
 #include "citron/uisettings.h"
 #include "citron/util/image_cache.h"

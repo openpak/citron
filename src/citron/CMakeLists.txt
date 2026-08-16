@@ -269,7 +269,6 @@ add_executable(citron
     legacy_controller.h
     legacy_friend_delegate.cpp
     legacy_friend_delegate.h
-    legacy_compatible_titles.h
     legacy_history_delegate.cpp
     legacy_history_delegate.h
     legacy_ldn_counts.cpp

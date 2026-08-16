@@ -59,7 +59,7 @@
 #include "citron/legacy_account_dialog.h"
 #include "citron/legacy_account_page_p.h"
 #include "citron/legacy_avatar_cache.h"
-#include "citron/legacy_compatible_titles.h"
+#include "common/legacy_compatible_titles.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_friend_delegate.h"
 #include "citron/legacy_history_delegate.h"

@@ -20,7 +20,7 @@
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/acc/profile_manager.h"
-#include "citron/legacy_compatible_titles.h"
+#include "common/legacy_compatible_titles.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_save_sync.h"
 

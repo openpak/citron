@@ -14,7 +14,7 @@
 
 #include <fmt/format.h>
 
-#include "citron/legacy_compatible_titles.h"
+#include "common/legacy_compatible_titles.h"
 #include "common/logging.h"
 #include "common/legacy_account.h"
 #include "core/core.h"

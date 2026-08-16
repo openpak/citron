@@ -103,6 +103,7 @@ add_library(common STATIC
     scratch_buffer.h
     legacy_account.cpp
     legacy_account.h
+    legacy_compatible_titles.h
     legacy_friends.cpp
     legacy_friends.h
     legacy_nat.cpp

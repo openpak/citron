@@ -10,6 +10,10 @@
 
 // Only one game version per title can reach OpenPak's servers; there's no server-side
 // version-gate endpoint, so this table is the source of truth.
+//
+// Lives in common/, not citron/: it's read from both the Qt frontend (game-list "needs
+// update" badge) and core/hle/service/acc (the actual online PID gate) -- same reason
+// Common::OpenPakAccount lives here instead of in either layer alone.
 namespace OpenPak::CompatibleTitles {
 
 inline const std::unordered_map<u64, std::string>& Table() {
@@ -21,6 +25,8 @@ inline const std::unordered_map<u64, std::string>& Table() {
         {0x01003c700009c800, "5.5.2"},  // Splatoon 2 (JP)
         {0x01006f8002326000, "3.0.3"},  // Animal Crossing: New Horizons
         {0x0100dca0064a6000, "1.4.0"},  // Luigi's Mansion 3
+        {0x01009b500007c000, "5.5.1"},  // ARMS
+        {0x0100bde00862a000, "3.1.1"},  // Mario Tennis Aces
     };
     return table;
 }

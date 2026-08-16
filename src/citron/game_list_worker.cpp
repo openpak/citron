@@ -26,7 +26,7 @@
 #include "citron/game_list.h"
 #include "citron/game_list_p.h"
 #include "citron/game_list_worker.h"
-#include "citron/legacy_compatible_titles.h"
+#include "common/legacy_compatible_titles.h"
 #include "citron/uisettings.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
