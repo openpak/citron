@@ -25,6 +25,10 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent)
     connect(ui->restore_default_lobby_api, &QPushButton::clicked, this, &ConfigureNetwork::OnRestoreDefaultLobbyApi);
     connect(ui->unhide_legacy_server_ip, &QPushButton::toggled, this, &ConfigureNetwork::OnToggleUnhideServerIp);
     connect(ui->unhide_legacy_nat_ip, &QPushButton::toggled, this, &ConfigureNetwork::OnToggleUnhideNatIp);
+    connect(ui->restore_default_legacy_server_ip, &QPushButton::clicked, this,
+            &ConfigureNetwork::OnRestoreDefaultOpenPakServerIp);
+    connect(ui->restore_default_legacy_nat_ip, &QPushButton::clicked, this,
+            &ConfigureNetwork::OnRestoreDefaultOpenPakNatIp);
 }
 
 ConfigureNetwork::~ConfigureNetwork() = default;
@@ -70,6 +74,8 @@ void ConfigureNetwork::SetConfiguration() {
     ui->legacy_nat_ip->setEnabled(networking_enabled);
     ui->unhide_legacy_server_ip->setEnabled(networking_enabled);
     ui->unhide_legacy_nat_ip->setEnabled(networking_enabled);
+    ui->restore_default_legacy_server_ip->setEnabled(networking_enabled);
+    ui->restore_default_legacy_nat_ip->setEnabled(networking_enabled);
 
     connect(ui->airplane_mode, &QCheckBox::toggled, this, [this, runtime_lock](bool checked) {
         const bool enabled = !checked && runtime_lock;
@@ -80,6 +86,8 @@ void ConfigureNetwork::SetConfiguration() {
         ui->legacy_nat_ip->setEnabled(enabled);
         ui->unhide_legacy_server_ip->setEnabled(enabled);
         ui->unhide_legacy_nat_ip->setEnabled(enabled);
+        ui->restore_default_legacy_server_ip->setEnabled(enabled);
+        ui->restore_default_legacy_nat_ip->setEnabled(enabled);
     });
 }
 
@@ -95,4 +103,14 @@ void ConfigureNetwork::OnToggleUnhideNatIp(bool checked) {
 
 void ConfigureNetwork::OnRestoreDefaultLobbyApi() {
     ui->lobby_api_url->setText(QString::fromStdString(Settings::values.lobby_api_url.GetDefault()));
+}
+
+void ConfigureNetwork::OnRestoreDefaultOpenPakServerIp() {
+    ui->legacy_server_ip->setText(
+        QString::fromStdString(Settings::values.legacy_server_ip.GetDefault()));
+}
+
+void ConfigureNetwork::OnRestoreDefaultOpenPakNatIp() {
+    ui->legacy_nat_ip->setText(
+        QString::fromStdString(Settings::values.legacy_nat_ip.GetDefault()));
 }
