@@ -2559,6 +2559,31 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
 
     current_title_id = title_id; // Store ID safely
 
+    // [OpenPak] Splatoon 3 refuses to boot with any mod active. Updates/DLC are unaffected --
+    // those are PatchType::Update/DLC, only PatchType::Mod (LayeredFS content) is checked.
+    if (title_id == 0x0100C2500FC20000ULL) {
+        const FileSys::PatchManager pm{title_id, system->GetFileSystemController(),
+                                       system->GetContentProvider()};
+        QStringList active_mods;
+        for (const auto& patch : pm.GetPatches()) {
+            if (patch.enabled && patch.type == FileSys::PatchType::Mod) {
+                active_mods.push_back(QString::fromStdString(patch.name));
+            }
+        }
+        if (!active_mods.isEmpty()) {
+            LOG_CRITICAL(Frontend,
+                         "[OpenPak] Refusing to boot Splatoon 3: {} mod(s) enabled",
+                         active_mods.size());
+            QMessageBox::critical(
+                this, tr("Splatoon 3: mods must be disabled"),
+                tr("Splatoon 3 cannot be launched while any mod is enabled:\n\n%1\n\n"
+                   "Disable them in the game's Properties > Add-Ons tab and try again. "
+                   "Updates and DLC are not affected.")
+                    .arg(active_mods.join(QStringLiteral("\n"))));
+            return;
+        }
+    }
+
     OfferOpenPakByamlDownload(title_id);
     OpenPak::SaveSync::Pull(*system, title_id);
 
@@ -2592,6 +2617,11 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
         case 0x01003c700009c800ULL: // Splatoon 2 (JP)
             LOG_INFO(Frontend, "Applying workaround: clamping resolution to 1x for Splatoon 2 "
                                "(online points scaling bug)");
+            Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res1X);
+            break;
+        case 0x0100C2500FC20000ULL: // Splatoon 3
+            LOG_INFO(Frontend, "Applying workaround: clamping resolution to 1x for Splatoon 3 "
+                               "(same online points scaling bug as Splatoon 2)");
             Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res1X);
             break;
         default:
