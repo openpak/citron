@@ -100,6 +100,40 @@ bool FixupInGameFlag(std::string& app_field) {
     return true;
 }
 
+// [OpenPak] ARMS reports raw presence status 1 (Online) even while actively hosting/queued
+// for a match, so friends never see it as OnlinePlay and the Friends List UI buckets them as
+// "online, nothing joinable" without ever reading JoinMode at all (confirmed by decompiling
+// the ARMS update binary: the friends-list categorization only inspects JoinMode when the
+// caller's presence status is already 2). ARMS's app_field uses the same null-delimited
+// key/value scheme as Splatoon 2's, just different keys (SessionId/JoinMode/HasPassword
+// instead of Mode/InGame). JoinMode is 0 only when there is no active session; any of 1-4
+// means a real session exists, so bump the status the same way FixupInGameFlag does for
+// Splatoon 2's InGame flag.
+bool IsArmsSessionActive(const std::string& app_field) {
+    size_t pos = 0;
+    while (pos < app_field.size()) {
+        const size_t end = app_field.find('\0', pos);
+        const size_t token_end = end == std::string::npos ? app_field.size() : end;
+        if (token_end == pos) {
+            break;
+        }
+        const std::string key = app_field.substr(pos, token_end - pos);
+        pos = token_end + 1;
+        if (pos >= app_field.size()) {
+            break;
+        }
+        const size_t value_end = app_field.find('\0', pos);
+        const size_t value_token_end = value_end == std::string::npos ? app_field.size() : value_end;
+        const std::string value = app_field.substr(pos, value_token_end - pos);
+        pos = value_token_end + 1;
+
+        if (key == "JoinMode") {
+            return value == "1" || value == "2" || value == "3" || value == "4";
+        }
+    }
+    return false;
+}
+
 // The account server hands out NEX PIDs; the guest wants a Uid. Derive one deterministically so a
 // friend keeps the same Uid across launches. The high half matches what Ryujinx uses.
 Common::UUID UidForPid(u64 pid) {
@@ -664,6 +698,11 @@ void IFriendService::UpdateUserPresence(HLERequestContext& ctx) {
             LOG_INFO(Service_Friend,
                      "[OpenPak] Corrected InGame=0->1 in presence blob for a resolved private "
                      "battle host (natf/natm confirmed via NAT-check)");
+        } else if (IsArmsSessionActive(app_field)) {
+            status = std::max<s32>(status, Common::OpenPakFriends::PresenceOnlinePlay);
+            LOG_INFO(Service_Friend,
+                     "[OpenPak] ARMS JoinMode indicates an active session; bumping status to "
+                     "OnlinePlay (raw status floors at Online otherwise)");
         }
         Common::OpenPakFriends::SetLocalPresence(status, app_field);
         LOG_INFO(Service_Friend, "[OpenPak] UpdateUserPresence status={} -> {} app_field={}",

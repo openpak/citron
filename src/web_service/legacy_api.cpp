@@ -821,15 +821,18 @@ FriendList GetFriends() {
     const auto result = Send("GET", "/api/friends", {}, token);
     if (ClearSessionIfRejected(result)) {
         out.error = "Your session expired. Sign in again.";
+        LOG_WARNING(WebService, "GetFriends: {}", out.error);
         return out;
     }
     if (!result) {
         out.error = "Could not reach the OpenPak account server.";
+        LOG_WARNING(WebService, "GetFriends: {}", out.error);
         return out;
     }
     if (result->status != 200) {
         out.error = ErrorFrom(result->body, fmt::format("Could not load friends (HTTP {}).",
                                                        result->status));
+        LOG_WARNING(WebService, "GetFriends: {}", out.error);
         return out;
     }
 
@@ -842,8 +845,11 @@ FriendList GetFriends() {
             out.requests.push_back(ParseFriend(entry));
         }
         out.ok = true;
+        LOG_INFO(WebService, "GetFriends: {} friend(s), {} request(s)", out.friends.size(),
+                 out.requests.size());
     } catch (const nlohmann::json::exception& e) {
         out.error = fmt::format("Unexpected friends response: {}", e.what());
+        LOG_WARNING(WebService, "GetFriends: {}", out.error);
     }
 
     return out;
