@@ -1319,7 +1319,25 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
 
     UNIMPLEMENTED_IF(addr.size() != sizeof(SockAddrIn));
     auto addr_in = GetValue<SockAddrIn>(addr);
-    const auto translated_addr = Translate(addr_in);
+    auto translated_addr = Translate(addr_in);
+
+    // [OpenPak] Splatoon 3's gRPC stack loses the resolved address in its own connection
+    // plumbing and calls connect() with a zeroed IP, keeping only the port it originally
+    // resolved for. Recover it from what GetAddrInfoRequestImpl recorded for that exact
+    // port. Only ever populated for a OpenPak-redirected hostname's own port, so this can't
+    // misfire on a P2P socket targeting another console's port -- that port was never part of
+    // a redirect, so the lookup below returns nothing and the address is left untouched.
+    static constexpr std::array<u8, 4> zero_addr{0, 0, 0, 0};
+    if (addr_in.ip == zero_addr && translated_addr.portno != 0) {
+        if (const auto recovered = GetLastIpForPort(translated_addr.portno)) {
+            LOG_INFO(Service,
+                     "[OpenPak] Connect fd={} address was lost (zeroed), recovered {} for "
+                     "port {} from an earlier redirected resolution",
+                     fd, Network::IPv4AddressToRedactedString(*recovered),
+                     translated_addr.portno);
+            translated_addr.ip = *recovered;
+        }
+    }
 
     LOG_INFO(Service, "Connect fd={} to {}:{}", fd,
              Network::IPv4AddressToRedactedString(addr_in.ip), translated_addr.portno);

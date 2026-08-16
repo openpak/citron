@@ -38,6 +38,35 @@ std::string GetLastHostForIp(const std::string& ip) {
     return "";
 }
 
+// [OpenPak] See sfdnsres.h's declaration comment. Real bug this exists for (Splatoon 3,
+// confirmed via Ryujinx-Reference hitting the identical failure on the same guest binary):
+// its gRPC channel resolves a redirected OpenPak hostname correctly here, then later loses
+// that address in its own connection-establishment plumbing and calls connect() with a
+// zeroed IP -- but the SAME port it originally resolved for. Recording "port -> resolved IP"
+// at resolution time lets BSD::ConnectImpl recover the real address for that exact port.
+static std::mutex g_last_ip_for_port_mutex;
+static std::unordered_map<u16, Network::IPv4Address> g_last_ip_for_port;
+
+void SetLastIpForPort(u16 port, Network::IPv4Address ip) {
+    if (port == 0) {
+        return;
+    }
+    std::lock_guard lock(g_last_ip_for_port_mutex);
+    g_last_ip_for_port[port] = ip;
+}
+
+std::optional<Network::IPv4Address> GetLastIpForPort(u16 port) {
+    if (port == 0) {
+        return std::nullopt;
+    }
+    std::lock_guard lock(g_last_ip_for_port_mutex);
+    auto it = g_last_ip_for_port.find(port);
+    if (it != g_last_ip_for_port.end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
 // No server address is baked in: unconfigured builds fall back to loopback and redirect nowhere.
 static std::string GetConfiguredIp(const std::string& setting, const char* env_var) {
     if (!setting.empty()) {
@@ -383,8 +412,25 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     }
 
     if (redirect.has_value()) {
+        // [OpenPak] Port-keyed recovery for gRPC-based titles (Splatoon 3) that lose this
+        // resolved address later. See SetLastIpForPort's declaration comment in sfdnsres.h.
+        std::optional<u16> service_port;
+        if (service.has_value()) {
+            try {
+                const int parsed = std::stoi(*service);
+                if (parsed > 0 && parsed <= 0xFFFF) {
+                    service_port = static_cast<u16>(parsed);
+                }
+            } catch (const std::exception&) {
+                // service wasn't a plain port number (a named service like "http") -- nothing
+                // to key the fallback on, and that's fine, most titles never need it anyway.
+            }
+        }
         for (const auto& addrinfo : res.value()) {
             SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
+            if (service_port.has_value()) {
+                SetLastIpForPort(*service_port, addrinfo.addr.ip);
+            }
         }
     }
 
