@@ -4515,6 +4515,24 @@ void GMainWindow::OnSaveConfig() {
 }
 
 void GMainWindow::RefreshGameList() {
+    // [OpenPak] RefreshExternalContent() re-scans Settings::values.external_content_dirs into
+    // the ACTUAL content provider PatchManager uses at boot (GetActiveUpdate/PatchRomFS) --
+    // separate from, and previously never wired to, the game-list scan below (which only feeds
+    // the UI: icons, versions shown in the list/Properties dialog, game_metadata_cache). Before
+    // this call existed anywhere, that real provider was built exactly once, at the very first
+    // CONTENT_READY init, and never again for the process's lifetime: an update/DLC file added
+    // to a tracked folder afterward showed up fine in the game list (which re-scans readily) but
+    // was invisible to the code that actually decides which update to apply when booting --
+    // confirmed directly against a real case (Splatoon 3, update NSP added mid-session): the
+    // update's own content resolved correctly on its own, but the base title's active-update
+    // lookup returned found=false for the entire session, and the game failed to load with
+    // "Program-type NCA contains no executable" because it never saw the update it needed.
+    // Restarting Citron fixed it (fresh initial scan sees the file that's already on disk by
+    // then) -- this makes a plain Refresh Game List do the same thing, without a restart.
+    if (system) {
+        system->RefreshExternalContent();
+    }
+
     if (game_list) {
         game_list->PopulateAsync(UISettings::values.game_dirs);
     }
