@@ -351,9 +351,18 @@ add_executable(citron
 # keep the RC compile command under Windows' CreateProcess argument limit ("The parameter is
 # incorrect. (is the command line too long?)") is to compile it in its own target that never
 # links against Boost/Qt/etc. in the first place.
-add_library(citron_rc OBJECT citron.rc)
-set_target_properties(citron_rc PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
-target_link_libraries(citron PRIVATE citron_rc)
+#
+# WIN32-only: RC is a Windows resource-compiler language that isn't enabled on other
+# platforms' CMake configuration here, so an OBJECT library whose only source is a .rc file
+# has no linker language CMake can determine on Linux/macOS ("CMake can not determine linker
+# language for target: citron_rc") -- previously citron.rc was just an inert extra source
+# on the main citron target there (mixed with its many .cpp sources, whose CXX language
+# CMake fell back on), which is the behavior this keeps for non-Windows builds.
+if (WIN32)
+    add_library(citron_rc OBJECT citron.rc)
+    set_target_properties(citron_rc PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    target_link_libraries(citron PRIVATE citron_rc)
+endif()
 
 # Qt AUTOGEN/RCC sources are not unity-safe.
 set_property(TARGET citron PROPERTY UNITY_BUILD OFF)
