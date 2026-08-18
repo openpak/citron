@@ -10,6 +10,10 @@ namespace Core {
 class System;
 }
 
+namespace Kernel {
+class KEvent;
+}
+
 namespace Service::Sockets {
 
 enum class Errno : u32 {
@@ -20,6 +24,7 @@ enum class Errno : u32 {
     MFILE = 24,
     PIPE = 32,
     MSGSIZE = 90,
+    AFNOSUPPORT = 97,
     CONNABORTED = 103,
     CONNRESET = 104,
     NOTCONN = 107,
@@ -132,5 +137,20 @@ struct Linger {
 };
 
 void LoopProcess(Core::System& system);
+
+// [OpenPak] BSD's own worker-thread pool is small and shared across every socket service
+// registered in LoopProcess (bsd:a/bsd:s/bsd:u/bsdcfg/dns:priv/ethc:c/ethc:i/nsd:a/nsd:u/
+// sfdnsres). A gRPC-based title (Splatoon 3) blocks one of those threads in Poll() waiting on
+// its own eventfd, expecting a *different* guest thread's eventfd Write() to signal completion
+// -- but if enough concurrent Polls are each blocking synchronously, that Write() IPC can't
+// even get dispatched to a free thread, and the title hangs forever waiting on itself
+// (Ryujinx-Reference hit and fixed the identical failure; see IClient.cs's deferred-poll
+// comment). BSD::Poll uses this event (via HLERequestContext::SetIsDeferred) to give up its
+// thread instead of blocking when nothing is ready yet and an eventfd is in the set; BSD's
+// eventfd Write path signals it so the deferred poll gets re-checked. Set once from LoopProcess
+// (ServerManager::ManageDeferral); left null, every Poll() just blocks as before -- nothing
+// extra requires it to be set.
+void SetBsdDeferralEvent(Kernel::KEvent* event);
+Kernel::KEvent* GetBsdDeferralEvent();
 
 } // namespace Service::Sockets

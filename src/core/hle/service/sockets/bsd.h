@@ -5,10 +5,11 @@
 #pragma once
 
 #include <deque>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
-#include <map>
 
 #include "common/common_types.h"
 #include "common/expected.h"
@@ -54,6 +55,10 @@ private:
         u16 bound_port = 0;
         bool sni_injected = false;
         bool connected = false;
+        // [OpenPak] Set by EventFd(). Lets Poll() recognize a self-pipe wakeup fd (see
+        // sockets.h's SetBsdDeferralEvent) and lets SendImpl() know a Write() to this fd is a
+        // completion signal another thread's deferred Poll() may be waiting on.
+        bool is_eventfd = false;
         // Datagrams a parked UDP socket's background drain thread received before this fd
         // reclaimed it (see ParkUdpSocket in bsd.cpp) — served before any live socket read so
         // nothing arriving during the close/park/rebind gap is lost.
@@ -205,6 +210,21 @@ private:
     std::pair<s32, Errno> SocketImpl(Domain domain, Type type, Protocol protocol);
     std::pair<s32, Errno> PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
                                    s32 nfds, s32 timeout);
+    // [OpenPak] True if any fd in this poll's set was created by EventFd(). See Poll()'s
+    // definition and sockets.h's SetBsdDeferralEvent declaration comment.
+    bool PollSetIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) const;
+
+    // [OpenPak] Snapshot of a deferred Poll()'s pollfd bytes, keyed by the HLERequestContext
+    // this specific request is riding on. ctx.ReadBuffer() re-reads live guest memory at the
+    // buffer descriptor's address every time it's called, including on a deferred poll's later
+    // re-check -- but that guest memory is the session's shared pointer-buffer region, which an
+    // unrelated bsd IPC call can (and does) reuse for its own buffer before the re-check fires.
+    // Without a snapshot, the re-check silently reparses whatever that other call left there as
+    // if it were still this poll's fd list. Matches Ryujinx-Reference's own fix for this exact
+    // bug (ServerBase.cs's DeferredPoll.InputSnapshot). Only ever populated for the deferred-poll
+    // path (timeout==-1 with an eventfd in the set); every other poll still reads live each call.
+    std::mutex deferred_poll_snapshot_mutex;
+    std::map<const HLERequestContext*, std::vector<u8>> deferred_poll_snapshots;
     std::pair<s32, Errno> SelectImpl(s32 nfds, s32 timeout, std::span<const u8> read_in,
                                      std::span<const u8> write_in, std::span<const u8> error_in,
                                      std::vector<u8>& read_out, std::vector<u8>& write_out,

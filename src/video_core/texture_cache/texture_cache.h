@@ -811,6 +811,12 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
     }();
 
     const auto GetImageViewForFramebuffer = [&](ImageId image_id) {
+        // The framebuffer-accelerated display path historically skipped the same
+        // "ensure GPU contents reflect any pending CPU writes" step every other
+        // image-view accessor goes through. Titles that compose their displayed
+        // framebuffer via CPU writes (not GPU draws) could therefore have their
+        // CpuModified flag never get flushed before being sampled for display.
+        PrepareImage(image_id, false, false);
         ImageViewInfo info{ImageViewType::e2D, view_format};
         if (config.blending == Tegra::BlendMode::Opaque) {
             info.x_source = static_cast<u8>(SwizzleSource::R);

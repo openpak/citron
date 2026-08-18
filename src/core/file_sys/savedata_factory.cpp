@@ -43,10 +43,24 @@ RealVfsFilesystem* GetPersistentVfs() {
 
 bool ShouldSaveDataBeAutomaticallyCreated(SaveDataSpaceId space, const SaveDataAttribute& attr) {
     return attr.type == SaveDataType::Cache || attr.type == SaveDataType::Temporary ||
+           attr.type == SaveDataType::Bcat ||
            (space == SaveDataSpaceId::User &&
             (attr.type == SaveDataType::Account || attr.type == SaveDataType::Device) &&
             attr.program_id == 0 && attr.system_save_data_id == 0);
 }
+
+// [OpenPak] A real console provisions each title's BCAT delivery-cache save data (SaveDataType::
+// Bcat) proactively at install/first-launch time -- see Ryujinx-Reference's `df268d0` commit,
+// which added exactly this step (`EnsureApplicationBcatDeliveryCacheStorage`) after discovering
+// Splatoon 3 (which uses the modern per-title BCAT storage) got refused with a same-looking
+// PermissionDenied/NotFound on every attempt, forever, while Splatoon 2 (legacy BCAT command)
+// never touched this path at all. Citron has no equivalent proactive step anywhere in its loader,
+// and `ShouldSaveDataBeAutomaticallyCreated` explicitly didn't cover SaveDataType::Bcat, so every
+// open of Splatoon 3's delivery-cache storage returned ResultTargetNotFound unconditionally, no
+// matter how long the game waited or retried. Auto-creating on first open (added above) reaches
+// the same end state a proactive boot-time step would, just lazily instead of eagerly -- there's
+// no real-hardware fidelity cost either way, since the directory's existence is the only thing
+// that mattered.
 
 std::string GetFutureSaveDataPath(SaveDataSpaceId space_id, SaveDataType type, u64 title_id,
                                   u128 user_id) {
@@ -99,6 +113,21 @@ SaveDataFactory::SaveDataFactory(Core::System& system_, ProgramId program_id_,
 
 SaveDataFactory::~SaveDataFactory() = default;
 
+namespace {
+// [OpenPak] The real "bcat" sysmodule's system title ID -- confirmed against
+// Ryujinx-Reference's own fix (VirtualFileSystem.cs FixExtraData, commit 515040a) and matching
+// what LibHac itself stamps when it creates BCAT storage (Fs.Shim.SaveDataManagement.
+// CreateBcatSaveData), and what already-working titles' real caches carry (Splatoon 2, SSBU,
+// Animal Crossing).
+constexpr u64 SystemProgramIdBcat = 0x010000000000000CULL;
+
+// [OpenPak] The size a real console's BCAT delivery cache is provisioned with (64MiB data,
+// 2MiB journal) -- same values Ryujinx-Reference's fix uses, matching what a real NACP declares
+// for titles that use BCAT and what healthy caches on disk already carry.
+constexpr s64 DefaultBcatDeliveryCacheStorageSize = 0x4000000;
+constexpr s64 DefaultBcatDeliveryCacheJournalSize = 0x200000;
+} // namespace
+
 VirtualDir SaveDataFactory::Create(SaveDataSpaceId space, const SaveDataAttribute& meta) const {
     const auto save_directory = GetFullPath(program_id, dir, space, meta.type, meta.program_id,
                                             meta.user_id, meta.system_save_data_id);
@@ -108,15 +137,22 @@ VirtualDir SaveDataFactory::Create(SaveDataSpaceId space, const SaveDataAttribut
         return nullptr;
     }
 
+    // [OpenPak] A BCAT delivery cache is owned by the system's "bcat" module, never the game
+    // that requested it -- stamping it with the game's own program ID (the naive default below)
+    // makes the save unopenable: LibHac-style access control compares the save's owner against
+    // the calling program, finds no match, and refuses with PermissionDenied. Splatoon 3 hits
+    // this wall at startup. See Ryujinx-Reference's own fix for this exact bug (515040a).
+    const bool is_bcat_save = meta.type == SaveDataType::Bcat || meta.type == SaveDataType::SystemBcat;
+
     SaveDataExtraDataAccessor accessor(save_dir);
     if (accessor.Initialize(true) == ResultSuccess) {
         SaveDataExtraData initial_data{};
         initial_data.attr = meta;
-        initial_data.owner_id = meta.program_id;
+        initial_data.owner_id = is_bcat_save ? SystemProgramIdBcat : meta.program_id;
         initial_data.timestamp = std::chrono::system_clock::now().time_since_epoch().count();
         initial_data.flags = static_cast<u32>(SaveDataFlags::None);
-        initial_data.available_size = 0;
-        initial_data.journal_size = 0;
+        initial_data.available_size = is_bcat_save ? DefaultBcatDeliveryCacheStorageSize : 0;
+        initial_data.journal_size = is_bcat_save ? DefaultBcatDeliveryCacheJournalSize : 0;
         initial_data.commit_id = 1;
 
         accessor.WriteExtraData(initial_data);

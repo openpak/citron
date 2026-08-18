@@ -342,8 +342,18 @@ add_executable(citron
     ui/nav_settings_overlay.cpp
     ui/nav_settings_overlay.h
     citron.qrc
-    citron.rc
 )
+
+# citron.rc only #includes winresrc.h -- it needs none of the target's C++ include dirs, but
+# as a source of the main `citron` target it inherits all of them anyway (Boost alone
+# contributes 150+ separate -I flags since CPM exposes each submodule individually). CMake's
+# RC language doesn't honor a per-source INCLUDE_DIRECTORIES override, so the only way to
+# keep the RC compile command under Windows' CreateProcess argument limit ("The parameter is
+# incorrect. (is the command line too long?)") is to compile it in its own target that never
+# links against Boost/Qt/etc. in the first place.
+add_library(citron_rc OBJECT citron.rc)
+set_target_properties(citron_rc PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_link_libraries(citron PRIVATE citron_rc)
 
 # Qt AUTOGEN/RCC sources are not unity-safe.
 set_property(TARGET citron PROPERTY UNITY_BUILD OFF)

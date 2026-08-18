@@ -46,6 +46,7 @@ namespace {
 
 enum class CallType {
     Send,
+    Connect,
     Other,
 };
 
@@ -137,7 +138,17 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
     case WSAENOTCONN:
         return Errno::NOTCONN;
     case WSAEWOULDBLOCK:
-        return Errno::AGAIN;
+        // [OpenPak] Windows overloads WSAEWOULDBLOCK for a non-blocking connect() that's
+        // actually in progress -- POSIX has a distinct EINPROGRESS for that specific case, and
+        // everywhere that's not a connect() call, WSAEWOULDBLOCK really does just mean "would
+        // block, try again" (EAGAIN). Returning EAGAIN here for connect() told the guest its
+        // connection attempt just plain failed, when the real answer (matching what Unix's
+        // errno already unambiguously reports) was "still connecting, come back to it" --
+        // confirmed directly: a real connect() to a live server was rejected outright at the
+        // very first EAGAIN instead of proceeding through completion via poll(), and the game's
+        // own retry loop kept starting the whole sequence over from scratch forever, unable to
+        // ever get far enough to actually finish connecting.
+        return call_type == CallType::Connect ? Errno::INPROGRESS : Errno::AGAIN;
     case WSAECONNREFUSED:
         return Errno::CONNREFUSED;
     case WSAECONNABORTED:
@@ -554,6 +565,51 @@ PollEvents TranslatePollRevents(short revents) {
     return result;
 }
 
+// [OpenPak] WSAPoll never reports POLLHUP/POLLERR for a peer that closed or reset an
+// already-established TCP connection -- per MSDN, the exceptfds-derived bits it sets only
+// cover OOB data and a failed connect(), never a FIN/RST on a live socket. A socket whose peer
+// hung up therefore polls as revents=0 forever: to the guest that reads as "nothing ready yet"
+// indefinitely instead of "this connection is dead", starving whatever retry/give-up logic
+// depends on ever actually seeing an error. Ryujinx-Reference hit and fixed this same Windows
+// gap (see ManagedSocketPollManager.cs's IsPeerHungUp -- measured 142 consecutive empty polls,
+// 38.8s, stuck on a gRPC socket before that fix landed). Peek a byte directly for the real
+// signal instead of trusting WSAPoll's revents alone: 0 back means an orderly close (FIN
+// already received), a reset-family error means a hard hangup, and anything else (in
+// particular WSAEWOULDBLOCK) means truly nothing yet -- left alone.
+bool PeekPeerHungUp(SOCKET native_fd, bool& has_pending_data) {
+    has_pending_data = false;
+
+    int sock_type = 0;
+    int sock_type_len = sizeof(sock_type);
+    if (getsockopt(native_fd, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&sock_type),
+                   &sock_type_len) == SOCKET_ERROR ||
+        sock_type != SOCK_STREAM) {
+        // Only a connected stream socket has a meaningful "hung up" concept; a listening or
+        // UDP socket reading back "nothing ready" is unrelated and shouldn't be peeked.
+        return false;
+    }
+
+    char peek_byte;
+    const int peek_result = recv(native_fd, &peek_byte, 1, MSG_PEEK);
+    if (peek_result > 0) {
+        has_pending_data = true;
+        return false;
+    }
+    if (peek_result == 0) {
+        return true;
+    }
+
+    switch (WSAGetLastError()) {
+    case WSAECONNRESET:
+    case WSAECONNABORTED:
+    case WSAENETRESET:
+    case WSAESHUTDOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // Anonymous namespace
 
 NetworkInstance::NetworkInstance() {
@@ -596,6 +652,22 @@ std::string IPv4AddressToString(IPv4Address ip_addr) {
 
 std::string IPv4AddressToRedactedString(IPv4Address ip_addr) {
     return fmt::format("{}.{}.x.x", ip_addr[0], ip_addr[1]);
+}
+
+// [OpenPak] A game can receive a peer's address as a literal IP string (e.g. baked into a
+// matchmaking ticket) and hand it straight to getaddrinfo -- there is nothing to actually
+// resolve. Falling through to a real lookup on an already-numeric host is exactly the bug
+// Ryujinx-Reference's own DnsMitmResolver fix (2026-08-13) diagnosed for Splatoon 3's gRPC/NPLN
+// connections: of the endpoints the game opens, only the one resolved by its real hostname
+// worked -- the others completed TCP+TLS+HTTP/2 but never sent a HEADERS frame and closed
+// after ~1s, because whatever canonical name a fallback lookup produced for an already-literal
+// IP was some unrelated host (every redirected hostname shares the same IP, so any lookup that
+// isn't a no-op returns whichever name happens to reverse-resolve for it), and the game builds
+// its HTTP/2 :authority header from that corrupted name. Matches Ryujinx-Reference's own fix:
+// return the literal address as-is, with itself as both address and hostname, and do it BEFORE
+// any redirect/blocklist logic -- a literal IP was never a hostname to redirect or block.
+bool TryParseIPv4Literal(const std::string& host, IPv4Address& out) {
+    return inet_pton(AF_INET, host.c_str(), out.data()) == 1;
 }
 
 u32 IPv4AddressToInteger(IPv4Address ip_addr) {
@@ -654,27 +726,31 @@ std::pair<s32, Errno> Poll(std::vector<PollFD>& pollfds, s32 timeout) {
 
     const int result =
         WSAPoll(host_pollfds.data(), static_cast<ULONG>(host_pollfds.size()), timeout);
-    if (result == 0) {
-        ASSERT(std::all_of(host_pollfds.begin(), host_pollfds.end(),
-                           [](WSAPOLLFD fd) { return fd.revents == 0; }));
-        return {0, Errno::SUCCESS};
+    if (result == SOCKET_ERROR) {
+        return {-1, GetAndLogLastError()};
     }
 
-    if (result > 0) {
-        // result includes the appended interrupt fd; don't count that toward the caller's fds.
-        s32 real_count = 0;
-        for (size_t i = 0; i < num; ++i) {
-            pollfds[i].revents = TranslatePollRevents(host_pollfds[i].revents);
-            if (host_pollfds[i].revents != 0) {
-                ++real_count;
+    // [OpenPak] See PeekPeerHungUp's comment. Re-check every fd the caller asked to read from
+    // that WSAPoll didn't already report ready -- regardless of whether WSAPoll returned 0 or
+    // reported some other fd ready -- so a peer that hung up gets surfaced as ready-with-Hup
+    // instead of silently polling as not-ready forever.
+    s32 real_count = 0;
+    for (size_t i = 0; i < num; ++i) {
+        pollfds[i].revents = TranslatePollRevents(host_pollfds[i].revents);
+        if (True(pollfds[i].events & PollEvents::In) &&
+            False(pollfds[i].revents & (PollEvents::In | PollEvents::Err | PollEvents::Hup))) {
+            bool has_pending_data = false;
+            if (PeekPeerHungUp(host_pollfds[i].fd, has_pending_data)) {
+                pollfds[i].revents |= PollEvents::In | PollEvents::Hup;
+            } else if (has_pending_data) {
+                pollfds[i].revents |= PollEvents::In;
             }
         }
-        return {real_count, Errno::SUCCESS};
+        if (pollfds[i].revents != PollEvents{}) {
+            ++real_count;
+        }
     }
-
-    ASSERT(result == SOCKET_ERROR);
-
-    return {-1, GetAndLogLastError()};
+    return {real_count, Errno::SUCCESS};
 }
 
 Socket::~Socket() {
@@ -796,7 +872,46 @@ Errno Socket::Connect(SockAddrIn addr_in) {
         return Errno::SUCCESS;
     }
 
-    return GetAndLogLastError();
+    const Errno result = GetAndLogLastError(CallType::Connect);
+    if (result != Errno::INPROGRESS) {
+        return result;
+    }
+
+    // [OpenPak] Splatoon 3's gRPC connection stack doesn't survive Citron's honest
+    // non-blocking connect()+EINPROGRESS+poll() cycle reliably -- something in its own
+    // retry bookkeeping gives up long before the connection actually finishes, even
+    // though the TCP handshake itself always succeeds. Ryujinx-Reference sidesteps this
+    // entire class of timing issue by never handing the guest an "in progress" status
+    // for this connect() at all: it blocks host-side until the handshake genuinely
+    // completes and reports the definitive outcome directly (see Ryujinx's own log
+    // line "grpc connect completed synchronously (blocked for host completion)").
+    // Mirror that here with a bounded host-side wait instead of returning INPROGRESS.
+    WSAPOLLFD wait_fd{};
+    wait_fd.fd = fd;
+    wait_fd.events = POLLOUT;
+    wait_fd.revents = 0;
+    constexpr int connect_wait_timeout_ms = 5000;
+    const int poll_result = WSAPoll(&wait_fd, 1, connect_wait_timeout_ms);
+    if (poll_result <= 0) {
+        // Timed out (or the wait itself errored) -- fall back to the original
+        // INPROGRESS status so the guest's own poll loop can still take over.
+        return result;
+    }
+
+    const auto [pending_err, getsockopt_err] = GetPendingError();
+    if (getsockopt_err != Errno::SUCCESS) {
+        return result;
+    }
+    if (pending_err != Errno::SUCCESS) {
+        LOG_ERROR(Network,
+                  "[OpenPak] Connect blocked-wait finished with error, errno={}",
+                  static_cast<int>(pending_err));
+        return pending_err;
+    }
+
+    LOG_INFO(Network, "[OpenPak] grpc connect completed synchronously (blocked for host "
+                      "completion) -> SUCCESS");
+    return Errno::SUCCESS;
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetPeerName() {
@@ -961,6 +1076,22 @@ Errno Socket::SetBroadcast(bool enable) {
     return SetSockOpt<u32>(fd, SO_BROADCAST, enable ? 1 : 0);
 }
 
+// [OpenPak] See the declaration comment in sockets.h.
+std::pair<bool, Errno> Socket::GetReuseAddr() {
+    auto [value, err] = GetSockOpt<u32>(fd, SO_REUSEADDR);
+    return {value != 0, err};
+}
+
+std::pair<bool, Errno> Socket::GetKeepAlive() {
+    auto [value, err] = GetSockOpt<u32>(fd, SO_KEEPALIVE);
+    return {value != 0, err};
+}
+
+std::pair<bool, Errno> Socket::GetBroadcast() {
+    auto [value, err] = GetSockOpt<u32>(fd, SO_BROADCAST);
+    return {value != 0, err};
+}
+
 Errno Socket::SetSndBuf(u32 value) {
     return SetSockOpt(fd, SO_SNDBUF, value);
 }
@@ -983,6 +1114,30 @@ Errno Socket::SetNonBlock(bool enable) {
         return Errno::SUCCESS;
     }
     return GetAndLogLastError();
+}
+
+// [OpenPak] IPPROTO_TCP-level, so these can't go through the generic SetSockOpt/GetSockOpt
+// helpers above (they hardcode SOL_SOCKET). See the declaration comment in sockets.h.
+Errno Socket::SetNoDelay(bool enable) {
+    const int value = enable ? 1 : 0;
+    const int result = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&value),
+                                   sizeof(value));
+    if (result != SOCKET_ERROR) {
+        return Errno::SUCCESS;
+    }
+    return GetAndLogLastError();
+}
+
+std::pair<bool, Errno> Socket::GetNoDelay() {
+    int value = 0;
+    socklen_t len = sizeof(value);
+    const int result =
+        getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&value), &len);
+    if (result != SOCKET_ERROR) {
+        ASSERT(len == sizeof(value));
+        return {value != 0, Errno::SUCCESS};
+    }
+    return {false, GetAndLogLastError()};
 }
 
 bool Socket::IsOpened() const {

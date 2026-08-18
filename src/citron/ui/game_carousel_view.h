@@ -110,7 +110,8 @@ private:
     QRectF CardGeometry(int index, bool with_bob) const;
     void DrawBackdrop(QPainter& p, const QRectF& bg_rect) const;
     void RefreshBackdropCache(const QSize& logical_size);
-    void DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id) const;
+    void DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id,
+                          const QString& installed_version) const;
 
     BackdropTheme m_backdrop_theme = BackdropTheme::Gradient;
     QPixmap m_backdrop_cache;

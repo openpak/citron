@@ -331,6 +331,7 @@ Errno ProxySocket::SetLinger(bool enable, u32 linger) {
 }
 
 Errno ProxySocket::SetReuseAddr(bool enable) {
+    reuse_addr = enable;
     return SetSockOpt<u32>(fd, SO_REUSEADDR, enable ? 1 : 0);
 }
 
@@ -339,11 +340,28 @@ Errno ProxySocket::SetBroadcast(bool enable) {
     return SetSockOpt<u32>(fd, SO_BROADCAST, enable ? 1 : 0);
 }
 
+// [OpenPak] SetSockOpt above is itself a no-op stub (ProxySocket has no real socket options to
+// set), so these just echo back what was last requested -- see GetReuseAddr's declaration
+// comment in internal_network/sockets.h for why that still matters: a title that verifies an
+// option right after setting it needs a plausible answer, not INVAL.
+std::pair<bool, Errno> ProxySocket::GetReuseAddr() {
+    return {reuse_addr, Errno::SUCCESS};
+}
+
+std::pair<bool, Errno> ProxySocket::GetKeepAlive() {
+    return {keep_alive, Errno::SUCCESS};
+}
+
+std::pair<bool, Errno> ProxySocket::GetBroadcast() {
+    return {broadcast, Errno::SUCCESS};
+}
+
 Errno ProxySocket::SetSndBuf(u32 value) {
     return SetSockOpt(fd, SO_SNDBUF, value);
 }
 
 Errno ProxySocket::SetKeepAlive(bool enable) {
+    keep_alive = enable;
     return Errno::SUCCESS;
 }
 
@@ -364,6 +382,17 @@ Errno ProxySocket::SetRcvTimeo(u32 value) {
 Errno ProxySocket::SetNonBlock(bool enable) {
     blocking = !enable;
     return Errno::SUCCESS;
+}
+
+Errno ProxySocket::SetNoDelay(bool enable) {
+    // No real TCP stack behind a proxy socket -- just remember what was asked so GetNoDelay
+    // echoes it back, same as every other option stubbed on this class.
+    no_delay = enable;
+    return Errno::SUCCESS;
+}
+
+std::pair<bool, Errno> ProxySocket::GetNoDelay() {
+    return {no_delay, Errno::SUCCESS};
 }
 
 std::pair<Errno, Errno> ProxySocket::GetPendingError() {

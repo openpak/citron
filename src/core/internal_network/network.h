@@ -120,6 +120,11 @@ std::optional<IPv4Address> GetHostIPv4Address();
 std::string IPv4AddressToString(IPv4Address ip_addr);
 std::string IPv4AddressToRedactedString(IPv4Address ip_addr);
 
+// [OpenPak] See the definition comment in network.cpp. true and fills `out` if `host` is a
+// literal dotted-quad IPv4 address; false (out untouched) for anything else, including a
+// perfectly valid hostname -- this is deliberately not a "could this resolve" check.
+bool TryParseIPv4Literal(const std::string& host, IPv4Address& out);
+
 u32 IPv4AddressToInteger(IPv4Address ip_addr);
 
 // named to avoid name collision with Windows macro

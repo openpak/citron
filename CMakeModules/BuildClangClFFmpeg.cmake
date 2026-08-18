@@ -122,6 +122,19 @@ function(citron_build_clangcl_ffmpeg)
         "--extra-cflags='${_ffmpeg_extra_cflags}'")
     string(JOIN " " _ffmpeg_configure_command ${_ffmpeg_configure_command})
 
+    # Skip guard: if a prior run (possibly under a different, since-drifted
+    # command line -- e.g. a different resolved MAKE_PROGRAM/BASH_PROGRAM path
+    # from a fresh reconfigure) already produced complete install artifacts,
+    # ninja can still decide this edge is dirty (its CUSTOM_COMMAND hash no
+    # longer matches .ninja_log) even though nothing actually needs rebuilding.
+    # Re-running the full configure+make chain in that case is wasteful and,
+    # for this project's MSYS2/clang-cl combo, can also fail outright: FFmpeg's
+    # generated config.mak only gets its SRC_PATH rewritten from MSYS-style
+    # (e.g. /home/user/...) to a Windows path, and common.mak's per-object
+    # rules can still leak the untranslated MSYS path into clang-cl, which
+    # doesn't understand MSYS's virtual filesystem. Skip the expensive/fragile
+    # steps entirely when the real artifacts are already present.
+    set(_skip_marker "${_install_dir_msys}/.citron-skip-rebuild")
     add_custom_command(
         OUTPUT "${_build_stamp}"
         BYPRODUCTS
@@ -130,16 +143,18 @@ function(citron_build_clangcl_ffmpeg)
             "${_install_dir}/lib/avcodec.lib"
             "${_install_dir}/lib/avutil.lib"
         COMMAND "${CMAKE_COMMAND}" -E env "MSYS2_ARG_CONV_EXCL=*"
-            "${BASH_PROGRAM}" -lc "${_ffmpeg_configure_command}"
+            "${BASH_PROGRAM}" -lc "if [ -s '${_install_dir_msys}/lib/avfilter.lib' ] && [ -s '${_install_dir_msys}/lib/swscale.lib' ] && [ -s '${_install_dir_msys}/lib/avcodec.lib' ] && [ -s '${_install_dir_msys}/lib/avutil.lib' ]; then echo '[FFmpeg/clang-cl] Reusing already-built install artifacts, skipping rebuild'; : > '${_skip_marker}'; else rm -f '${_skip_marker}'; fi"
         COMMAND "${CMAKE_COMMAND}" -E env "MSYS2_ARG_CONV_EXCL=*"
-            "${BASH_PROGRAM}" -lc "perl -0pi -e 's{^SRC_PATH=.*$}{SRC_PATH=${_source_dir_win}}m; s{^SRC_LINK=.*$}{SRC_LINK=${_source_dir_win}}m; s{(?<![A-Za-z0-9_:])/([A-Za-z])/}{uc($1).q{:/}}ge; s{^(AR|AR_CMD)=llvm-lib}{$1=llvm-ar}mg' '${_build_dir_win}/ffbuild/config.mak' '${_build_dir_win}/ffbuild/config.sh'"
+            "${BASH_PROGRAM}" -lc "[ -f '${_skip_marker}' ] || { ${_ffmpeg_configure_command} ; }"
         COMMAND "${CMAKE_COMMAND}" -E env "MSYS2_ARG_CONV_EXCL=*"
-            "${BASH_PROGRAM}" -lc "export PATH='${_clangcl_tool_dir_msys}:${_linker_tool_dir_msys}:${_ar_tool_dir_msys}':$PATH && '${MAKE_PROGRAM}' -j${_ffmpeg_jobs}"
+            "${BASH_PROGRAM}" -lc "[ -f '${_skip_marker}' ] || perl -0pi -e 's{^SRC_PATH=.*$}{SRC_PATH=${_source_dir_win}}m; s{^SRC_LINK=.*$}{SRC_LINK=${_source_dir_win}}m; s{(?<![A-Za-z0-9_:])/([A-Za-z])/}{uc($1).q{:/}}ge; s{^(AR|AR_CMD)=llvm-lib}{$1=llvm-ar}mg' '${_build_dir_win}/ffbuild/config.mak' '${_build_dir_win}/ffbuild/config.sh'"
         COMMAND "${CMAKE_COMMAND}" -E env "MSYS2_ARG_CONV_EXCL=*"
-            "${BASH_PROGRAM}" -lc "export PATH='${_clangcl_tool_dir_msys}:${_linker_tool_dir_msys}:${_ar_tool_dir_msys}':$PATH && '${MAKE_PROGRAM}' install"
+            "${BASH_PROGRAM}" -lc "[ -f '${_skip_marker}' ] || { export PATH='${_clangcl_tool_dir_msys}:${_linker_tool_dir_msys}:${_ar_tool_dir_msys}':\$PATH && '${MAKE_PROGRAM}' -j${_ffmpeg_jobs} ; }"
+        COMMAND "${CMAKE_COMMAND}" -E env "MSYS2_ARG_CONV_EXCL=*"
+            "${BASH_PROGRAM}" -lc "[ -f '${_skip_marker}' ] || { export PATH='${_clangcl_tool_dir_msys}:${_linker_tool_dir_msys}:${_ar_tool_dir_msys}':\$PATH && '${MAKE_PROGRAM}' install ; }"
         COMMAND "${CMAKE_COMMAND}" -E env "MSYS2_ARG_CONV_EXCL=*"
             "${BASH_PROGRAM}" -lc
-            "cd '${_install_dir_msys}/lib' && for f in avfilter swscale avcodec avutil; do if [ -f \"lib$f.a\" ]; then mv -f \"lib$f.a\" \"$f.lib\" || exit 1; elif [ ! -f \"$f.lib\" ]; then echo \"[FFmpeg/clang-cl] Missing both lib$f.a and $f.lib after make install\" >&2; exit 1; fi; done"
+            "[ -f '${_skip_marker}' ] || { cd '${_install_dir_msys}/lib' && for f in avfilter swscale avcodec avutil; do if [ -f \"lib$f.a\" ]; then mv -f \"lib$f.a\" \"$f.lib\" || exit 1; elif [ ! -f \"$f.lib\" ]; then echo \"[FFmpeg/clang-cl] Missing both lib$f.a and $f.lib after make install\" >&2; exit 1; fi; done ; }"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_build_stamp}"
         DEPENDS "${CMAKE_CURRENT_LIST_FILE}" "${_source_dir}/configure"
         WORKING_DIRECTORY "${_build_dir_win}"

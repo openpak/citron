@@ -78,6 +78,19 @@ public:
 
     virtual Errno SetBroadcast(bool enable) = 0;
 
+    // [OpenPak] A portable networking stack (Splatoon 3's gRPC/NintendoSDK_NPLN stack does
+    // this) commonly reads a SOL_SOCKET option straight back after setting it to confirm the
+    // set actually took, before trusting the socket -- SetReuseAddr/SetKeepAlive/SetBroadcast
+    // had no matching getters at all, so that verification always failed and the game abandoned
+    // an otherwise-fine socket, retrying the whole connection sequence from scratch forever
+    // (confirmed directly: TCP_NODELAY was the first casualty, SO_REUSEADDR the next -- see
+    // GetNoDelay's declaration comment above for the TCP_NODELAY half of this).
+    virtual std::pair<bool, Errno> GetReuseAddr() = 0;
+
+    virtual std::pair<bool, Errno> GetKeepAlive() = 0;
+
+    virtual std::pair<bool, Errno> GetBroadcast() = 0;
+
     virtual Errno SetSndBuf(u32 value) = 0;
 
     virtual Errno SetRcvBuf(u32 value) = 0;
@@ -87,6 +100,15 @@ public:
     virtual Errno SetRcvTimeo(u32 value) = 0;
 
     virtual Errno SetNonBlock(bool enable) = 0;
+
+    // [OpenPak] IPPROTO_TCP-level option, not SOL_SOCKET -- the generic SetSockOpt/GetSockOpt
+    // helpers below hardcode SOL_SOCKET and can't reach it. A portable networking stack
+    // (Splatoon 3's gRPC/NintendoSDK_NPLN stack does this) commonly disables Nagle's algorithm
+    // and then reads TCP_NODELAY back to confirm it actually took before trusting the socket;
+    // without a real answer here it abandons an otherwise-fine socket and retries the whole
+    // connection sequence from scratch forever.
+    virtual Errno SetNoDelay(bool enable) = 0;
+    virtual std::pair<bool, Errno> GetNoDelay() = 0;
 
     virtual std::pair<Errno, Errno> GetPendingError() = 0;
 
@@ -146,6 +168,12 @@ public:
 
     Errno SetBroadcast(bool enable) override;
 
+    std::pair<bool, Errno> GetReuseAddr() override;
+
+    std::pair<bool, Errno> GetKeepAlive() override;
+
+    std::pair<bool, Errno> GetBroadcast() override;
+
     Errno SetSndBuf(u32 value) override;
 
     Errno SetRcvBuf(u32 value) override;
@@ -155,6 +183,9 @@ public:
     Errno SetRcvTimeo(u32 value) override;
 
     Errno SetNonBlock(bool enable) override;
+
+    Errno SetNoDelay(bool enable) override;
+    std::pair<bool, Errno> GetNoDelay() override;
 
     template <typename T>
     Errno SetSockOpt(SOCKET fd, int option, T value);

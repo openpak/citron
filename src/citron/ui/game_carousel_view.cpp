@@ -648,7 +648,7 @@ void CinematicCarousel::paintEvent(QPaintEvent* event) {
             p.setClipPath(clip);
             p.drawPixmap(card, pix, CenterCropForAspect(pix.size(), card.size()));
             p.setClipping(false);
-            DrawOnlineBadges(p, card, program_id);
+            DrawOnlineBadges(p, card, program_id, idx.data(GameListItemPath::VersionRole).toString());
         } else {
             QPainterPath clip;
             clip.addRoundedRect(card, 14, 14);
@@ -812,18 +812,22 @@ QColor CinematicCarousel::AccentColor() const {
     return acc;
 }
 
-void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id) const {
+void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id,
+                                         const QString& installed_version) const {
     const bool show_legacy = Common::OpenPakAccount::IsLinked() &&
                                OpenPak::CompatibleTitles::Table().contains(program_id);
     const std::optional<OpenPak::LdnCounts::Stats> ldn = OpenPak::LdnCounts::For(program_id);
     if (!show_legacy && !ldn) {
         return;
     }
+    const bool needs_update = show_legacy && !OpenPak::CompatibleTitles::IsVersionOk(
+                                                    program_id, installed_version.toStdString());
 
     const qreal scale = std::clamp(card.width() / 130.0, 0.55, 1.5);
     const qreal dot_d = 8.0 * scale;
     const qreal pad = 7.0 * scale;
     const qreal badge_h = 18.0 * scale;
+    const qreal row_gap = 4.0 * scale;
 
     QFont f = font();
     f.setBold(true);
@@ -833,12 +837,13 @@ void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 pr
     p.save();
     p.setRenderHint(QPainter::Antialiasing);
 
-    auto draw_corner = [&](bool top_right, const QString& text, const QColor& color) {
+    // row stacks badges sharing the same corner (e.g. player count above "Requires X.X.X").
+    auto draw_corner = [&](bool top_right, int row, const QString& text, const QColor& color) {
         const qreal text_w = fm.horizontalAdvance(text);
         const qreal badge_w = dot_d + 6.0 * scale + text_w + 8.0 * scale;
-        const QRectF badge_rect =
-            top_right ? QRectF(card.right() - badge_w - pad, card.top() + pad, badge_w, badge_h)
-                     : QRectF(card.left() + pad, card.top() + pad, badge_w, badge_h);
+        const qreal y = card.top() + pad + row * (badge_h + row_gap);
+        const QRectF badge_rect = top_right ? QRectF(card.right() - badge_w - pad, y, badge_w, badge_h)
+                                            : QRectF(card.left() + pad, y, badge_w, badge_h);
 
         QPainterPath bg;
         bg.addRoundedRect(badge_rect, badge_h / 2.0, badge_h / 2.0);
@@ -859,10 +864,15 @@ void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 pr
 
     if (show_legacy) {
         const int players = OpenPak::OnlineCounts::For(program_id);
-        draw_corner(true, QString::number(players), QColor(50, 195, 85));
+        draw_corner(true, 0, QString::number(players), QColor(50, 195, 85));
+        if (needs_update) {
+            const QString required_version =
+                QString::fromStdString(OpenPak::CompatibleTitles::Table().at(program_id));
+            draw_corner(true, 1, tr("Requires %1").arg(required_version), QColor(0, 190, 255));
+        }
     }
     if (ldn) {
-        draw_corner(false, QString::number(ldn->players), QColor(0, 170, 255));
+        draw_corner(false, 0, QString::number(ldn->players), QColor(0, 170, 255));
     }
 
     p.restore();

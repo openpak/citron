@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <mutex>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -102,6 +104,47 @@ static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) 
     }
 
     return std::nullopt;
+}
+
+// [OpenPak] Holds the FIRST resolution of an "npln" host back for a few seconds, against a
+// startup deadlock. A gRPC-based title (Splatoon 3) connects to its online lobby on its own,
+// early in boot, right in the middle of the heaviest JIT/shader-compile burst of startup.
+// grpc-core's own connection setup can deadlock outright when it starts while that contention
+// is happening -- its poller goes into wait and its executor stalls partway through preparing
+// the socket, without ever actually emitting connect() -- while the identical setup, a few
+// seconds later on a quieter system, succeeds. Ryujinx-Reference hit and documented this exact
+// failure (DnsMitmResolver.cs's MaybeDelayNplnInit); this is the same guard, simplified: a
+// fixed delay rather than polling dynarmic's own translation-rate counter for a "calm" signal,
+// since that isn't exposed here. OPENPAK_LEGACY_NPLN_DELAY_MS overrides it (0 disables); same
+// variable name as Ryujinx-Reference's on purpose.
+static std::once_flag g_npln_delay_once;
+
+static void MaybeDelayNplnInit(const std::string& host) {
+    if (Common::ToLower(host).find("npln") == std::string::npos) {
+        return;
+    }
+    std::call_once(g_npln_delay_once, [] {
+        int delay_ms = 5000;
+        if (const char* env = std::getenv("OPENPAK_LEGACY_NPLN_DELAY_MS"); env && *env) {
+            try {
+                const int parsed = std::stoi(env);
+                if (parsed >= 0) {
+                    delay_ms = parsed;
+                }
+            } catch (const std::exception&) {
+                // Malformed override -- keep the default rather than fail resolution over it.
+            }
+        }
+        if (delay_ms <= 0) {
+            return;
+        }
+        LOG_INFO(Service,
+                 "[OpenPak] Holding the first npln host resolution for {} ms so the "
+                 "post-boot JIT/shader-compile burst settles before gRPC's connection setup "
+                 "starts (see MaybeDelayNplnInit)",
+                 delay_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    });
 }
 
 enum class NetDbError : s32 {
@@ -246,6 +289,11 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
 
+    LOG_INFO(Service, "[OpenPak] DNS resolve (GetHostByName) requested: host={}", host);
+
+    // [OpenPak] See MaybeDelayNplnInit's declaration comment.
+    MaybeDelayNplnInit(host);
+
     if (parameters.use_nsd_resolve || host.find('%') != std::string::npos) {
         auto pos = host.find('%');
         if (pos != std::string::npos) {
@@ -338,8 +386,18 @@ static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& v
         Append<u32_be>(data, sizeof(SockAddrIn));                                // ai_addrlen
         // ^ *not* sizeof(SerializedSockAddrIn), not that it matters since they're the same size
 
-        // ai_addr:
-        Append<u16_be>(data, static_cast<u16>(Translate(addrinfo.addr.family))); // sin_family
+        // ai_addr: BSD-style sockaddr_in, matching the SockAddrIn struct in sockets.h --
+        // {u8 sin_len; u8 sin_family; u16 sin_port; u8 sin_addr[4]; u8 sin_zero[8];}. This used
+        // to write sin_family as a single 2-byte big-endian value, which skips sin_len entirely
+        // (leaving it implicitly 0x00) instead of emitting it as its own leading byte. A guest
+        // resolver walker that trusts sin_len -- and gRPC-based titles (Splatoon 3) that build
+        // their own connect() sockaddr straight out of this buffer -- reads a zero-length
+        // address off a sin_len of 0 and falls back to connecting to 0.0.0.0. Exactly matches
+        // Ryujinx-Reference's AddrInfo4.Length fix (was sizeof(Array4<byte>)=4, needed to be
+        // sizeof(AddrInfo4)=16): sin_len must be the full sockaddr size, not folded away.
+        // [OpenPak]
+        Append<u8>(data, static_cast<u8>(sizeof(SockAddrIn)));              // sin_len
+        Append<u8>(data, static_cast<u8>(Translate(addrinfo.addr.family))); // sin_family
         // On the Switch, the following fields are passed through htonl despite
         // already being big-endian, so they end up as little-endian.
         Append<u16_le>(data, addrinfo.addr.portno);                            // sin_port
@@ -379,6 +437,45 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
+
+    LOG_INFO(Service, "[OpenPak] DNS resolve (GetAddrInfo) requested: host={}", host);
+
+    // [OpenPak] See MaybeDelayNplnInit's declaration comment.
+    MaybeDelayNplnInit(host);
+
+    // [OpenPak] A literal IP has nothing to resolve -- return it as-is, before any of the
+    // redirect/blocklist/NSD-rewrite logic below, all of which exist to turn a HOSTNAME into
+    // the right address and have no business touching an address that's already one. See
+    // TryParseIPv4Literal's declaration comment in internal_network/network.h for why falling
+    // through to a real resolution here (which is what happened before this check existed) was
+    // the actual root cause of Splatoon 3's NPLN connections completing TCP+TLS+HTTP/2 and then
+    // silently closing without ever sending a HEADERS frame -- confirmed live: citron's own
+    // connect cycles for this exact hostname resolved and connected correctly, but every one
+    // still sent only a single small request and closed within ~1s of the server's reply, on
+    // every cycle regardless of timing -- consistent with the game building an HTTP/2
+    // :authority header from a corrupted canonical name, not any citron-side socket/scheduling
+    // issue (both were separately investigated at length and ruled out).
+    if (Network::IPv4Address literal_ip; Network::TryParseIPv4Literal(host, literal_ip)) {
+        LOG_DEBUG(Service, "[OpenPak] Host '{}' is already a literal address: returned as-is",
+                  host);
+        Network::AddrInfo entry{};
+        entry.family = Network::Domain::INET;
+        entry.socket_type = Network::Type::STREAM;
+        entry.protocol = Network::Protocol::TCP;
+        entry.addr.family = Network::Domain::INET;
+        entry.addr.ip = literal_ip;
+        entry.addr.portno = 0;
+        entry.canon_name = host;
+
+        // Deliberately no SetLastHostForIp here, matching Ryujinx-Reference's own fix -- a
+        // literal IP carries no hostname to record, and recording one would corrupt the
+        // reverse lookup table used elsewhere for this exact purpose (see
+        // GetLastHostForIp's declaration comment).
+        const std::vector<u8> data = SerializeAddrInfo({entry}, host);
+        const u32 data_size = static_cast<u32>(data.size());
+        ctx.WriteBuffer(data, 0);
+        return {data_size, GetAddrInfoError::SUCCESS};
+    }
 
     if (parameters.use_nsd_resolve || host.find('%') != std::string::npos) {
         auto pos = host.find('%');

@@ -63,6 +63,12 @@ public:
 
     Errno SetKeepAlive(bool enable) override;
 
+    std::pair<bool, Errno> GetReuseAddr() override;
+
+    std::pair<bool, Errno> GetKeepAlive() override;
+
+    std::pair<bool, Errno> GetBroadcast() override;
+
     Errno SetSndBuf(u32 value) override;
 
     Errno SetRcvBuf(u32 value) override;
@@ -73,6 +79,9 @@ public:
 
     Errno SetNonBlock(bool enable) override;
 
+    Errno SetNoDelay(bool enable) override;
+    std::pair<bool, Errno> GetNoDelay() override;
+
     template <typename T>
     Errno SetSockOpt(SOCKET fd, int option, T value);
 
@@ -82,6 +91,9 @@ public:
 
 private:
     bool broadcast = false;
+    bool no_delay = false;
+    bool reuse_addr = false;
+    bool keep_alive = false;
     bool closed = false;
     u32 send_timeout = 0;
     u32 receive_timeout = 0;

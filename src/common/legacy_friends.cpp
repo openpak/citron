@@ -3,7 +3,9 @@
 
 #include <chrono>
 #include <mutex>
+#include <thread>
 
+#include "common/legacy_account.h"
 #include "common/legacy_friends.h"
 
 namespace Common::OpenPakFriends {
@@ -29,6 +31,23 @@ void Set(std::vector<Entry> entries) {
 std::vector<Entry> Get() {
     std::lock_guard lock{g_mutex};
     return g_entries;
+}
+
+std::vector<Entry> GetWarm(int timeout_ms) {
+    auto entries = Get(); // Same background refresh Get() always relies on -- just wait for it.
+    if (!entries.empty() || !Common::OpenPakAccount::IsLinked()) {
+        return entries;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        entries = Get();
+        if (!entries.empty()) {
+            break;
+        }
+    }
+    return entries;
 }
 
 void SetLocalPresence(s32 status, std::string app_field) {

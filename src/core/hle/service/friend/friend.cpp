@@ -305,7 +305,18 @@ public:
 
         u32 count = 0;
         if (offset == 0 && ctx.CanWriteBuffer()) {
-            const auto entries = Common::OpenPakFriends::Get();
+            // [OpenPak] Splatoon 3 asks for its friend list exactly once, early in boot, and
+            // never asks again -- unlike NEX titles, which poll this repeatedly from their own
+            // online thread (where blocking would stall PRUDP acks and the server would declare
+            // a communication error, so they keep the plain non-blocking Get()). If the
+            // frontend's background refresh hasn't populated the cache yet by the time Splatoon
+            // 3's one-shot request lands, it's stuck with zero friends for the whole session.
+            // Give that one call a short, bounded wait instead. Matches Ryujinx-Reference's own
+            // fix here (OpenPakFriends.GetWarm), which measured this exact race.
+            constexpr u64 SplatoonThreeTitleId = 0x0100C2500FC20000ULL;
+            const auto entries = system.GetApplicationProcessProgramID() == SplatoonThreeTitleId
+                                     ? Common::OpenPakFriends::GetWarm(2000)
+                                     : Common::OpenPakFriends::Get();
             const auto capacity = ctx.GetWriteBufferNumElements<u64>();
             std::vector<u64> ids;
             for (const auto& entry : entries) {
@@ -763,7 +774,52 @@ void IFriendService::Cancel(HLERequestContext& ctx) {
 }
 
 void IFriendService::UpdateFriendInfo(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) UpdateFriendInfo called");
+    IPC::RequestParser rp{ctx};
+    const auto uuid = rp.PopRaw<Common::UUID>();
+
+    // [OpenPak] This used to return Success while writing NOTHING into its out buffer. Any game
+    // that resolves friend details this way -- taking the ids GetFriendListIds already handed it
+    // and asking here for the actual name/presence/app-field data -- got the ids back with zero
+    // real data, so the friends screen stayed empty even though the id list itself was correct.
+    // Matches a real, confirmed Ryujinx-Reference bug for this exact method (Splatoon 3's "Amis"
+    // screen staying empty despite GetFriendListIds already succeeding). The requested ids are
+    // the INPUT here and the resolved details the OUTPUT, one entry per requested id, in the SAME
+    // order -- an id we can't resolve gets a zeroed (is_valid=0) entry rather than being skipped,
+    // otherwise the caller mis-pairs the remaining ids with the wrong friends.
+    // [OpenPak] Defensive: only trust an input buffer that's actually present, and hard-cap the
+    // element count regardless of what the size math says -- a previous version of this fix
+    // trusted ctx.ReadBuffer(0)'s size unconditionally and hung the emulator (unbounded
+    // std::vector<u64> allocation) the first time this call's real buffer layout didn't match
+    // what was assumed. A real friend list can never exceed a few hundred entries.
+    constexpr std::size_t MaxRequestedIds = 300;
+    std::vector<u64> requested_ids;
+    if (ctx.CanReadBuffer(0)) {
+        const auto requested_ids_raw = ctx.ReadBuffer(0);
+        const auto id_count = std::min(requested_ids_raw.size() / sizeof(u64), MaxRequestedIds);
+        requested_ids.resize(id_count);
+        if (id_count > 0) {
+            std::memcpy(requested_ids.data(), requested_ids_raw.data(), id_count * sizeof(u64));
+        }
+    }
+
+    const auto entries = Common::OpenPakFriends::Get();
+    const auto capacity = std::min(ctx.GetWriteBufferNumElements<FriendImpl>(), MaxRequestedIds);
+    const auto out_count = std::min(requested_ids.size(), capacity);
+
+    std::vector<FriendImpl> info(out_count);
+    for (std::size_t i = 0; i < out_count; ++i) {
+        const auto wanted = requested_ids[i];
+        const auto it = std::find_if(entries.begin(), entries.end(),
+                                     [wanted](const auto& e) { return e.pid == wanted; });
+        info[i] = it != entries.end() ? MakeFriend(*it) : FriendImpl{};
+    }
+
+    if (!info.empty()) {
+        ctx.WriteBuffer(info);
+    }
+
+    LOG_INFO(Service_Friend, "[OpenPak] UpdateFriendInfo uuid=0x{} requested={} -> {} resolved",
+             uuid.RawString(), requested_ids.size(), out_count);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
 }

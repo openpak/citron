@@ -2559,8 +2559,14 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
 
     current_title_id = title_id; // Store ID safely
 
-    // [OpenPak] Splatoon 3 refuses to boot with any mod active. Updates/DLC are unaffected --
-    // those are PatchType::Update/DLC, only PatchType::Mod (LayeredFS content) is checked.
+    // [OpenPak] Splatoon 3 refuses to boot with any mod OR cheat active. Updates/DLC are
+    // unaffected -- those are PatchType::Update/DLC. Matches Ryujinx-Reference's own equivalent
+    // check (ModLoader.cs's ModsInterdits): online play there is against real people and the
+    // server can't contradict a modified client -- the console itself computes the shots -- so
+    // Ryujinx's port blocks romfs/romfs.bin/exefs/IPS patches (including global ones) AND cheat
+    // codes/activation for this title alone. Citron's own prior check here only looked at
+    // PatchType::Mod; cheats live in a separate PatchManager::GetCheats() list entirely and
+    // were never checked, so a cheat could still be active while this dialog reported "clean".
     if (title_id == 0x0100C2500FC20000ULL) {
         const FileSys::PatchManager pm{title_id, system->GetFileSystemController(),
                                        system->GetContentProvider()};
@@ -2570,14 +2576,19 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
                 active_mods.push_back(QString::fromStdString(patch.name));
             }
         }
+        for (const auto& cheat : pm.GetCheats()) {
+            if (cheat.enabled) {
+                active_mods.push_back(tr("%1 (cheat)").arg(QString::fromStdString(cheat.name)));
+            }
+        }
         if (!active_mods.isEmpty()) {
             LOG_CRITICAL(Frontend,
-                         "[OpenPak] Refusing to boot Splatoon 3: {} mod(s) enabled",
+                         "[OpenPak] Refusing to boot Splatoon 3: {} mod(s)/cheat(s) enabled",
                          active_mods.size());
             QMessageBox::critical(
                 this, tr("Splatoon 3: mods must be disabled"),
-                tr("Splatoon 3 cannot be launched while any mod is enabled:\n\n%1\n\n"
-                   "Disable them in the game's Properties > Add-Ons tab and try again. "
+                tr("Splatoon 3 cannot be launched while any mod or cheat is enabled:\n\n%1\n\n"
+                   "Disable them in the game's Properties > Add-Ons/Cheats tabs and try again. "
                    "Updates and DLC are not affected.")
                     .arg(active_mods.join(QStringLiteral("\n"))));
             return;
