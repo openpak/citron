@@ -576,6 +576,12 @@ PollEvents TranslatePollRevents(short revents) {
 // signal instead of trusting WSAPoll's revents alone: 0 back means an orderly close (FIN
 // already received), a reset-family error means a hard hangup, and anything else (in
 // particular WSAEWOULDBLOCK) means truly nothing yet -- left alone.
+//
+// WIN32-only: this whole gap is specific to WSAPoll's exceptfds behavior. Real POSIX poll()
+// on Linux/macOS already reports POLLHUP/POLLERR correctly for a hung-up peer, and this
+// function's SOCKET/SOCKET_ERROR/WSAGetLastError/WSAE* symbols are Winsock-only -- they don't
+// exist on those platforms, so building this unconditionally broke non-Windows CI.
+#ifdef _WIN32
 bool PeekPeerHungUp(SOCKET native_fd, bool& has_pending_data) {
     has_pending_data = false;
 
@@ -609,6 +615,7 @@ bool PeekPeerHungUp(SOCKET native_fd, bool& has_pending_data) {
         return false;
     }
 }
+#endif
 
 } // Anonymous namespace
 
@@ -730,13 +737,15 @@ std::pair<s32, Errno> Poll(std::vector<PollFD>& pollfds, s32 timeout) {
         return {-1, GetAndLogLastError()};
     }
 
-    // [OpenPak] See PeekPeerHungUp's comment. Re-check every fd the caller asked to read from
-    // that WSAPoll didn't already report ready -- regardless of whether WSAPoll returned 0 or
-    // reported some other fd ready -- so a peer that hung up gets surfaced as ready-with-Hup
-    // instead of silently polling as not-ready forever.
+    // [OpenPak] See PeekPeerHungUp's comment (WIN32-only -- WSAPoll's exceptfds gap doesn't
+    // exist on POSIX poll()). Re-check every fd the caller asked to read from that WSAPoll
+    // didn't already report ready -- regardless of whether WSAPoll returned 0 or reported some
+    // other fd ready -- so a peer that hung up gets surfaced as ready-with-Hup instead of
+    // silently polling as not-ready forever.
     s32 real_count = 0;
     for (size_t i = 0; i < num; ++i) {
         pollfds[i].revents = TranslatePollRevents(host_pollfds[i].revents);
+#ifdef _WIN32
         if (True(pollfds[i].events & PollEvents::In) &&
             False(pollfds[i].revents & (PollEvents::In | PollEvents::Err | PollEvents::Hup))) {
             bool has_pending_data = false;
@@ -746,6 +755,7 @@ std::pair<s32, Errno> Poll(std::vector<PollFD>& pollfds, s32 timeout) {
                 pollfds[i].revents |= PollEvents::In;
             }
         }
+#endif
         if (pollfds[i].revents != PollEvents{}) {
             ++real_count;
         }
