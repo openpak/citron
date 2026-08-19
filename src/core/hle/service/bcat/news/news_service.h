@@ -25,7 +25,7 @@ private:
     Result RequestAutoSubscription(u64 value);
 
     // Additional News service functions
-    Result PostLocalNews(InBuffer<BufferAttr_HipcPointer> news_data);
+    Result PostLocalNews(InBuffer<BufferAttr_HipcAutoSelect> news_data);
     Result SetPassphrase(u64 application_id, InBuffer<BufferAttr_HipcPointer> passphrase);
     Result GetTopicList(Out<s32> out_count, OutArray<u8, BufferAttr_HipcMapAlias> out_topics);
     Result Unknown30110();

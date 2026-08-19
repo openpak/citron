@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 #include "common/settings.h"
 #include "core/file_sys/control_metadata.h"
@@ -93,6 +96,51 @@ void SanitizeJPEGImageSize(std::vector<u8>& image) {
     if (image.size() > max_jpeg_image_size) {
         image.resize(max_jpeg_image_size);
     }
+}
+
+struct CachedControl {
+    bool has_nacp = false;
+    bool has_icon = false;
+    std::vector<u8> nacp_bytes;
+    std::vector<u8> icon_bytes;
+    FileSys::LanguageEntry language_entry{};
+};
+
+std::mutex g_control_cache_mutex;
+std::unordered_map<u64, std::pair<std::chrono::steady_clock::time_point, CachedControl>>
+    g_control_cache;
+
+CachedControl GetCachedControl(Core::System& system, u64 application_id) {
+    const auto now = std::chrono::steady_clock::now();
+
+    {
+        std::lock_guard lock{g_control_cache_mutex};
+        const auto it = g_control_cache.find(application_id);
+        if (it != g_control_cache.end()) {
+            return it->second.second;
+        }
+    }
+
+    const FileSys::PatchManager pm{application_id, system.GetFileSystemController(),
+                                   system.GetContentProvider()};
+    const auto control = pm.GetControlMetadata();
+
+    CachedControl result;
+    if (control.first != nullptr) {
+        result.has_nacp = true;
+        const auto bytes = control.first->GetRawBytes();
+        result.nacp_bytes.assign(bytes.begin(), bytes.end());
+        result.language_entry = control.first->GetLanguageEntry();
+    }
+    if (control.second != nullptr) {
+        result.has_icon = true;
+        result.icon_bytes.resize(control.second->GetSize());
+        control.second->Read(result.icon_bytes.data(), result.icon_bytes.size());
+    }
+
+    std::lock_guard lock{g_control_cache_mutex};
+    g_control_cache[application_id] = {now, result};
+    return result;
 }
 
 } // namespace
@@ -187,12 +235,10 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData(
     LOG_INFO(Service_NS, "called with control_source={}, application_id={:016X}",
              application_control_source, application_id);
 
-    const FileSys::PatchManager pm{application_id, system.GetFileSystemController(),
-                                   system.GetContentProvider()};
-    const auto control = pm.GetControlMetadata();
+    const auto control = GetCachedControl(system, application_id);
     const auto size = out_buffer.size();
 
-    const auto icon_size = control.second ? control.second->GetSize() : 0;
+    const auto icon_size = control.has_icon ? control.icon_bytes.size() : 0;
     const auto total_size = sizeof(FileSys::RawNACP) + icon_size;
 
     if (size < total_size) {
@@ -201,17 +247,17 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData(
         R_THROW(ResultUnknown);
     }
 
-    if (control.first != nullptr) {
-        const auto bytes = control.first->GetRawBytes();
-        std::memcpy(out_buffer.data(), bytes.data(), bytes.size());
+    if (control.has_nacp) {
+        std::memcpy(out_buffer.data(), control.nacp_bytes.data(), control.nacp_bytes.size());
     } else {
         LOG_WARNING(Service_NS, "missing NACP data for application_id={:016X}, defaulting to zero",
                     application_id);
         std::memset(out_buffer.data(), 0, sizeof(FileSys::RawNACP));
     }
 
-    if (control.second != nullptr) {
-        control.second->Read(out_buffer.data() + sizeof(FileSys::RawNACP), icon_size);
+    if (control.has_icon) {
+        std::memcpy(out_buffer.data() + sizeof(FileSys::RawNACP), control.icon_bytes.data(),
+                    icon_size);
     } else {
         LOG_WARNING(Service_NS, "missing icon data for application_id={:016X}", application_id);
     }
@@ -276,9 +322,7 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData2(
              "called with control_source={}, flags=({:02X},{:02X}), application_id={:016X}",
              application_control_source, flag1, flag2, application_id);
 
-    const FileSys::PatchManager pm{application_id, system.GetFileSystemController(),
-                                   system.GetContentProvider()};
-    const auto control = pm.GetControlMetadata();
+    const auto control = GetCachedControl(system, application_id);
     const auto size = out_buffer.size();
 
     const auto nacp_size = sizeof(FileSys::RawNACP);
@@ -289,11 +333,10 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData2(
         R_THROW(ResultUnknown);
     }
 
-    if (control.first != nullptr) {
-        const auto bytes = control.first->GetRawBytes();
+    if (control.has_nacp) {
         const auto copy_len =
-            (std::min)(static_cast<size_t>(bytes.size()), static_cast<size_t>(nacp_size));
-        std::memcpy(out_buffer.data(), bytes.data(), copy_len);
+            (std::min)(control.nacp_bytes.size(), static_cast<size_t>(nacp_size));
+        std::memcpy(out_buffer.data(), control.nacp_bytes.data(), copy_len);
         if (copy_len < nacp_size) {
             std::memset(out_buffer.data() + copy_len, 0, nacp_size - copy_len);
         }
@@ -305,15 +348,10 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData2(
     const auto icon_area_size = size - nacp_size;
     std::vector<u8> final_icon_data;
 
-    if (control.second != nullptr) {
-        size_t full_size = control.second->GetSize();
-        if (full_size > 0) {
-            final_icon_data.resize(full_size);
-            control.second->Read(final_icon_data.data(), full_size);
-
-            if (flag1 == 1) {
-                SanitizeJPEGImageSize(final_icon_data);
-            }
+    if (control.has_icon) {
+        final_icon_data = control.icon_bytes;
+        if (flag1 == 1) {
+            SanitizeJPEGImageSize(final_icon_data);
         }
     }
 
@@ -362,14 +400,9 @@ void IReadOnlyApplicationControlDataInterface::ListApplicationTitle(HLERequestCo
 
         for (size_t i = 0; i < app_count; ++i) {
             const u64 app_id = application_ids[i];
-            const FileSys::PatchManager pm{app_id, system.GetFileSystemController(),
-                                           system.GetContentProvider()};
-            const auto control = pm.GetControlMetadata();
+            const auto control = GetCachedControl(system, app_id);
 
-            FileSys::LanguageEntry entry{};
-            if (control.first != nullptr) {
-                entry = control.first->GetLanguageEntry();
-            }
+            const FileSys::LanguageEntry entry = control.language_entry;
 
             const size_t offset = i * title_entry_size;
             memory.WriteBlock(t_mem_address + offset, &entry, title_entry_size);
@@ -413,16 +446,13 @@ void IReadOnlyApplicationControlDataInterface::ListApplicationIcon(HLERequestCon
             LOG_INFO(Service_NS, "[{}/{}] Processing icon for app_id={:016X}", i + 1, app_count,
                      app_id);
 
-            const FileSys::PatchManager pm{app_id, system.GetFileSystemController(),
-                                           system.GetContentProvider()};
-            const auto control = pm.GetControlMetadata();
+            const auto control = GetCachedControl(system, app_id);
 
             const size_t offset = i * icon_size;
-            if (control.second != nullptr) {
+            if (control.has_icon) {
                 LOG_INFO(Service_NS, "Retrieving control metadata for app_id={:016X}, size={}",
-                         app_id, control.second->GetSize());
-                std::vector<u8> icon_data(control.second->GetSize());
-                control.second->Read(icon_data.data(), icon_data.size());
+                         app_id, control.icon_bytes.size());
+                std::vector<u8> icon_data = control.icon_bytes;
 
                 // QLaunch Home Menu and All Software menu expect sanitized icons (usually 174x174)
                 SanitizeJPEGImageSize(icon_data);
@@ -461,9 +491,7 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData3(
              "called with control_source={}, flags=({:02X},{:02X}), application_id={:016X}",
              application_control_source, flag1, flag2, application_id);
 
-    const FileSys::PatchManager pm{application_id, system.GetFileSystemController(),
-                                   system.GetContentProvider()};
-    const auto control = pm.GetControlMetadata();
+    const auto control = GetCachedControl(system, application_id);
     const auto size = out_buffer.size();
 
     const auto nacp_size = sizeof(FileSys::RawNACP);
@@ -474,11 +502,10 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData3(
         R_THROW(ResultUnknown);
     }
 
-    if (control.first != nullptr) {
-        const auto bytes = control.first->GetRawBytes();
+    if (control.has_nacp) {
         const auto copy_len =
-            (std::min)(static_cast<size_t>(bytes.size()), static_cast<size_t>(nacp_size));
-        std::memcpy(out_buffer.data(), bytes.data(), copy_len);
+            (std::min)(control.nacp_bytes.size(), static_cast<size_t>(nacp_size));
+        std::memcpy(out_buffer.data(), control.nacp_bytes.data(), copy_len);
         if (copy_len < nacp_size) {
             std::memset(out_buffer.data() + copy_len, 0, nacp_size - copy_len);
         }
@@ -491,15 +518,10 @@ Result IReadOnlyApplicationControlDataInterface::GetApplicationControlData3(
     const auto icon_area_size = size - nacp_size;
     std::vector<u8> final_icon_data;
 
-    if (control.second != nullptr) {
-        size_t full_size = control.second->GetSize();
-        if (full_size > 0) {
-            final_icon_data.resize(full_size);
-            control.second->Read(final_icon_data.data(), full_size);
-
-            if (flag1 == 1) {
-                SanitizeJPEGImageSize(final_icon_data);
-            }
+    if (control.has_icon) {
+        final_icon_data = control.icon_bytes;
+        if (flag1 == 1) {
+            SanitizeJPEGImageSize(final_icon_data);
         }
     }
 

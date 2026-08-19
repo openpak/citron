@@ -21,7 +21,6 @@ IApplicationManagerInterface::IApplicationManagerInterface(Core::System& system_
       gamecard_update_detection_event{service_context},
       gamecard_mount_status_event{service_context}, gamecard_mount_failure_event{service_context},
       application_shell_event{service_context}, unknown_event{service_context} {
-    record_update_system_event.Signal();
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, D<&IApplicationManagerInterface::ListApplicationRecord>, "ListApplicationRecord"},
@@ -486,6 +485,11 @@ Result IApplicationManagerInterface::ListApplicationRecord(
               [](const ApplicationRecord& lhs, const ApplicationRecord& rhs) {
                   return lhs.application_id < rhs.application_id;
               });
+    records.erase(std::unique(records.begin(), records.end(),
+                              [](const ApplicationRecord& lhs, const ApplicationRecord& rhs) {
+                                  return lhs.application_id == rhs.application_id;
+                              }),
+                 records.end());
 
     LOG_INFO(Service_NS, "called, offset={} limit={} total_found={}", offset, limit,
              records.size());
@@ -509,6 +513,7 @@ Result IApplicationManagerInterface::ListApplicationRecord(
 Result IApplicationManagerInterface::GetApplicationRecordUpdateSystemEvent(
     OutCopyHandle<Kernel::KReadableEvent> out_event) {
     LOG_DEBUG(Service_NS, "called");
+    record_update_system_event.Signal();
     *out_event = record_update_system_event.GetHandle();
     R_SUCCEED();
 }

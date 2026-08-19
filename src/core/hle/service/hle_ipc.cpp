@@ -272,7 +272,10 @@ Result HLERequestContext::PopulateFromIncomingCommandBuffer(u32_le* src_cmdbuf) 
 
 Result HLERequestContext::WriteToOutgoingCommandBuffer() {
     auto current_offset = handles_offset;
-    auto& owner_process = *thread->GetOwnerProcess();
+    R_UNLESS(thread != nullptr, ResultUnknown);
+    auto* const owner_process_ptr = thread->GetOwnerProcess();
+    R_UNLESS(owner_process_ptr != nullptr, ResultUnknown);
+    auto& owner_process = *owner_process_ptr;
     auto& handle_table = owner_process.GetHandleTable();
 
     for (auto& object : outgoing_copy_objects) {

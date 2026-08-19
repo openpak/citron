@@ -322,13 +322,14 @@ struct Memory::Impl {
                         const std::size_t size) {
         return WalkBlock(
             dest_addr, size,
-            [dest_addr, size](const std::size_t copy_amount,
+            [this, dest_addr, size](const std::size_t copy_amount,
                               const Common::ProcessAddress current_vaddr) {
                 if (ShouldLogUnmappedAccess()) {
                     LOG_ERROR(HW_Memory,
                           "Unmapped WriteBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
                           GetInteger(current_vaddr), GetInteger(dest_addr), size);
                 }
+                LogUnmappedWriteBacktraceOnce(system);
             },
             [&](const std::size_t copy_amount, u8* const dest_ptr) {
                 std::memcpy(dest_ptr, src_buffer, copy_amount);

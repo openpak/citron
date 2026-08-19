@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <bit>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
@@ -144,10 +145,15 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
 
     const auto check_failing = [&]() {
         if (events[slot].fails > 2) {
+            bool signalled;
             {
                 auto lk = system.StallApplication();
-                host1x_syncpoint_manager.WaitHost(fence_id, target_value);
+                signalled = host1x_syncpoint_manager.WaitHost(fence_id, target_value,
+                                                              std::chrono::milliseconds{2000});
                 system.UnstallApplication();
+            }
+            if (!signalled) {
+                return false;
             }
             params.value.raw = target_value;
             return true;

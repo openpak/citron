@@ -13,6 +13,7 @@
 #include "citron/legacy_avatar_cache.h"
 #include "citron/uisettings.h"
 #include "common/legacy_account.h"
+#include "common/legacy_avatar.h"
 
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/legacy_api.h"
@@ -65,6 +66,7 @@ void OpenPakProfileChip::RefreshAvatar() {
         QMetaObject::invokeMethod(
             this,
             [this, image = profile.image_base64] {
+                Common::OpenPakAvatar::SetSelfJPEGBase64(image);
                 if (image == last_avatar_key) {
                     return;
                 }

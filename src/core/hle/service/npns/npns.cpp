@@ -144,9 +144,9 @@ private:
         R_SUCCEED();
     }
 
-    Result GetRequestChangeStateCancelEvent(OutCopyHandle<Kernel::KReadableEvent> out_event) {
+    Result GetRequestChangeStateCancelEvent(OutCopyHandle<Kernel::KEvent> out_event) {
         LOG_INFO(Service_NPNS, "called");
-        *out_event = &get_request_change_state_cancel_event->GetReadableEvent();
+        *out_event = get_request_change_state_cancel_event;
         R_SUCCEED();
     }
 

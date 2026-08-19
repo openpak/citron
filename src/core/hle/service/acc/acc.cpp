@@ -14,10 +14,12 @@
 
 #include "common/common_types.h"
 #include "common/fs/file.h"
+#include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/legacy_account.h"
+#include "common/legacy_avatar.h"
 #include "common/legacy_compatible_titles.h"
 #include "common/settings.h"
 #include <ranges>
@@ -270,6 +272,25 @@ static std::filesystem::path GetImagePath(const Common::UUID& uuid) {
            fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
 }
 
+static void SeedImageFromOpenPakIfMissing(const Common::UUID& uuid) {
+    const auto path = GetImagePath(uuid);
+    if (Common::FS::Exists(path)) {
+        return;
+    }
+    if (!Common::OpenPakAccount::IsLinked()) {
+        return;
+    }
+    const auto jpeg = Common::OpenPakAvatar::GetSelfJPEG();
+    if (jpeg.empty()) {
+        return;
+    }
+    void(Common::FS::CreateParentDirs(path));
+    Common::FS::IOFile out(path, Common::FS::FileAccessMode::Write, Common::FS::FileType::BinaryFile);
+    if (out.IsOpen()) {
+        void(out.Write(jpeg));
+    }
+}
+
 static void JPGToMemory(void* context, void* data, int len) {
     std::vector<u8>* jpg_image = static_cast<std::vector<u8>*>(context);
     unsigned char* jpg = static_cast<unsigned char*>(data);
@@ -321,12 +342,13 @@ public:
             {113, nullptr, "GetServiceEntryRequirementCacheForOnlinePlay"}, // 6.1.0+
             {120, nullptr, "GetNintendoAccountId"},
             {121, nullptr, "CalculateNintendoAccountAuthenticationFingerprint"}, // 9.0.0+
-            {130, nullptr, "GetNintendoAccountUserResourceCache"},
+            {130, &IManagerForSystemService::GetNintendoAccountUserResourceCache, "GetNintendoAccountUserResourceCache"},
             {131, nullptr, "RefreshNintendoAccountUserResourceCacheAsync"},
             {132, nullptr, "RefreshNintendoAccountUserResourceCacheAsyncIfSecondsElapsed"},
             {133, nullptr, "GetNintendoAccountVerificationUrlCache"}, // 9.0.0+
             {134, nullptr, "RefreshNintendoAccountVerificationUrlCache"}, // 9.0.0+
             {135, nullptr, "RefreshNintendoAccountVerificationUrlCacheAsyncIfSecondsElapsed"}, // 9.0.0+
+            {136, &IManagerForSystemService::GetNintendoAccountUserResourceCache, "GetNintendoAccountUserResourceCache"}, // 19.0.0+
             {140, nullptr, "GetNetworkServiceLicenseCache"}, // 5.0.0+
             {141, nullptr, "RefreshNetworkServiceLicenseCacheAsync"}, // 5.0.0+
             {142, nullptr, "RefreshNetworkServiceLicenseCacheAsyncIfSecondsElapsed"}, // 5.0.0+
@@ -360,6 +382,24 @@ private:
     Result LoadIdTokenCache() {
         LOG_WARNING(Service_ACC, "(STUBBED) called");
         R_SUCCEED();
+    }
+
+    void GetNintendoAccountUserResourceCache(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "[OpenPak] GetNintendoAccountUserResourceCache called");
+
+        const u64 pid = account_id.Hash();
+        std::vector<u8> nas_user_base(0x68, 0);
+        std::memcpy(nas_user_base.data(), &pid, sizeof(pid));
+        ctx.WriteBuffer(nas_user_base, 0);
+
+        if (ctx.CanWriteBuffer(1)) {
+            std::vector<u8> unknown_out_buffer(ctx.GetWriteBufferSize(1), 0);
+            ctx.WriteBuffer(unknown_out_buffer, 1);
+        }
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.PushRaw<u64>(pid);
     }
 
     Result GetNetworkServiceLicenseCacheEx(Out<u32> out_license, Out<s64> out_expiration) {
@@ -624,6 +664,8 @@ protected:
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
 
+        SeedImageFromOpenPakIfMissing(user_id);
+
         const Common::FS::IOFile image(GetImagePath(user_id), Common::FS::FileAccessMode::Read,
                                        Common::FS::FileType::BinaryFile);
         if (!image.IsOpen()) {
@@ -650,6 +692,8 @@ protected:
         LOG_DEBUG(Service_ACC, "called");
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
+
+        SeedImageFromOpenPakIfMissing(user_id);
 
         const Common::FS::IOFile image(GetImagePath(user_id), Common::FS::FileAccessMode::Read,
                                        Common::FS::FileType::BinaryFile);
@@ -1344,6 +1388,7 @@ Result Module::Interface::InitializeApplicationInfoBase() {
         application_info.application_type = ApplicationType::GameCard;
         break;
     case FileSys::StorageId::Host:
+    case FileSys::StorageId::NandSystem:
     case FileSys::StorageId::NandUser:
     case FileSys::StorageId::SdCard:
     case FileSys::StorageId::None: // Citron specific, differs from hardware

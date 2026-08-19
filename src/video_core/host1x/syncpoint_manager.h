@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <list>
@@ -58,6 +59,12 @@ public:
 
     void WaitHost(u32 syncpoint_id, u32 expected_value);
 
+    // Bounded variant: returns false on timeout instead of blocking forever. Callers that
+    // can't guarantee the syncpoint will actually reach expected_value must use this, or a
+    // missed host1x signal stalls the caller (and, if it holds StallApplication, the whole
+    // emulated system) indefinitely.
+    bool WaitHost(u32 syncpoint_id, u32 expected_value, std::chrono::milliseconds timeout);
+
     bool IsReadyGuest(u32 syncpoint_id, u32 expected_value) const {
         return syncpoints_guest[syncpoint_id].load(std::memory_order_acquire) >= expected_value;
     }
@@ -77,6 +84,8 @@ private:
     void DeregisterAction(std::vector<RegisteredAction>& action_storage, const ActionHandle& handle);
 
     void Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv, u32 expected_value);
+    bool Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv, u32 expected_value,
+             std::chrono::milliseconds timeout);
 
     static constexpr size_t NUM_MAX_SYNCPOINTS = 192;
 

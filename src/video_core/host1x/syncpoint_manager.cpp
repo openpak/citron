@@ -67,6 +67,11 @@ void SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value) {
     Wait(syncpoints_host[syncpoint_id], wait_host_cv, expected_value);
 }
 
+bool SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value,
+                                std::chrono::milliseconds timeout) {
+    return Wait(syncpoints_host[syncpoint_id], wait_host_cv, expected_value, timeout);
+}
+
 void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv, std::vector<RegisteredAction>& action_storage) {
     auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
 
@@ -90,6 +95,17 @@ void SyncpointManager::Wait(std::atomic<u32>& syncpoint, std::condition_variable
 
     std::unique_lock lk(guard);
     wait_cv.wait(lk, pred);
+}
+
+bool SyncpointManager::Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
+                            u32 expected_value, std::chrono::milliseconds timeout) {
+    const auto pred = [&]() { return syncpoint.load(std::memory_order_acquire) >= expected_value; };
+    if (pred()) {
+        return true;
+    }
+
+    std::unique_lock lk(guard);
+    return wait_cv.wait_for(lk, timeout, pred);
 }
 
 } // namespace Host1x

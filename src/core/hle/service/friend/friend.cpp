@@ -292,6 +292,17 @@ public:
         service_context.CloseEvent(completion_event);
     }
 
+    // Real hardware answers most of these commands asynchronously and signals the shared
+    // completion event once the underlying (often network-backed) work finishes; the caller
+    // waits on that event before treating the data as ready. citron's stubs finish instantly,
+    // but individually forgetting to signal completion_event in any one of them leaves the
+    // guest polling forever, so signal it centrally after every command in this class instead.
+    Result HandleSyncRequest(Kernel::KServerSession& session, HLERequestContext& context) override {
+        const Result result = ServiceFrameworkBase::HandleSyncRequest(session, context);
+        completion_event->Signal();
+        return result;
+    }
+
     void GetCompletionEvent(HLERequestContext& ctx) {
         LOG_DEBUG(Service_Friend, "GetCompletionEvent called");
         IPC::ResponseBuilder rb{ctx, 2, 1};
@@ -485,6 +496,10 @@ public:
         RegisterHandlers(functions);
 
         notification_event = service_context.CreateEvent("INotificationService:NotifyEvent");
+
+        notifications.push(SizedNotificationInfo{NotificationTypes::HasUpdatedFriendsList, {}, 0});
+        states.has_updated_friends = true;
+        notification_event->Signal();
     }
 
     ~INotificationService() override {

@@ -72,7 +72,7 @@ private:
 
     DisplayParams ComputeOverlayDisplayParams(Applet& applet) const;
     DisplayParams ComputeStandardDisplayParams(Applet& applet, bool is_foreground,
-                                               bool input_intercepted) const;
+                                               bool input_intercepted, bool is_obscured) const;
 
     void PruneTerminatedAppletsLocked();
     bool LockHomeMenuIntoForegroundLocked();

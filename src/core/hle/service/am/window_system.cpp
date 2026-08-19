@@ -38,7 +38,7 @@ WindowSystem::DisplayParams WindowSystem::ComputeOverlayDisplayParams(Applet& ap
 }
 
 WindowSystem::DisplayParams WindowSystem::ComputeStandardDisplayParams(
-    Applet& applet, bool is_foreground, bool input_intercepted) const {
+    Applet& applet, bool is_foreground, bool input_intercepted, bool is_obscured) const {
     DisplayParams dp{};
 
     const bool active = is_foreground;
@@ -46,7 +46,9 @@ WindowSystem::DisplayParams WindowSystem::ComputeStandardDisplayParams(
     dp.visible = active && applet.window_visible;
     dp.interactible = active && applet.window_visible && !input_intercepted;
 
-    if (active && applet.window_visible) {
+    // An applet obscured by one of its own foreground children must drop below it, or the
+    // two end up tied and the compositor can pick either one to show on top.
+    if (active && !is_obscured) {
         dp.z_index = 2;
     } else if (active) {
         dp.z_index = 1;
@@ -129,6 +131,10 @@ std::shared_ptr<Applet> WindowSystem::GetMainApplet() {
 
     if (m_application) {
         return m_applets.at(m_application->aruid.pid);
+    }
+
+    if (m_home_menu) {
+        return m_applets.at(m_home_menu->aruid.pid);
     }
 
     return nullptr;
@@ -349,15 +355,6 @@ void WindowSystem::ReconcileAppletTreeLocked(Applet* applet, bool is_foreground,
 
     std::scoped_lock lk{applet->lock};
 
-    auto dp = ComputeStandardDisplayParams(*applet, is_foreground, input_intercepted);
-    ApplyDisplayParams(*applet, dp);
-
-    const bool inherited_foreground = applet->is_process_running && is_foreground;
-    const auto visible_state =
-        inherited_foreground ? ActivityState::ForegroundVisible : ActivityState::BackgroundVisible;
-    const auto obscured_state = inherited_foreground ? ActivityState::ForegroundObscured
-                                                     : ActivityState::BackgroundObscured;
-
     bool child_obscures = false;
     for (const auto& child : applet->child_applets) {
         std::scoped_lock lk2{child->lock};
@@ -371,6 +368,16 @@ void WindowSystem::ReconcileAppletTreeLocked(Applet* applet, bool is_foreground,
     }
 
     const bool is_obscured = child_obscures || !applet->window_visible;
+
+    auto dp = ComputeStandardDisplayParams(*applet, is_foreground, input_intercepted, is_obscured);
+    ApplyDisplayParams(*applet, dp);
+
+    const bool inherited_foreground = applet->is_process_running && is_foreground;
+    const auto visible_state =
+        inherited_foreground ? ActivityState::ForegroundVisible : ActivityState::BackgroundVisible;
+    const auto obscured_state = inherited_foreground ? ActivityState::ForegroundObscured
+                                                     : ActivityState::BackgroundObscured;
+
     const auto current_state = applet->lifecycle_manager.GetActivityState();
 
     if (is_obscured && current_state != obscured_state) {

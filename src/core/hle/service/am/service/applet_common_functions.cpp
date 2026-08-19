@@ -143,8 +143,9 @@ Result IAppletCommonFunctions::Cmd342() {
     R_SUCCEED();
 }
 
-Result IAppletCommonFunctions::Cmd350() {
+Result IAppletCommonFunctions::Cmd350(Out<u16> out_unknown) {
     LOG_WARNING(Service_AM, "(STUBBED) called [20.0.0+]");
+    *out_unknown = 0;
     R_SUCCEED();
 }
 

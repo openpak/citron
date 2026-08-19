@@ -54,7 +54,7 @@ Result INewsService::RequestAutoSubscription(u64 value) {
     R_SUCCEED();
 }
 
-Result INewsService::PostLocalNews(InBuffer<BufferAttr_HipcPointer> news_data) {
+Result INewsService::PostLocalNews(InBuffer<BufferAttr_HipcAutoSelect> news_data) {
     LOG_WARNING(Service_BCAT, "(STUBBED) called, news_data_size={}", news_data.size());
     R_SUCCEED();
 }

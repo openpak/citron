@@ -31,7 +31,7 @@ private:
     Result Cmd340();
     Result Cmd341();
     Result Cmd342();
-    Result Cmd350();
+    Result Cmd350(Out<u16> out_unknown);
     Result Cmd360();
 
     const std::shared_ptr<Applet> applet;
