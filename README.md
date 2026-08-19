@@ -12,7 +12,7 @@ purposes:
 > **This is a work in progress. Expect bugs.**
 >
 > Online support is new, incomplete, and only lightly tested — largely by one person, on one
-> machine, against one game. Things will break. If you hit a problem, please
+> machine, against multiple games. Things will break. If you hit a problem, please
 > **[open an issue](../../issues)** and include:
 >
 > - your `citron_log.txt` (Linux: `~/.local/share/citron/log/citron_log.txt`)
