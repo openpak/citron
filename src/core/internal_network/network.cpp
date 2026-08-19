@@ -25,6 +25,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #else
 #error "Unimplemented platform"
@@ -1110,6 +1111,17 @@ Errno Socket::SetRcvBuf(u32 value) {
     return SetSockOpt(fd, SO_RCVBUF, value);
 }
 
+// [OpenPak] SO_SNDTIMEO/SO_RCVTIMEO take a raw DWORD (milliseconds) on Winsock, but POSIX
+// requires a struct timeval{tv_sec, tv_usec} instead -- passing the generic SetSockOpt<u32>'s
+// 4-byte int there fails setsockopt with EINVAL (confirmed live: a parked UDP socket's drain
+// thread call site never checked this Errno, so on Linux the timeout silently never applied and
+// its background RecvFrom blocked forever, hanging StopDrain()'s join() the first time a parked
+// socket needed to be reclaimed or expired -- P2P titles wedge shortly after their first NAT
+// hole-punch).
+#ifdef _WIN32
+// [OpenPak] SO_SNDTIMEO/SO_RCVTIMEO take a raw DWORD on Winsock but a struct timeval on POSIX;
+// the generic SetSockOpt<u32> only matches the Windows side.
+#ifdef _WIN32
 Errno Socket::SetSndTimeo(u32 value) {
     return SetSockOpt(fd, SO_SNDTIMEO, value);
 }
@@ -1117,6 +1129,50 @@ Errno Socket::SetSndTimeo(u32 value) {
 Errno Socket::SetRcvTimeo(u32 value) {
     return SetSockOpt(fd, SO_RCVTIMEO, value);
 }
+#elif defined(__unix__) || defined(__APPLE__)
+namespace {
+Errno SetTimevalSockOpt(SOCKET fd_so, int option, u32 milliseconds) {
+    struct timeval tv {};
+    tv.tv_sec = static_cast<time_t>(milliseconds / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((milliseconds % 1000) * 1000);
+    const int result = setsockopt(fd_so, SOL_SOCKET, option, &tv, sizeof(tv));
+    if (result != SOCKET_ERROR) {
+        return Errno::SUCCESS;
+    }
+    return GetAndLogLastError();
+}
+} // namespace
+
+Errno Socket::SetSndTimeo(u32 value) {
+    return SetTimevalSockOpt(fd, SO_SNDTIMEO, value);
+}
+
+Errno Socket::SetRcvTimeo(u32 value) {
+    return SetTimevalSockOpt(fd, SO_RCVTIMEO, value);
+}
+#endif
+#elif defined(__unix__) || defined(__APPLE__)
+namespace {
+Errno SetTimevalSockOpt(SOCKET fd_so, int option, u32 milliseconds) {
+    struct timeval tv {};
+    tv.tv_sec = static_cast<time_t>(milliseconds / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((milliseconds % 1000) * 1000);
+    const int result = setsockopt(fd_so, SOL_SOCKET, option, &tv, sizeof(tv));
+    if (result != SOCKET_ERROR) {
+        return Errno::SUCCESS;
+    }
+    return GetAndLogLastError();
+}
+} // namespace
+
+Errno Socket::SetSndTimeo(u32 value) {
+    return SetTimevalSockOpt(fd, SO_SNDTIMEO, value);
+}
+
+Errno Socket::SetRcvTimeo(u32 value) {
+    return SetTimevalSockOpt(fd, SO_RCVTIMEO, value);
+}
+#endif
 
 Errno Socket::SetNonBlock(bool enable) {
     if (EnableNonBlock(fd, enable)) {
