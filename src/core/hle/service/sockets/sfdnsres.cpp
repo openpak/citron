@@ -123,19 +123,22 @@ static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
     return std::string(env);
 }
 
-// [OpenPak] Holds the FIRST resolution of an "npln" host back by a fixed delay, against a
-// startup deadlock. A gRPC-based title (Splatoon 3) connects to its online lobby on its own,
-// early in boot, right in the middle of the heaviest JIT/shader-compile burst of startup.
-// grpc-core's own connection setup can deadlock outright when it starts while that contention
-// is happening -- its poller goes into wait and its executor stalls partway through preparing
-// the socket, without ever actually emitting connect() -- while the identical setup, a few
-// seconds later on a quieter system, succeeds. OPENPAK_LEGACY_NPLN_DELAY_MS caps the wait (0
-// disables it); same variable name and default (120000ms) as Ryujinx-Reference's on purpose.
-// (An earlier version of this polled dynarmic's JIT translation counter to detect when the
-// compile storm actually settled instead of sleeping a fixed duration -- confirmed, live, not
-// to change the outcome of Splatoon 3's separate connectivity bug, and it depended on a
-// dynarmic patch that was never pushed anywhere CI could build from. Reverted to a plain fixed
-// sleep; see the Splatoon 3 connectivity investigation memory for what's actually still open.)
+// [OpenPak] Was: hold the FIRST resolution of an "npln" host back by a delay, against a
+// hypothesized startup deadlock (grpc-core's connection setup allegedly stalling if it starts
+// during citron's heaviest JIT/shader-compile burst). DISABLED BY DEFAULT (max_wait_ms=0) as of
+// 2026-08-23: this was never actually confirmed to prevent anything, and the Splatoon 3
+// connectivity investigation has since PROVEN, live, against a zero-latency local test server,
+// that this delay has zero effect on the game's real (separate, still-open) connectivity bug --
+// four connect attempts spanning 22ms-316ms all failed identically, ruling out any
+// timing-sensitivity here (see the Splatoon 3 connectivity investigation memory). Meanwhile the
+// cost is real: the bsdsocket service now runs on a single thread (sockets.cpp), so any nonzero
+// delay here blocks every other socket IPC call in the process for its whole duration. A prior
+// version polled dynarmic's JIT translation counter to break out early once calm instead of
+// sleeping a fixed duration, but that depended on a dynarmic patch that was never pushed
+// anywhere CI could build from, and got clumsily reverted into an unconditional flat sleep
+// still using the adaptive version's 120000ms *ceiling* as if it were the actual duration --
+// blocking every boot for a full 2 minutes. OPENPAK_LEGACY_NPLN_DELAY_MS remains available to opt
+// back into a fixed wait if a real deadlock is ever actually observed and reproduced.
 static std::once_flag g_npln_delay_once;
 
 static void MaybeDelayNplnInit(const std::string& host) {
@@ -143,7 +146,7 @@ static void MaybeDelayNplnInit(const std::string& host) {
         return;
     }
     std::call_once(g_npln_delay_once, [] {
-        int max_wait_ms = 120000;
+        int max_wait_ms = 0;
         if (const char* env = std::getenv("OPENPAK_LEGACY_NPLN_DELAY_MS"); env && *env) {
             try {
                 const int parsed = std::stoi(env);
