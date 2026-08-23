@@ -15,7 +15,6 @@
 #include "common/swap.h"
 #include "core/core.h"
 #include "core/hle/kernel/svc/legacy_deadline_watch.h"
-#include "dynarmic/interface/A64/a64.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets.h"
@@ -124,26 +123,19 @@ static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
     return std::string(env);
 }
 
-// [OpenPak] Holds the FIRST resolution of an "npln" host back until dynarmic's JIT compile
-// storm actually settles, against a startup deadlock AND a squeezed post-connect deadline. A
-// gRPC-based title (Splatoon 3) connects to its online lobby on its own, early in boot, right
-// in the middle of the heaviest JIT/shader-compile burst of startup. grpc-core's own connection
-// setup can deadlock outright when it starts while that contention is happening -- its poller
-// goes into wait and its executor stalls partway through preparing the socket, without ever
-// actually emitting connect() -- while the identical setup, a few seconds later on a quieter
-// system, succeeds. Worse, even once the socket does get going, the game races a fixed
-// wall-clock deadline for its first gRPC call (IssuePrearrangedUserToken) that keeps expiring
-// under emulation -- confirmed directly via a decrypted MITM capture: the game aborts with
-// RST_STREAM(REFUSED_STREAM) before ever sending HEADERS, at a point that shrinks on later
-// retries, consistent with one shared deadline instead of a per-attempt one. Ongoing JIT
-// contention during that window eats into the same wall-clock budget, so a storm that's still
-// running when a fixed delay expires can starve the call that follows just as badly as it
-// starves the initial connect. Mirrors Ryujinx-Reference's DnsMitmResolver.cs
-// (MaybeDelayNplnInit) exactly: poll dynarmic's global translation counter in windows and only
-// proceed once new-block activity drops below a "calm" threshold, rather than blindly sleeping
-// a fixed duration that may fire mid-storm or waste time after it's already passed.
-// OPENPAK_LEGACY_NPLN_DELAY_MS caps the wait (0 disables it); same variable name and default
-// (120000ms) as Ryujinx-Reference's on purpose.
+// [OpenPak] Holds the FIRST resolution of an "npln" host back by a fixed delay, against a
+// startup deadlock. A gRPC-based title (Splatoon 3) connects to its online lobby on its own,
+// early in boot, right in the middle of the heaviest JIT/shader-compile burst of startup.
+// grpc-core's own connection setup can deadlock outright when it starts while that contention
+// is happening -- its poller goes into wait and its executor stalls partway through preparing
+// the socket, without ever actually emitting connect() -- while the identical setup, a few
+// seconds later on a quieter system, succeeds. OPENPAK_LEGACY_NPLN_DELAY_MS caps the wait (0
+// disables it); same variable name and default (120000ms) as Ryujinx-Reference's on purpose.
+// (An earlier version of this polled dynarmic's JIT translation counter to detect when the
+// compile storm actually settled instead of sleeping a fixed duration -- confirmed, live, not
+// to change the outcome of Splatoon 3's separate connectivity bug, and it depended on a
+// dynarmic patch that was never pushed anywhere CI could build from. Reverted to a plain fixed
+// sleep; see the Splatoon 3 connectivity investigation memory for what's actually still open.)
 static std::once_flag g_npln_delay_once;
 
 static void MaybeDelayNplnInit(const std::string& host) {
@@ -166,48 +158,15 @@ static void MaybeDelayNplnInit(const std::string& host) {
             return;
         }
 
-        constexpr int MinWaitMs = 3000; // always leave the connection a little air
-        constexpr int WindowMs = 500;
-        constexpr u64 CalmThreshold = 20; // fewer translations than this per window => storm passed
-        // A single quiet window is a weak signal on its own -- boot-time JIT activity for a
-        // shader/asset-heavy title comes in bursts with real lulls between them (e.g. waiting on
-        // a disk read), so one lucky 500ms sample can read "calm" while the storm is still very
-        // much in progress a moment later. Measured directly: a single-window check here declared
-        // calm after only 3.5s total, then the handshake-to-first-request window (still deep in
-        // lobby/menu load, audio+render+shader activity ongoing) burned enough of the same shared
-        // wall-clock deadline that the call still starved -- matching this function's own opening
-        // comment about ongoing contention starving the call that follows. Require several
-        // consecutive calm windows in a row before trusting it; any single busy window resets the
-        // streak, same as this function already resets nothing (it just stops) on a busy window.
-        constexpr int RequiredConsecutiveCalmWindows = 4; // 2s of sustained calm, not one sample
-
         LOG_INFO(Service,
                  "[OpenPak] Holding the first npln host resolution until the JIT/shader-compile "
-                 "burst settles before gRPC's connection setup starts (at most {} ms) (see "
+                 "burst settles before gRPC's connection setup starts ({} ms) (see "
                  "MaybeDelayNplnInit)",
                  max_wait_ms);
 
-        const int initial_wait = std::min(MinWaitMs, max_wait_ms);
-        std::this_thread::sleep_for(std::chrono::milliseconds(initial_wait));
-        int waited = initial_wait;
-        int consecutive_calm = 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(max_wait_ms));
 
-        while (waited < max_wait_ms) {
-            const u64 before = Dynarmic::A64::Jit::GetGlobalTranslationCount();
-            std::this_thread::sleep_for(std::chrono::milliseconds(WindowMs));
-            waited += WindowMs;
-
-            if (Dynarmic::A64::Jit::GetGlobalTranslationCount() - before < CalmThreshold) {
-                if (++consecutive_calm >= RequiredConsecutiveCalmWindows) {
-                    break;
-                }
-            } else {
-                consecutive_calm = 0;
-            }
-        }
-
-        LOG_INFO(Service, "[OpenPak] npln hold finished after {} ms (JIT calm for {} consecutive window(s))",
-                 waited, consecutive_calm);
+        LOG_INFO(Service, "[OpenPak] npln hold finished after {} ms", max_wait_ms);
 
         // [OpenPak][DIAG] Arm a short window during which any finite, non-trivial
         // WaitSynchronization timeout gets logged -- see legacy_deadline_watch.h. This is

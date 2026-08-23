@@ -44,17 +44,24 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("nsd:a", std::make_shared<NSD>(system, "nsd:a"));
     server_manager->RegisterNamedService("nsd:u", std::make_shared<NSD>(system, "nsd:u"));
     server_manager->RegisterNamedService("sfdnsres", std::make_shared<SFDNSRES>(system));
-    // [OpenPak] This pool is shared across every socket-family service registered above
-    // (bsd:a/s/u/nu, bsdcfg, dns:priv, ethc:c/i, nsd:a/u, sfdnsres) plus whatever thread
-    // LoopProcess itself runs on. Connect() and sfdnsres's own DNS resolution can each block a
-    // worker thread of this pool for real wall-clock time (Connect()'s bounded wait up to 5s,
-    // a real getaddrinfo() call for however long DNS actually takes) -- with only 2 extra
-    // threads, two such blocking calls landing close together (e.g. a fresh npln connect racing
-    // its own preceding DNS resolution, or two sockets connecting concurrently) can exhaust the
-    // pool and queue up everything else this title's networking depends on behind them. Bumped
-    // to match Ryujinx-Reference's own thread-per-blocking-operation model more closely -- cheap
-    // (idle host threads cost nothing) and removes this as a source of contention entirely.
-    server_manager->StartAdditionalHostThreads("bsdsocket", 6);
+    // [OpenPak] Previously ran 6 extra worker threads here, on the (incorrect) theory that this
+    // matched Ryujinx-Reference's threading model. It doesn't: Ryujinx runs exactly ONE dedicated
+    // host thread for its entire Bsd service (ServerBase/ServerLoop), so every socket IPC call is
+    // strictly serialized in arrival order with no possibility of two calls' HLE handlers running
+    // concurrently or completing out of order. citron's pool let up to 7 threads (each an
+    // anonymous, low-priority ThreadType::Dummy KThread with no identity tie to the calling guest
+    // thread) race for socket IPC work, so a later-arriving operation's worker could finish before
+    // an earlier one's if the host OS scheduler favored it -- breaking the ordering guarantee some
+    // guest code (e.g. a one-shot, non-blocking WaitSynchronization probe right after bringing up
+    // a connection) implicitly depends on. Reverted to 0 extra threads -- single dedicated thread,
+    // matching Ryujinx's actual model exactly -- to test whether this ordering gap explains
+    // Splatoon 3's deterministic RST_STREAM-before-HEADERS NPLN failure (see the Splatoon 3
+    // connectivity investigation memory). If this reintroduces the pool-exhaustion symptom the
+    // prior comment described (concurrent blocking Connect()/DNS calls queuing up other socket
+    // traffic), that's real signal too -- Ryujinx's own single-thread design apparently tolerates
+    // it, so citron's HLE call durations may need addressing directly rather than papered over
+    // with concurrency.
+    server_manager->StartAdditionalHostThreads("bsdsocket", 0);
 
     // [OpenPak] See sockets.h's declaration comment on SetBsdDeferralEvent.
     Kernel::KEvent* deferral_event{};
