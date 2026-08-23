@@ -11,6 +11,7 @@
 
 #include <QAbstractButton>
 #include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
 #include <QBuffer>
 #include <QButtonGroup>
@@ -1271,15 +1272,65 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     cloud_save_layout->addWidget(cloud_save_card);
     cloud_save_layout->addStretch(2);
 
+    lobby_state_label = MakeDimLabel(tr("Not in a lobby."));
+    lobby_state_label->setAlignment(Qt::AlignCenter);
+
+    lobby_view = MakeCardList(this);
+    lobby_model = new QStandardItemModel(this);
+    lobby_view->setModel(lobby_model);
+    lobby_delegate = new OpenPakFriendDelegate(lobby_view, this);
+    lobby_view->setItemDelegate(lobby_delegate);
+    lobby_view->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(lobby_view, &QListView::customContextMenuRequested, this,
+           [this](const QPoint& pos) { ShowPlayersContextMenu(lobby_view, pos); });
+    connect(lobby_view, &QListView::clicked, this, &OpenPakAccountDialog::OnPlayersViewClicked);
+
+    lobby_stack = new QStackedWidget;
+    lobby_stack->addWidget(lobby_view);
+    lobby_stack->addWidget(MakeEmptyLabel(tr("Not in a lobby.")));
+
+    auto* lobby_card = MakeDashCard();
+    auto* lobby_card_layout = new QVBoxLayout(lobby_card);
+    lobby_card_layout->setContentsMargins(18, 16, 18, 16);
+    lobby_card_layout->setSpacing(8);
+    lobby_card_layout->addWidget(MakeCardTitle(tr("Current Lobby")));
+    lobby_card_layout->addWidget(lobby_state_label);
+    lobby_card_layout->addWidget(lobby_stack, 1);
+
+    recent_players_view = MakeCardList(this);
+    recent_players_model = new QStandardItemModel(this);
+    recent_players_view->setModel(recent_players_model);
+    recent_players_delegate = new OpenPakFriendDelegate(recent_players_view, this);
+    recent_players_view->setItemDelegate(recent_players_delegate);
+    recent_players_view->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(recent_players_view, &QListView::customContextMenuRequested, this,
+           [this](const QPoint& pos) { ShowPlayersContextMenu(recent_players_view, pos); });
+    connect(recent_players_view, &QListView::clicked, this,
+           &OpenPakAccountDialog::OnPlayersViewClicked);
+
+    recent_players_stack = new QStackedWidget;
+    recent_players_stack->addWidget(recent_players_view);
+    recent_players_stack->addWidget(MakeEmptyLabel(tr("No one else seen online recently.")));
+
+    auto* recent_players_card = MakeDashCard();
+    auto* recent_players_card_layout = new QVBoxLayout(recent_players_card);
+    recent_players_card_layout->setContentsMargins(18, 16, 18, 16);
+    recent_players_card_layout->setSpacing(8);
+    recent_players_card_layout->addWidget(MakeCardTitle(tr("Recently Encountered")));
+    recent_players_card_layout->addWidget(recent_players_stack, 1);
+
+    auto* players_page = MakePage({lobby_card, recent_players_card});
+
     pages_stack = new QStackedWidget;
     pages_stack->addWidget(home_page);
     pages_stack->addWidget(friends_page);
     pages_stack->addWidget(requests_page);
     pages_stack->addWidget(history_stack);
     pages_stack->addWidget(cloud_save_page);
+    pages_stack->addWidget(players_page);
 
     page_titles = {tr("Home"), tr("Friends"), tr("Requests"), tr("Recently Played"),
-                  tr("Cloud Saves")};
+                  tr("Cloud Saves"), tr("Players")};
 
     page_title_label = new QLabel;
     QFont page_title_font = page_title_label->font();
@@ -1413,6 +1464,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     RefreshFriends();
     RefreshHistory();
     RefreshCloudSaveTab();
+    RefreshPlayers();
 
     connect(controller, &OpenPakController::StatusChanged, this,
             [this, cloud_save_page](const QString& message) {
@@ -1425,6 +1477,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshFriends);
     connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshHistory);
     connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshCloudSaveTab);
+    connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshPlayers);
     refresh_timer.start();
 
     connect(pages_stack, &QStackedWidget::currentChanged, this, [this](int index) {
@@ -2528,6 +2581,207 @@ void OpenPakAccountDialog::ProbeCloudSaveAvailability(u64 title_id) {
             },
             Qt::QueuedConnection);
     }}.detach();
+#endif
+}
+
+namespace {
+QString PlayerDisplayName(const WebService::OpenPakApi::LobbyPlayer& player) {
+    if (!player.name.empty()) {
+        return QString::fromStdString(player.name);
+    }
+    return QStringLiteral("#%1").arg(player.pid);
+}
+
+QString LobbyStateLine(const WebService::OpenPakApi::Lobby& lobby) {
+    const QString status = lobby.state_code == "searching" ? OpenPakAccountDialog::tr("Looking for players")
+                          : lobby.state_code == "matched"  ? OpenPakAccountDialog::tr("In a match")
+                                                            : QString();
+    if (status.isEmpty()) {
+        return OpenPakAccountDialog::tr("%1 / %2 players").arg(lobby.count).arg(lobby.max);
+    }
+    return OpenPakAccountDialog::tr("%1 / %2 players \xE2\x80\x94 %3")
+        .arg(lobby.count)
+        .arg(lobby.max)
+        .arg(status);
+}
+} // namespace
+
+void OpenPakAccountDialog::RefreshPlayers() {
+#ifdef ENABLE_WEB_SERVICE
+    std::thread{[this, guard = QPointer<OpenPakAccountDialog>(this)] {
+        auto lobby = WebService::OpenPakApi::GetMyLobby();
+        auto recent = WebService::OpenPakApi::GetRecentPlayers();
+
+        std::unordered_map<u64, std::string> avatars;
+        const auto fetch_avatar = [&](u64 pid) {
+            if (pid == 0 || avatars.contains(pid)) {
+                return;
+            }
+            avatars[pid] = WebService::OpenPakApi::GetAvatarByPid(pid);
+        };
+        for (const auto& player : lobby.players) {
+            fetch_avatar(player.pid);
+        }
+        for (const auto& player : recent) {
+            fetch_avatar(player.pid);
+        }
+
+        if (!guard) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            guard.data(),
+            [this, guard, lobby = std::move(lobby), recent = std::move(recent),
+             avatars = std::move(avatars)]() mutable {
+                if (!guard) {
+                    return;
+                }
+
+                known_player_pids.clear();
+                lobby_model->clear();
+                recent_players_model->clear();
+
+                lobby_state_label->setText(lobby.in_lobby ? LobbyStateLine(lobby)
+                                                          : tr("Not in a lobby."));
+                for (const auto& player : lobby.players) {
+                    if (player.known) {
+                        known_player_pids.insert(player.pid);
+                    }
+                    lobby_model->appendRow(new OpenPakFriendItem(
+                        player.pid, PlayerDisplayName(player),
+                        QString::fromStdString(player.friend_code), player.is_me ? 0 : 2,
+                        controller ? controller->ResolveGameName(player.title_id) : QString{},
+                        QString::fromStdString(avatars[player.pid]), false, tr("Add")));
+                }
+                for (const auto& player : recent) {
+                    if (player.known) {
+                        known_player_pids.insert(player.pid);
+                    }
+                    recent_players_model->appendRow(new OpenPakFriendItem(
+                        player.pid, PlayerDisplayName(player),
+                        QString::fromStdString(player.friend_code), 0,
+                        controller ? controller->ResolveGameName(player.title_id) : QString{},
+                        QString::fromStdString(avatars[player.pid]), false, tr("Add")));
+                }
+
+                lobby_stack->setCurrentIndex(lobby_model->rowCount() > 0 ? 0 : 1);
+                recent_players_stack->setCurrentIndex(recent_players_model->rowCount() > 0 ? 0 : 1);
+            });
+    }}.detach();
+#endif
+}
+
+void OpenPakAccountDialog::OnPlayersViewClicked(const QModelIndex& index) {
+#ifdef ENABLE_WEB_SERVICE
+    if (!index.isValid()) {
+        return;
+    }
+    auto* view = qobject_cast<QListView*>(sender());
+    auto* delegate = view == lobby_view ? lobby_delegate : recent_players_delegate;
+
+    const QRect cell_rect = view->visualRect(index);
+    const QPoint pos = view->viewport()->mapFromGlobal(QCursor::pos());
+    if (delegate->HitTestActions(cell_rect, pos, false) != OpenPakFriendDelegate::ActionHit::Primary) {
+        return;
+    }
+
+    const u64 pid = SelectedPid(index);
+    if (pid == 0 || pid == Common::OpenPakAccount::GetPid() || !known_player_pids.contains(pid)) {
+        return;
+    }
+    const std::string friend_code = index.data(OpenPakFriendItem::FriendCodeRole).toString().toStdString();
+    if (friend_code.empty()) {
+        return;
+    }
+    RunAsync([friend_code] { return WebService::OpenPakApi::AddFriendByCode(friend_code); },
+             [this, friend_code] {
+                 Common::OpenPakOutgoingRequests::Add(friend_code);
+                 if (controller) {
+                     controller->NotifyFriendRequestSent(QString::fromStdString(friend_code));
+                 }
+             });
+#endif
+}
+
+void OpenPakAccountDialog::ShowPlayersContextMenu(QListView* view, const QPoint& pos) {
+#ifdef ENABLE_WEB_SERVICE
+    const QModelIndex index = view->indexAt(pos);
+    if (!index.isValid()) {
+        return;
+    }
+    const u64 pid = SelectedPid(index);
+    if (pid == 0 || pid == Common::OpenPakAccount::GetPid() || !known_player_pids.contains(pid)) {
+        return;
+    }
+
+    const QString name = index.data(OpenPakFriendItem::NameRole).toString();
+    const QString avatar_b64 = index.data(OpenPakFriendItem::AvatarB64Role).toString();
+
+    QMenu menu(this);
+    QAction* report_action = menu.addAction(tr("Report Player..."));
+    connect(report_action, &QAction::triggered, this,
+           [this, pid, name, avatar_b64] { OpenReportDialog(pid, name, avatar_b64); });
+    menu.exec(view->viewport()->mapToGlobal(pos));
+#endif
+}
+
+void OpenPakAccountDialog::OpenReportDialog(u64 pid, const QString& name,
+                                             const QString& avatar_b64) {
+#ifdef ENABLE_WEB_SERVICE
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Report %1").arg(name));
+
+    auto* reason_combo = new QComboBox(&dialog);
+    reason_combo->addItem(tr("Cheating"), QStringLiteral("cheating"));
+    reason_combo->addItem(tr("Inappropriate name"), QStringLiteral("name"));
+    reason_combo->addItem(tr("Impersonating someone else's in-game name"),
+                          QStringLiteral("name_mismatch"));
+    reason_combo->addItem(tr("Inappropriate avatar"), QStringLiteral("avatar"));
+    reason_combo->addItem(tr("Harassment"), QStringLiteral("harassment"));
+    reason_combo->addItem(tr("Griefing"), QStringLiteral("griefing"));
+    reason_combo->addItem(tr("Impersonating a OpenPak account"),
+                          QStringLiteral("impersonation"));
+    reason_combo->addItem(tr("Other"), QStringLiteral("other"));
+
+    auto* comment_edit = new QLineEdit(&dialog);
+    comment_edit->setPlaceholderText(tr("What happened? (optional)"));
+
+    auto* buttons = new QHBoxLayout;
+    auto* cancel_button = new QPushButton(tr("Cancel"), &dialog);
+    auto* send_button = new QPushButton(tr("Send Report"), &dialog);
+    send_button->setDefault(true);
+    buttons->addStretch(1);
+    buttons->addWidget(cancel_button);
+    buttons->addWidget(send_button);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(tr("Reason:"), &dialog));
+    layout->addWidget(reason_combo);
+    layout->addWidget(comment_edit);
+    layout->addLayout(buttons);
+
+    connect(cancel_button, &QPushButton::clicked, &dialog, &QDialog::reject);
+    connect(send_button, &QPushButton::clicked, &dialog, &QDialog::accept);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const std::string reason = reason_combo->currentData().toString().toStdString();
+    const std::string comment = comment_edit->text().toStdString();
+
+    RunAsync(
+        [pid, reason, comment] {
+            const std::string error = WebService::OpenPakApi::ReportPlayer(pid, reason, comment);
+            if (error == "not_encountered") {
+                return std::string("You haven't shared a lobby with this player recently.");
+            }
+            if (error == "quota") {
+                return std::string("You've sent too many reports recently. Try again later.");
+            }
+            return error;
+        },
+        [this] { status->setText(tr("Report sent.")); });
 #endif
 }
 

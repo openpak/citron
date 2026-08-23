@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <mutex>
 #include <queue>
+#include <fmt/format.h>
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/uuid.h"
@@ -142,6 +144,53 @@ Common::UUID UidForPid(u64 pid) {
     const u64 high = 0x1100000000000000ULL;
     std::memcpy(raw.data() + 8, &high, sizeof(high));
     return Common::UUID{raw};
+}
+
+// Mirrors FriendImpl's proven-working layout (UUID + pid + 0x21-byte nickname) rather than
+// acc::ProfileBase (UUID + timestamp), which is an unrelated local-account struct this was
+// wrongly modeled on -- GetProfileList resolved real data (confirmed live) but still rendered
+// garbage in-game, meaning the wire layout, not the data, was wrong.
+#pragma pack(push, 1)
+struct ProfileImpl {
+    Common::UUID user_uuid;          // 0x00
+    u64 network_user_id;             // 0x10
+    std::array<char, 0x21> nickname; // 0x18
+    std::array<u8, 7> padding;       // 0x39, aligns to 0x40
+};
+static_assert(sizeof(ProfileImpl) == 0x40, "ProfileImpl has the wrong size");
+#pragma pack(pop)
+
+// [OpenPak] Resolves a pid to a display name for GetProfileList/GetProfileExtraList: the local
+// account itself (via OpenPakAccount, not covered by the friends cache) or an actual OpenPak
+// friend. Strangers (e.g. a balloon owner you're not friends with) aren't resolvable here --
+// titles that also carry a plain name string on the wire (Odyssey's DataStoreSearchBalloonResult.
+// ownerName) fall back to that; this only covers the profile-lookup path.
+bool ResolveProfileName(u64 pid, std::string& out_name) {
+    if (Common::OpenPakAccount::IsLinked() && Common::OpenPakAccount::GetPid() == pid) {
+        out_name = Common::OpenPakAccount::GetUsername();
+        return true;
+    }
+    const auto entries = Common::OpenPakFriends::Get();
+    const auto it = std::find_if(entries.begin(), entries.end(),
+                                  [pid](const auto& e) { return e.pid == pid; });
+    if (it != entries.end()) {
+        out_name = it->name;
+        return true;
+    }
+    return false;
+}
+
+std::optional<ProfileImpl> MakeProfile(u64 pid) {
+    std::string name;
+    if (!ResolveProfileName(pid, name)) {
+        return std::nullopt;
+    }
+    ProfileImpl out{};
+    out.user_uuid = UidForPid(pid);
+    out.network_user_id = pid;
+    const auto length = std::min(name.size(), out.nickname.size() - 1);
+    std::memcpy(out.nickname.data(), name.data(), length);
+    return out;
 }
 
 FriendImpl MakeFriend(const Common::OpenPakFriends::Entry& entry) {
@@ -480,6 +529,13 @@ private:
     Kernel::KEvent* completion_event;
 };
 
+// [OpenPak] Registry of every live INotificationService so NotifyFriendsListUpdated() (called
+// from the frontend's background friend-poll thread, not an HLE dispatch thread) can reach them.
+// Guarded separately from each instance's own lock so registration/teardown never has to wait on
+// whatever that instance's HLE thread happens to be doing.
+static std::mutex g_notification_registry_lock;
+static std::vector<class INotificationService*> g_notification_services;
+
 class INotificationService final : public ServiceFramework<INotificationService> {
 public:
     explicit INotificationService(Core::System& system_, Common::UUID uuid_)
@@ -500,10 +556,27 @@ public:
         notifications.push(SizedNotificationInfo{NotificationTypes::HasUpdatedFriendsList, {}, 0});
         states.has_updated_friends = true;
         notification_event->Signal();
+
+        std::scoped_lock lk{g_notification_registry_lock};
+        g_notification_services.push_back(this);
     }
 
     ~INotificationService() override {
+        {
+            std::scoped_lock lk{g_notification_registry_lock};
+            std::erase(g_notification_services, this);
+        }
         service_context.CloseEvent(notification_event);
+    }
+
+    // [OpenPak] Called from NotifyFriendsListUpdated(), potentially from a different thread than
+    // this instance's own HLE dispatch -- guarded by instance_lock, unlike the ctor/dtor-only
+    // registry lock above.
+    void PushFriendsListUpdated() {
+        std::scoped_lock lk{instance_lock};
+        notifications.push(SizedNotificationInfo{NotificationTypes::HasUpdatedFriendsList, {}, 0});
+        states.has_updated_friends = true;
+        notification_event->Signal();
     }
 
 private:
@@ -517,6 +590,7 @@ private:
 
     void Clear(HLERequestContext& ctx) {
         LOG_DEBUG(Service_Friend, "called");
+        std::scoped_lock lk{instance_lock};
         while (!notifications.empty()) {
             notifications.pop();
         }
@@ -528,6 +602,7 @@ private:
 
     void Pop(HLERequestContext& ctx) {
         LOG_DEBUG(Service_Friend, "called");
+        std::scoped_lock lk{instance_lock};
 
         if (notifications.empty()) {
             LOG_ERROR(Service_Friend, "No notifications in queue!");
@@ -580,10 +655,18 @@ private:
     Common::UUID uuid;
     KernelHelpers::ServiceContext service_context;
 
+    std::mutex instance_lock;
     Kernel::KEvent* notification_event;
     std::queue<SizedNotificationInfo> notifications;
     States states{};
 };
+
+void NotifyFriendsListUpdated() {
+    std::scoped_lock lk{g_notification_registry_lock};
+    for (auto* service : g_notification_services) {
+        service->PushFriendsListUpdated();
+    }
+}
 
 class IDaemonSuspendSessionService final : public ServiceFramework<IDaemonSuspendSessionService> {
 public:
@@ -839,18 +922,68 @@ void IFriendService::UpdateFriendInfo(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
 }
 
+namespace {
+
+// [OpenPak] The caller identifies the target friend by the same synthetic Uid FriendImpl handed
+// it (see UidForPid above) -- reverse it back to the raw pid so we can look the entry up in the
+// cache. Exact inverse of UidForPid: the low 8 bytes are the pid, verbatim.
+u64 PidForUid(const Common::UUID& uid) {
+    u64 pid{};
+    std::memcpy(&pid, uid.uuid.data(), sizeof(pid));
+    return pid;
+}
+
+} // namespace
+
 void IFriendService::GetFriendProfileImage(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetFriendProfileImage called");
+    // [OpenPak] Was a hardcoded zero-size stub, so every friend tile fell back to the "?"
+    // placeholder icon regardless of whether the account server actually had a picture for them.
+    // OpenPakFriends::Entry now carries the already-decoded JPEG bytes (see PollFriends), so
+    // this just has to find the right entry and hand them back.
+    IPC::RequestParser rp{ctx};
+    const auto uuid = rp.PopRaw<Common::UUID>();
+    const auto pid = PidForUid(uuid);
+
+    const auto entries = Common::OpenPakFriends::Get();
+    const auto it = std::find_if(entries.begin(), entries.end(),
+                                 [pid](const auto& e) { return e.pid == pid; });
+
+    u32 size = 0;
+    if (it != entries.end() && !it->image.empty()) {
+        ctx.WriteBuffer(it->image);
+        size = static_cast<u32>(it->image.size());
+    }
+
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendProfileImage uuid=0x{} -> {} bytes",
+             uuid.RawString(), size);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Image size
+    rb.Push<u32>(size);
 }
 
 void IFriendService::GetFriendProfileImageWithImageSize(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetFriendProfileImageWithImageSize called");
+    // [OpenPak] Same lookup as GetFriendProfileImage; the requested/max size argument is
+    // advisory on real hardware (a resize hint), and the account server only ever gives us one
+    // resolution anyway, so it's not worth threading through a second image variant for.
+    IPC::RequestParser rp{ctx};
+    const auto uuid = rp.PopRaw<Common::UUID>();
+    const auto pid = PidForUid(uuid);
+
+    const auto entries = Common::OpenPakFriends::Get();
+    const auto it = std::find_if(entries.begin(), entries.end(),
+                                 [pid](const auto& e) { return e.pid == pid; });
+
+    u32 size = 0;
+    if (it != entries.end() && !it->image.empty()) {
+        ctx.WriteBuffer(it->image);
+        size = static_cast<u32>(it->image.size());
+    }
+
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendProfileImageWithImageSize uuid=0x{} -> {} bytes",
+             uuid.RawString(), size);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Image size
+    rb.Push<u32>(size);
 }
 
 void IFriendService::EnsureFriendListAvailable(HLERequestContext& ctx) {
@@ -877,18 +1010,51 @@ void IFriendService::EnsureBlockedUserListAvailable(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
 }
 
-void IFriendService::GetProfileList(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetProfileList called");
+namespace {
+// [OpenPak] Same ids-in (buffer 0, u64 pids)/structs-out contract as GetFriendDetailedInfo --
+// only proven-working pattern for this class of call in this codebase, so mirrored here rather
+// than guessing a UUID-keyed format with nothing to test it against.
+void RespondProfileList(HLERequestContext& ctx, const char* name) {
+    constexpr std::size_t MaxRequestedIds = 300;
+    std::vector<u64> requested_ids;
+    if (ctx.CanReadBuffer(0)) {
+        const auto raw = ctx.ReadBuffer(0);
+        const auto id_count = std::min(raw.size() / sizeof(u64), MaxRequestedIds);
+        requested_ids.resize(id_count);
+        if (id_count > 0) {
+            std::memcpy(requested_ids.data(), raw.data(), id_count * sizeof(u64));
+        }
+    }
+
+    const auto capacity = std::min(ctx.GetWriteBufferNumElements<ProfileImpl>(), MaxRequestedIds);
+    std::vector<ProfileImpl> profiles;
+    for (const auto pid : requested_ids) {
+        if (profiles.size() >= capacity) {
+            break;
+        }
+        if (const auto profile = MakeProfile(pid)) {
+            profiles.push_back(*profile);
+        }
+    }
+
+    if (!profiles.empty()) {
+        ctx.WriteBuffer(profiles);
+    }
+
+    LOG_INFO(Service_Friend, "[OpenPak] {} requested={} -> {} resolved", name,
+             requested_ids.size(), profiles.size());
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Profile count
+    rb.Push<u32>(static_cast<u32>(profiles.size()));
+}
+} // Anonymous namespace
+
+void IFriendService::GetProfileList(HLERequestContext& ctx) {
+    RespondProfileList(ctx, "GetProfileList");
 }
 
 void IFriendService::GetProfileListV2(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetProfileListV2 called");
-    IPC::ResponseBuilder rb{ctx, 3};
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Profile count
+    RespondProfileList(ctx, "GetProfileListV2");
 }
 
 void IFriendService::DeclareOpenOnlinePlaySession(HLERequestContext& ctx) {
@@ -937,10 +1103,39 @@ void IFriendService::GetProfileImageUrlV2(HLERequestContext& ctx) {
 }
 
 void IFriendService::GetFriendDetailedInfo(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetFriendDetailedInfo called");
+    // [OpenPak] Same ids-in/details-out contract as GetFriendDetailedInfoV2 below (this is the
+    // pre-20.0.0 command id for the same viewer-detail lookup).
+    constexpr std::size_t MaxRequestedIds = 300;
+    std::vector<u64> requested_ids;
+    if (ctx.CanReadBuffer(0)) {
+        const auto requested_ids_raw = ctx.ReadBuffer(0);
+        const auto id_count = std::min(requested_ids_raw.size() / sizeof(u64), MaxRequestedIds);
+        requested_ids.resize(id_count);
+        if (id_count > 0) {
+            std::memcpy(requested_ids.data(), requested_ids_raw.data(), id_count * sizeof(u64));
+        }
+    }
+
+    const auto entries = Common::OpenPakFriends::Get();
+    const auto capacity = std::min(ctx.GetWriteBufferNumElements<FriendImpl>(), MaxRequestedIds);
+    const auto out_count = std::min(requested_ids.size(), capacity);
+
+    std::vector<FriendImpl> info(out_count);
+    for (std::size_t i = 0; i < out_count; ++i) {
+        const auto wanted = requested_ids[i];
+        const auto it = std::find_if(entries.begin(), entries.end(),
+                                     [wanted](const auto& e) { return e.pid == wanted; });
+        info[i] = it != entries.end() ? MakeFriend(*it) : FriendImpl{};
+    }
+
+    if (!info.empty()) {
+        ctx.WriteBuffer(info);
+    }
+
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendDetailedInfo requested={} -> {} resolved",
+             requested_ids.size(), out_count);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
-    // TODO [Zephyron]: Needs buffer for FriendDetailedInfo (X, (pid, size))
 }
 
 void IFriendService::SyncFriendList(HLERequestContext& ctx) {
@@ -956,25 +1151,150 @@ void IFriendService::RequestSyncFriendList(HLERequestContext& ctx) {
 }
 
 void IFriendService::GetFriendListForViewer(HLERequestContext& ctx) {
-    const auto count = static_cast<u32>(Common::OpenPakFriends::Get().size());
-    LOG_WARNING(Service_Friend, "(partially stubbed) GetFriendListForViewer called -> count={}",
-               count);
+    // [OpenPak] The count-only version of this call left MyPage's Friends viewer showing a
+    // correct "36 friends" header with a permanently empty list underneath -- the same class of
+    // bug UpdateFriendInfo's comment above describes for GetFriendListIds. This is the id-buffer
+    // half of that same two-step viewer flow (ids here, details resolved per-id via
+    // GetFriendDetailedInfoV2 below), so it follows GetFriendListIds's proven pattern exactly.
+    // [OpenPak] TEMP: GetFriendListIds (its game-facing sibling) takes an offset scalar first --
+    // probe for the same here, in case this call is meant to paginate and my always-return-
+    // everything implementation is confusing whatever pagination state the viewer tracks.
+    IPC::RequestParser probe_rp{ctx};
+    const auto probe_offset = probe_rp.Pop<s32>();
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendListForViewer probe_offset={}", probe_offset);
+
+    u32 count = 0;
+    if (ctx.CanWriteBuffer()) {
+        const auto entries = Common::OpenPakFriends::Get();
+        const auto capacity = ctx.GetWriteBufferNumElements<u64>();
+        std::vector<u64> ids;
+        for (const auto& entry : entries) {
+            if (ids.size() >= capacity) {
+                break;
+            }
+            ids.push_back(entry.pid);
+        }
+        if (!ids.empty()) {
+            ctx.WriteBuffer(ids);
+        }
+        count = static_cast<u32>(ids.size());
+    }
+
+    // [OpenPak] TEMP: dump the actual ids handed out here so we can diff them against what
+    // UpdateFriendInfoForViewer later receives back -- matched=1/36 there means the guest is
+    // requesting a mostly-different id set than this call just gave it.
+    std::string ids_dump;
+    if (ctx.CanWriteBuffer()) {
+        const auto entries = Common::OpenPakFriends::Get();
+        for (std::size_t i = 0; i < std::min<std::size_t>(entries.size(), 5); ++i) {
+            ids_dump += fmt::format("{} ", entries[i].pid);
+        }
+    }
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendListForViewer -> {} first5=[{}]", count,
+             ids_dump);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push<u32>(count);
 }
 
 void IFriendService::UpdateFriendInfoForViewer(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) UpdateFriendInfoForViewer called");
+    // [OpenPak] This, not GetFriendDetailedInfoV2, turns out to be what MyPage's Friends viewer
+    // actually polls per-tile (GetFriendDetailedInfoV2 was only ever seen called with an empty id
+    // buffer). Same ids-in/details-out contract as UpdateFriendInfo/GetFriendDetailedInfo(V2).
+    constexpr std::size_t MaxRequestedIds = 300;
+    std::vector<u64> requested_ids;
+    if (ctx.CanReadBuffer(0)) {
+        const auto requested_ids_raw = ctx.ReadBuffer(0);
+        const auto id_count = std::min(requested_ids_raw.size() / sizeof(u64), MaxRequestedIds);
+        requested_ids.resize(id_count);
+        if (id_count > 0) {
+            std::memcpy(requested_ids.data(), requested_ids_raw.data(), id_count * sizeof(u64));
+        }
+    }
+
+    const auto entries = Common::OpenPakFriends::Get();
+    // [OpenPak] TEMP: raw byte capacity of the output buffer the guest actually allocated. If
+    // this isn't a multiple of sizeof(FriendImpl)==0x200, this call's real output struct isn't
+    // FriendImpl at all -- would explain why even a successfully-resolved entry never renders.
+    const auto raw_write_size = ctx.GetWriteBufferSize();
+    const auto capacity = std::min(ctx.GetWriteBufferNumElements<FriendImpl>(), MaxRequestedIds);
+    const auto out_count = std::min(requested_ids.size(), capacity);
+
+    std::vector<FriendImpl> info(out_count);
+    std::size_t matched_count = 0;
+    for (std::size_t i = 0; i < out_count; ++i) {
+        const auto wanted = requested_ids[i];
+        const auto it = std::find_if(entries.begin(), entries.end(),
+                                     [wanted](const auto& e) { return e.pid == wanted; });
+        if (it != entries.end()) {
+            info[i] = MakeFriend(*it);
+            ++matched_count;
+        } else {
+            info[i] = FriendImpl{};
+        }
+    }
+
+    if (!info.empty()) {
+        ctx.WriteBuffer(info);
+    }
+
+    LOG_INFO(Service_Friend,
+             "[OpenPak] UpdateFriendInfoForViewer raw_write_size={} (sizeof(FriendImpl)={}, "
+             "{:.2f} entries worth)",
+             raw_write_size, sizeof(FriendImpl),
+             static_cast<double>(raw_write_size) / sizeof(FriendImpl));
+
+    // [OpenPak] TEMP: dump the actual requested ids to diff against GetFriendListForViewer's
+    // first5 -- "resolved" alone only ever meant "slots written", not "slots that found a real
+    // friend", so it could say 36 even if find_if missed on every single one.
+    std::string req_dump;
+    for (std::size_t i = 0; i < std::min<std::size_t>(requested_ids.size(), 5); ++i) {
+        req_dump += fmt::format("{} ", requested_ids[i]);
+    }
+    LOG_INFO(Service_Friend,
+             "[OpenPak] UpdateFriendInfoForViewer requested={} first5=[{}] matched={}/{} "
+             "cache_size={}",
+             requested_ids.size(), req_dump, matched_count, out_count, entries.size());
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
 }
 
 void IFriendService::GetFriendDetailedInfoV2(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetFriendDetailedInfoV2 called");
+    // [OpenPak] Same ids-in/details-out contract as UpdateFriendInfo above (one resolved entry
+    // per requested id, in the same order, zeroed rather than skipped when an id can't be
+    // resolved) -- this is the detail half of the GetFriendListForViewer flow MyPage's Friends
+    // viewer actually uses, so without this the viewer had ids but nothing to show for them.
+    constexpr std::size_t MaxRequestedIds = 300;
+    std::vector<u64> requested_ids;
+    if (ctx.CanReadBuffer(0)) {
+        const auto requested_ids_raw = ctx.ReadBuffer(0);
+        const auto id_count = std::min(requested_ids_raw.size() / sizeof(u64), MaxRequestedIds);
+        requested_ids.resize(id_count);
+        if (id_count > 0) {
+            std::memcpy(requested_ids.data(), requested_ids_raw.data(), id_count * sizeof(u64));
+        }
+    }
+
+    const auto entries = Common::OpenPakFriends::Get();
+    const auto capacity = std::min(ctx.GetWriteBufferNumElements<FriendImpl>(), MaxRequestedIds);
+    const auto out_count = std::min(requested_ids.size(), capacity);
+
+    std::vector<FriendImpl> info(out_count);
+    for (std::size_t i = 0; i < out_count; ++i) {
+        const auto wanted = requested_ids[i];
+        const auto it = std::find_if(entries.begin(), entries.end(),
+                                     [wanted](const auto& e) { return e.pid == wanted; });
+        info[i] = it != entries.end() ? MakeFriend(*it) : FriendImpl{};
+    }
+
+    if (!info.empty()) {
+        ctx.WriteBuffer(info);
+    }
+
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendDetailedInfoV2 requested={} -> {} resolved",
+             requested_ids.size(), out_count);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
-    // TODO [Zephyron]: Needs buffer for FriendDetailedInfo (X, (pid, size))
 }
 
 void IFriendService::LoadFriendSetting(HLERequestContext& ctx) {
@@ -1057,10 +1377,7 @@ void IFriendService::GetBlockedUserListV2(HLERequestContext& ctx) {
 }
 
 void IFriendService::GetProfileExtraList(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetProfileExtraList called");
-    IPC::ResponseBuilder rb{ctx, 3};
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Count
+    RespondProfileList(ctx, "GetProfileExtraList");
 }
 
 void IFriendService::GetRelationship(HLERequestContext& ctx) {
@@ -1072,10 +1389,7 @@ void IFriendService::GetRelationship(HLERequestContext& ctx) {
 }
 
 void IFriendService::GetProfileExtraListV2(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) GetProfileExtraListV2 called");
-    IPC::ResponseBuilder rb{ctx, 3};
-    rb.Push(ResultSuccess);
-    rb.Push<u32>(0); // Count
+    RespondProfileList(ctx, "GetProfileExtraListV2");
 }
 
 void IFriendService::GetUserPresenceView(HLERequestContext& ctx) {

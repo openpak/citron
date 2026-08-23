@@ -4,6 +4,8 @@
 #include <atomic>
 #include <unordered_set>
 
+#include <chrono>
+
 #include "common/scope_exit.h"
 #include "common/scratch_buffer.h"
 #include "core/core.h"
@@ -11,9 +13,65 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/svc.h"
+#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 #include "core/hle/kernel/svc_results.h"
 
 namespace Kernel::Svc {
+
+std::atomic<u64> g_legacy_deadline_watch_until_ms{0};
+
+void ArmOpenPakDeadlineWatch(u64 duration_ms) {
+    const auto now_ms = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    g_legacy_deadline_watch_until_ms.store(now_ms + duration_ms, std::memory_order_relaxed);
+}
+
+bool IsOpenPakDeadlineWatchActive() {
+    const u64 until_ms = g_legacy_deadline_watch_until_ms.load(std::memory_order_relaxed);
+    if (until_ms == 0) {
+        return false;
+    }
+    const auto now_ms = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    if (now_ms > until_ms) {
+        g_legacy_deadline_watch_until_ms.store(0, std::memory_order_relaxed);
+        return false;
+    }
+    return true;
+}
+
+namespace {
+// [OpenPak] Logs a WaitSynchronization timeout if the deadline watch is currently armed and
+// the timeout looks like a plausible application-level deadline (not -1/infinite, not a
+// sub-millisecond polling interval). See legacy_deadline_watch.h.
+void MaybeLogOpenPakDeadlineWatch(int64_t timeout_ns) {
+    const u64 until_ms = g_legacy_deadline_watch_until_ms.load(std::memory_order_relaxed);
+    if (until_ms == 0) {
+        return;
+    }
+    const auto now_ms = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    if (now_ms > until_ms) {
+        g_legacy_deadline_watch_until_ms.store(0, std::memory_order_relaxed);
+        return;
+    }
+    if (timeout_ns <= 0) {
+        return; // -1 (infinite) or 0 (poll) -- not a deadline
+    }
+    constexpr int64_t MinInterestingNs = 50'000'000; // 50ms
+    if (timeout_ns < MinInterestingNs) {
+        return; // short polling-interval waits, not a deadline
+    }
+    LOG_INFO(Kernel_SVC, "[OpenPak][DEADLINE-WATCH] WaitSynchronization timeout_ns={} ({:.3f} ms)",
+             timeout_ns, static_cast<double>(timeout_ns) / 1'000'000.0);
+}
+} // namespace
 
 /// Close a handle
 Result CloseHandle(Core::System& system, Handle handle) {
@@ -75,6 +133,24 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
                            int32_t num_handles, int64_t timeout_ns) {
     LOG_TRACE(Kernel_SVC, "called user_handles={:#x}, num_handles={}, timeout_ns={}", user_handles,
              num_handles, timeout_ns);
+    MaybeLogOpenPakDeadlineWatch(timeout_ns);
+
+    // [OpenPak][DIAG] The deadline watch only logs *finite* timeouts (see
+    // MaybeLogOpenPakDeadlineWatch) -- an infinite wait (timeout_ns <= 0) on a KEvent that never
+    // gets signaled would be invisible to it. If gRPC-core's poller wakeup mechanism (Twenty-First
+    // Update: no BSD wakeup-fd socket exists, so it's likely a raw KEvent) is stuck blocked
+    // forever, this is where it would show up. Only active during the same armed window; logs
+    // entry (so we know a real infinite wait started) and, separately, how long it actually took
+    // wall-clock to resolve (so a wait that "completes" after 20+ real seconds is visible even
+    // though it doesn't crash/hang the log).
+    const bool diag_infinite_wait = timeout_ns <= 0 && IsOpenPakDeadlineWatchActive();
+    std::chrono::steady_clock::time_point diag_wait_start{};
+    if (diag_infinite_wait) {
+        diag_wait_start = std::chrono::steady_clock::now();
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] WaitSynchronization INFINITE wait starting, "
+                             "num_handles={}",
+                 num_handles);
+    }
 
     // Ensure number of handles is valid.
     R_UNLESS(0 <= num_handles && num_handles <= Svc::ArgumentHandleCountMax, ResultOutOfRange);
@@ -102,6 +178,24 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
             LOG_TRACE(Kernel_SVC, "  handle[{}]=0x{:X} type={}", i, handles[i],
                      objs[i]->GetTypeObj().GetName());
         }
+
+        // [OpenPak][DIAG] timeout_ns==0 EXACTLY is a real one-shot, non-blocking probe --
+        // distinct from timeout_ns<0 (true infinite wait), which diag_infinite_wait above already
+        // lumps together under "INFINITE" for logging purposes. This is exactly the shape of check
+        // the shared nnSdk worker-thread bootstrap trampoline does on a handle read from its own
+        // task-arg struct (offset 0x1b0, per this session's live disassembly) -- "if not already
+        // signaled the instant this runs, bail immediately." Log the resolved object TYPE for any
+        // single-handle, exactly-zero-timeout probe seen while the deadline watch is armed, so the
+        // *kind* of kernel object gating that dispatch can be identified without more disassembly.
+        if (timeout_ns == 0 && num_handles == 1 && IsOpenPakDeadlineWatchActive()) {
+            // [OpenPak][DIAG] readable_event_obj lets this be matched directly against
+            // CreateEvent/SignalEvent's own diagnostics (svc_event.cpp) -- see those comments for
+            // why object address, not handle number, is the correlation key.
+            LOG_INFO(Kernel_SVC,
+                     "[OpenPak][DIAG] WaitSynchronization ONE-SHOT probe (timeout=0) handle=0x{:X} "
+                     "type={} readable_event_obj={}",
+                     handles[0], objs[0]->GetTypeObj().GetName(), static_cast<const void*>(objs[0]));
+        }
     }
 
     // Ensure handles are closed when we're done.
@@ -126,6 +220,24 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
     // Wait on the objects.
     Result res = KSynchronizationObject::Wait(kernel, out_index, objs.data(), num_handles, timeout);
     LOG_TRACE(Kernel_SVC, "resolved out_index={}, result=0x{:X}", *out_index, res.raw);
+
+    // [OpenPak][DIAG] Companion to the ONE-SHOT probe log above -- same gating, prints whether
+    // this specific probe found its handle already signaled (res==Success) or not (ResultTimedOut,
+    // matching the Sixth Update's decompiled `w0 == 0xea01` bail branch).
+    if (timeout_ns == 0 && num_handles == 1 && IsOpenPakDeadlineWatchActive()) {
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] WaitSynchronization ONE-SHOT probe result=0x{:X}",
+                 res.raw);
+    }
+
+    if (diag_infinite_wait) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - diag_wait_start)
+                                     .count();
+        LOG_INFO(Kernel_SVC,
+                 "[OpenPak][DIAG] WaitSynchronization INFINITE wait resolved after {}ms "
+                 "wall-clock, out_index={}, result=0x{:X}",
+                 elapsed_ms, *out_index, res.raw);
+    }
 
     R_SUCCEED_IF(res == ResultSessionClosed);
     R_RETURN(res);

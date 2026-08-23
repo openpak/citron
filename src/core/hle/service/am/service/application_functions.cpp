@@ -162,6 +162,32 @@ Result IApplicationFunctions::EnsureSaveData(Out<u64> out_size, Common::UUID use
     R_TRY(system.GetFileSystemController().OpenSaveDataController()->CreateSaveData(
         &save_data, FileSys::SaveDataSpaceId::User, attribute));
 
+    // [OpenPak] A real console also provisions the title's BCAT delivery-cache storage here,
+    // proactively, the first time EnsureSaveData runs -- not just the account save above. Ryujinx
+    // never did this at all (upstream bug, not OpenPak-specific) until it hit Splatoon 3, which
+    // requests its BCAT cache at startup and got refused with PermissionDenied against
+    // never-provisioned storage; the game retried every ~500ms, forever, and never advanced past
+    // that point. Splatoon 2 uses BCAT's legacy command path and never touches this, which is why
+    // this went unnoticed for years. Matches Ryujinx-Reference's own fix (df268d0/e7d39fa,
+    // ProcessLoaderHelper's EnsureApplicationBcatDeliveryCacheStorage): gate on the NACP's own
+    // declared BcatDeliveryCacheStorageSize, so titles that don't use BCAT are unaffected.
+    const FileSys::PatchManager pm{m_applet->program_id, system.GetFileSystemController(),
+                                   system.GetContentProvider()};
+    const auto metadata = pm.GetControlMetadata();
+    if (metadata.first != nullptr && metadata.first->GetBCATDeliveryCacheStorageSize() > 0) {
+        FileSys::SaveDataAttribute bcat_attribute{};
+        bcat_attribute.program_id = m_applet->program_id;
+        bcat_attribute.type = FileSys::SaveDataType::Bcat;
+
+        FileSys::VirtualDir bcat_save_data{};
+        const auto bcat_result = system.GetFileSystemController().OpenSaveDataController()->CreateSaveData(
+            &bcat_save_data, FileSys::SaveDataSpaceId::User, bcat_attribute);
+        if (bcat_result.IsError()) {
+            LOG_WARNING(Service_AM, "Failed to provision BCAT delivery-cache storage: {}",
+                       bcat_result.raw);
+        }
+    }
+
     *out_size = 0;
     R_SUCCEED();
 }

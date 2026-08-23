@@ -24,6 +24,11 @@ private:
         Out<SharedPointer<ILibraryAppletAccessor>> out_calling_library_applet);
     Result PushContext(SharedPointer<IStorage> storage);
     Result PopContext(Out<SharedPointer<IStorage>> out_storage);
+    Result CancelWindingReservation();
+    Result WindAndDoReserved();
+    Result ReserveToStartAndWaitAndUnwindThis(
+        SharedPointer<ILibraryAppletAccessor> reserved_applet_accessor);
+    Result ReserveToStartAndWait(SharedPointer<ILibraryAppletAccessor> reserved_applet_accessor);
 
     const std::shared_ptr<Applet> m_applet;
 };

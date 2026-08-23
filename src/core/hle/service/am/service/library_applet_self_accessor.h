@@ -51,6 +51,7 @@ public:
 private:
     Result PopInData(Out<SharedPointer<IStorage>> out_storage);
     Result PushOutData(SharedPointer<IStorage> storage);
+    Result UnpopInData(SharedPointer<IStorage> storage);
     Result PopInteractiveInData(Out<SharedPointer<IStorage>> out_storage);
     Result PushInteractiveOutData(SharedPointer<IStorage> storage);
     Result GetPopInDataEvent(OutCopyHandle<Kernel::KReadableEvent> out_event);

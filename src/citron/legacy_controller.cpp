@@ -16,6 +16,7 @@
 #include "common/legacy_account.h"
 #include "common/legacy_friends.h"
 #include "core/core.h"
+#include "core/hle/service/friend/friend.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/vfs/vfs.h"
@@ -272,10 +273,17 @@ void OpenPakController::PollFriends() {
                 std::vector<Common::OpenPakFriends::Entry> cache;
                 cache.reserve(list.friends.size());
                 for (const auto& entry : list.friends) {
-                    cache.push_back({entry.pid, entry.name, entry.presence_status,
-                                     entry.app_field});
+                    const auto decoded_image =
+                        QByteArray::fromBase64(QByteArray::fromStdString(entry.image_base64));
+                    cache.push_back(
+                        {entry.pid, entry.name, entry.presence_status, entry.app_field,
+                         std::vector<u8>(decoded_image.begin(), decoded_image.end())});
                 }
                 Common::OpenPakFriends::Set(std::move(cache));
+                // [OpenPak] The guest's own INotificationService only ever signals once, at
+                // construction -- before this first real poll has a chance to land. Without this,
+                // a Friends viewer already on-screen never learns that real data showed up.
+                Service::Friend::NotifyFriendsListUpdated();
 
                 const bool suppress_toasts = first_poll;
                 first_poll = false;

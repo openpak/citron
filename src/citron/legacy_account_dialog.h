@@ -51,6 +51,7 @@ public:
     static constexpr int kRequestsPage = 2;
     static constexpr int kHistoryPage = 3;
     static constexpr int kCloudSavesPage = 4;
+    static constexpr int kPlayersPage = 5;
 
     explicit OpenPakAccountDialog(OpenPakController* controller, Core::System& system,
                                    QWidget* parent = nullptr, int initial_page = kHomePage);
@@ -65,6 +66,10 @@ protected:
 private:
     void RefreshFriends();
     void RefreshHistory();
+    void RefreshPlayers();
+    void OnPlayersViewClicked(const QModelIndex& index);
+    void ShowPlayersContextMenu(QListView* view, const QPoint& pos);
+    void OpenReportDialog(u64 pid, const QString& name, const QString& avatar_b64);
     void SetBusy(bool busy);
     void OnAdd();
 
@@ -133,6 +138,17 @@ private:
 
     QLineEdit* friend_code_input;
     QPushButton* add_button;
+
+    QLabel* lobby_state_label;
+    QListView* lobby_view;
+    QStandardItemModel* lobby_model;
+    QStackedWidget* lobby_stack;
+    OpenPakFriendDelegate* lobby_delegate;
+    QListView* recent_players_view;
+    QStandardItemModel* recent_players_model;
+    QStackedWidget* recent_players_stack;
+    OpenPakFriendDelegate* recent_players_delegate;
+    std::unordered_set<u64> known_player_pids;
 
     QLineEdit* friend_search;
     QTimer refresh_timer;

@@ -31,5 +31,6 @@ std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control,
                                                   Loader::ResultStatus& out_load_result,
                                                   Core::System& system, FileSys::VirtualFile file,
                                                   u64 program_id, u64 program_index);
+bool ReinitializeProcess(Core::System& system, Process& process, u64 program_id);
 
 } // namespace Service::AM

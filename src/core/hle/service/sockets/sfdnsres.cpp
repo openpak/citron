@@ -14,6 +14,8 @@
 #include "common/string_util.h"
 #include "common/swap.h"
 #include "core/core.h"
+#include "core/hle/kernel/svc/legacy_deadline_watch.h"
+#include "dynarmic/interface/A64/a64.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets.h"
@@ -106,17 +108,42 @@ static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) 
     return std::nullopt;
 }
 
-// [OpenPak] Holds the FIRST resolution of an "npln" host back for a few seconds, against a
-// startup deadlock. A gRPC-based title (Splatoon 3) connects to its online lobby on its own,
-// early in boot, right in the middle of the heaviest JIT/shader-compile burst of startup.
-// grpc-core's own connection setup can deadlock outright when it starts while that contention
-// is happening -- its poller goes into wait and its executor stalls partway through preparing
-// the socket, without ever actually emitting connect() -- while the identical setup, a few
-// seconds later on a quieter system, succeeds. Ryujinx-Reference hit and documented this exact
-// failure (DnsMitmResolver.cs's MaybeDelayNplnInit); this is the same guard, simplified: a
-// fixed delay rather than polling dynarmic's own translation-rate counter for a "calm" signal,
-// since that isn't exposed here. OPENPAK_LEGACY_NPLN_DELAY_MS overrides it (0 disables); same
-// variable name as Ryujinx-Reference's on purpose.
+// [OpenPak] Debug-only tap: redirects an "npln" host straight to a local TLS-terminating
+// proxy instead of production, for protocol inspection. Independent of enable_legacy (this
+// isn't a OpenPak-server redirect, just a temporary debugging aid) -- unset by default, so it
+// never affects a normal run. OPENPAK_LEGACY_S3_DEBUG_PROXY_IP=<ip> to enable.
+static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
+    if (Common::ToLower(host).find("npln") == std::string::npos) {
+        return std::nullopt;
+    }
+    const char* env = std::getenv("OPENPAK_LEGACY_S3_DEBUG_PROXY_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[OpenPak] Redirecting npln host '{}' -> debug proxy '{}'", host, env);
+    return std::string(env);
+}
+
+// [OpenPak] Holds the FIRST resolution of an "npln" host back until dynarmic's JIT compile
+// storm actually settles, against a startup deadlock AND a squeezed post-connect deadline. A
+// gRPC-based title (Splatoon 3) connects to its online lobby on its own, early in boot, right
+// in the middle of the heaviest JIT/shader-compile burst of startup. grpc-core's own connection
+// setup can deadlock outright when it starts while that contention is happening -- its poller
+// goes into wait and its executor stalls partway through preparing the socket, without ever
+// actually emitting connect() -- while the identical setup, a few seconds later on a quieter
+// system, succeeds. Worse, even once the socket does get going, the game races a fixed
+// wall-clock deadline for its first gRPC call (IssuePrearrangedUserToken) that keeps expiring
+// under emulation -- confirmed directly via a decrypted MITM capture: the game aborts with
+// RST_STREAM(REFUSED_STREAM) before ever sending HEADERS, at a point that shrinks on later
+// retries, consistent with one shared deadline instead of a per-attempt one. Ongoing JIT
+// contention during that window eats into the same wall-clock budget, so a storm that's still
+// running when a fixed delay expires can starve the call that follows just as badly as it
+// starves the initial connect. Mirrors Ryujinx-Reference's DnsMitmResolver.cs
+// (MaybeDelayNplnInit) exactly: poll dynarmic's global translation counter in windows and only
+// proceed once new-block activity drops below a "calm" threshold, rather than blindly sleeping
+// a fixed duration that may fire mid-storm or waste time after it's already passed.
+// OPENPAK_LEGACY_NPLN_DELAY_MS caps the wait (0 disables it); same variable name and default
+// (120000ms) as Ryujinx-Reference's on purpose.
 static std::once_flag g_npln_delay_once;
 
 static void MaybeDelayNplnInit(const std::string& host) {
@@ -124,26 +151,70 @@ static void MaybeDelayNplnInit(const std::string& host) {
         return;
     }
     std::call_once(g_npln_delay_once, [] {
-        int delay_ms = 5000;
+        int max_wait_ms = 120000;
         if (const char* env = std::getenv("OPENPAK_LEGACY_NPLN_DELAY_MS"); env && *env) {
             try {
                 const int parsed = std::stoi(env);
                 if (parsed >= 0) {
-                    delay_ms = parsed;
+                    max_wait_ms = parsed;
                 }
             } catch (const std::exception&) {
                 // Malformed override -- keep the default rather than fail resolution over it.
             }
         }
-        if (delay_ms <= 0) {
+        if (max_wait_ms <= 0) {
             return;
         }
+
+        constexpr int MinWaitMs = 3000; // always leave the connection a little air
+        constexpr int WindowMs = 500;
+        constexpr u64 CalmThreshold = 20; // fewer translations than this per window => storm passed
+        // A single quiet window is a weak signal on its own -- boot-time JIT activity for a
+        // shader/asset-heavy title comes in bursts with real lulls between them (e.g. waiting on
+        // a disk read), so one lucky 500ms sample can read "calm" while the storm is still very
+        // much in progress a moment later. Measured directly: a single-window check here declared
+        // calm after only 3.5s total, then the handshake-to-first-request window (still deep in
+        // lobby/menu load, audio+render+shader activity ongoing) burned enough of the same shared
+        // wall-clock deadline that the call still starved -- matching this function's own opening
+        // comment about ongoing contention starving the call that follows. Require several
+        // consecutive calm windows in a row before trusting it; any single busy window resets the
+        // streak, same as this function already resets nothing (it just stops) on a busy window.
+        constexpr int RequiredConsecutiveCalmWindows = 4; // 2s of sustained calm, not one sample
+
         LOG_INFO(Service,
-                 "[OpenPak] Holding the first npln host resolution for {} ms so the "
-                 "post-boot JIT/shader-compile burst settles before gRPC's connection setup "
-                 "starts (see MaybeDelayNplnInit)",
-                 delay_ms);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                 "[OpenPak] Holding the first npln host resolution until the JIT/shader-compile "
+                 "burst settles before gRPC's connection setup starts (at most {} ms) (see "
+                 "MaybeDelayNplnInit)",
+                 max_wait_ms);
+
+        const int initial_wait = std::min(MinWaitMs, max_wait_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(initial_wait));
+        int waited = initial_wait;
+        int consecutive_calm = 0;
+
+        while (waited < max_wait_ms) {
+            const u64 before = Dynarmic::A64::Jit::GetGlobalTranslationCount();
+            std::this_thread::sleep_for(std::chrono::milliseconds(WindowMs));
+            waited += WindowMs;
+
+            if (Dynarmic::A64::Jit::GetGlobalTranslationCount() - before < CalmThreshold) {
+                if (++consecutive_calm >= RequiredConsecutiveCalmWindows) {
+                    break;
+                }
+            } else {
+                consecutive_calm = 0;
+            }
+        }
+
+        LOG_INFO(Service, "[OpenPak] npln hold finished after {} ms (JIT calm for {} consecutive window(s))",
+                 waited, consecutive_calm);
+
+        // [OpenPak][DIAG] Arm a short window during which any finite, non-trivial
+        // WaitSynchronization timeout gets logged -- see legacy_deadline_watch.h. This is
+        // trying to directly OBSERVE the game's gRPC call deadline (if it's implemented as a
+        // timed kernel wait) rather than continuing to guess at it via static binary analysis.
+        Kernel::Svc::ArmOpenPakDeadlineWatch(90000);
+        LOG_INFO(Service, "[OpenPak][DIAG] Deadline watch armed for 90000 ms");
     });
 }
 
@@ -489,7 +560,10 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     }
 
     std::string query_host = host;
-    auto redirect = GetOpenPakRedirectIp(host);
+    auto redirect = GetNplnDebugProxyIp(host);
+    if (!redirect.has_value()) {
+        redirect = GetOpenPakRedirectIp(host);
+    }
     if (redirect.has_value()) {
         query_host = *redirect;
     } else if (blocked_domains.find(host) != blocked_domains.end()) {
@@ -509,6 +583,21 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     }
 
     if (redirect.has_value()) {
+        // [OpenPak] GetAddressInfo never requests AI_CANONNAME, so canon_name comes back
+        // unset for a normal resolution -- SerializeAddrInfo then writes an empty canonical
+        // name. That's harmless for titles that never look at it, but this query just resolved
+        // a REDIRECT TARGET (a literal IP string), not the real host, so even if canon_name
+        // were populated by the OS resolver it would be the numeric IP, never the actual
+        // hostname. A gRPC-based title (Splatoon 3) builds its HTTP/2 :authority header from
+        // this canonical name -- sending it empty (or the wrong literal IP) instead of the real
+        // npln hostname is exactly the shape of bug already fixed above for an already-literal
+        // host (see that comment): TCP+TLS+HTTP/2 complete fine, then the connection is torn
+        // down before a real HEADERS frame ever goes out. Force it back to the real host here,
+        // matching that same fix.
+        for (auto& addrinfo : res.value()) {
+            addrinfo.canon_name = host;
+        }
+
         // [OpenPak] Port-keyed recovery for gRPC-based titles (Splatoon 3) that lose this
         // resolved address later. See SetLastIpForPort's declaration comment in sfdnsres.h.
         std::optional<u16> service_port;

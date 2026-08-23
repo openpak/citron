@@ -231,12 +231,25 @@ std::string BuildIdToken() {
         }
     }
 
+    // [OpenPak] The console's own nnAccount module expects a "nintendo" claim dictionary
+    // with device metadata (dt, pc, di, sn, ist) -- without it, nnAccount's local schema
+    // check rejects an otherwise well-formed, correctly-signed token even though the server
+    // side has nothing to complain about. Matches Ryujinx-Reference's own fix for the exact
+    // same shape of failure (their commit message: "the console receives HTTP 200 but
+    // rejects the body because the JWT schema doesn't match what nnAccount expects").
+    // Reuses the same device id for both the top-level "di" and the nested one, matching
+    // Ryujinx-Reference's own token (a single deviceId feeding both places).
+    const std::string device_id = RandomHex(0x10);
+    const std::string nintendo_claim = fmt::format(
+        R"("nintendo":{{"dt":"NX Prod 1","pc":"HAC","di":"{}","sn":"XAW10000000000","ist":false}},)",
+        device_id);
+
     const std::string payload = fmt::format(
         R"({{"sub":"{}","aud":"{}","iss":"{}","typ":"id_token","iat":{},"exp":{},"jku":"{}",)"
-        R"("jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}",{}"hm":true}})",
+        R"("jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}",{}{}"hm":true}})",
         RandomHex(0x10), BaasAudience, BaasIssuer, now, now + 3 * 60 * 60, BaasJku,
-        Common::UUID::MakeRandom().FormattedString(), RandomHex(0x10), RandomHex(0x10),
-        nnex_claim);
+        Common::UUID::MakeRandom().FormattedString(), device_id, RandomHex(0x10),
+        nintendo_claim, nnex_claim);
 
     const std::string signing_input =
         Base64UrlEncode(header) + "." + Base64UrlEncode(payload);
@@ -248,14 +261,21 @@ std::vector<u8> GetIdTokenBytes() {
     static std::mutex mutex;
     static std::vector<u8> cached;
     static std::chrono::steady_clock::time_point expiry{};
+    static u64 cached_generation = 0;
 
     std::lock_guard lock{mutex};
 
+    // [OpenPak] Rebuild whenever the linked account changes (sign-in/sign-out), not just on
+    // a time-based expiry -- otherwise a token minted before the user finishes linking (e.g.
+    // this cache gets populated once at boot while still unlinked) keeps being served for up
+    // to 2 hours after a successful link, silently missing the "nnex" claim the whole time.
+    const u64 generation = Common::OpenPakAccount::GetGeneration();
     const auto now = std::chrono::steady_clock::now();
-    if (cached.empty() || now >= expiry) {
+    if (cached.empty() || now >= expiry || generation != cached_generation) {
         const std::string token = BuildIdToken();
         cached.assign(token.begin(), token.end());
         expiry = now + std::chrono::hours{2};
+        cached_generation = generation;
         LOG_INFO(Service_ACC, "[OpenPak] Issued a signed BAAS id_token ({} bytes)", cached.size());
     }
 

@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "core/core.h"
 #include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/k_memory_layout.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/svc.h"
+#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 #include "core/hle/kernel/svc_results.h"
 
 namespace Kernel::Svc {
@@ -16,6 +19,18 @@ Result WaitProcessWideKeyAtomic(Core::System& system, u64 address, u64 cv_key, u
                                 s64 timeout_ns) {
     LOG_TRACE(Kernel_SVC, "called address={:X}, cv_key={:X}, tag=0x{:08X}, timeout_ns={}", address,
               cv_key, tag, timeout_ns);
+
+    // [OpenPak][DIAG] The last uninstrumented Horizon OS blocking primitive this session --
+    // condition-variable waits (std::condition_variable's real backing SVC) never show up in the
+    // WaitSynchronization/SleepThread diagnostics at all.
+    const bool diag_cv = IsOpenPakDeadlineWatchActive();
+    std::chrono::steady_clock::time_point diag_cv_start{};
+    if (diag_cv) {
+        diag_cv_start = std::chrono::steady_clock::now();
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] WaitProcessWideKeyAtomic starting, cv_key={:X}, "
+                             "timeout_ns={}",
+                 cv_key, timeout_ns);
+    }
 
     // Validate input.
     R_UNLESS(!IsKernelAddress(address), ResultInvalidCurrentMemory);
@@ -38,14 +53,31 @@ Result WaitProcessWideKeyAtomic(Core::System& system, u64 address, u64 cv_key, u
     }
 
     // Wait on the condition variable.
-    R_RETURN(
+    const auto result =
         GetCurrentProcess(system.Kernel())
-            .WaitConditionVariable(address, Common::AlignDown(cv_key, sizeof(u32)), tag, timeout));
+            .WaitConditionVariable(address, Common::AlignDown(cv_key, sizeof(u32)), tag, timeout);
+
+    if (diag_cv) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - diag_cv_start)
+                                     .count();
+        LOG_INFO(Kernel_SVC,
+                 "[OpenPak][DIAG] WaitProcessWideKeyAtomic resolved after {}ms wall-clock, "
+                 "cv_key={:X}, result=0x{:X}",
+                 elapsed_ms, cv_key, result.raw);
+    }
+
+    R_RETURN(result);
 }
 
 /// Signal process wide key
 void SignalProcessWideKey(Core::System& system, u64 cv_key, s32 count) {
     LOG_TRACE(Kernel_SVC, "called, cv_key=0x{:X}, count=0x{:08X}", cv_key, count);
+
+    if (IsOpenPakDeadlineWatchActive()) {
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] SignalProcessWideKey cv_key={:X}, count={}", cv_key,
+                 count);
+    }
 
     // Signal the condition variable.
     return GetCurrentProcess(system.Kernel())

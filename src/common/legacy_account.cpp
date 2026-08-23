@@ -23,6 +23,7 @@ u64 g_pid = 0;
 std::string g_username;
 std::string g_friend_code;
 std::string g_token;
+u64 g_generation = 0;
 
 std::filesystem::path FilePath() {
     return FS::GetCitronPath(FS::CitronPath::ConfigDir) / "legacy_account.txt";
@@ -104,6 +105,12 @@ std::string GetToken() {
     return g_token;
 }
 
+u64 GetGeneration() {
+    std::lock_guard lock{g_mutex};
+    EnsureLoaded();
+    return g_generation;
+}
+
 void Save(u64 pid, std::string_view username, std::string_view friend_code,
           std::string_view token) {
     std::lock_guard lock{g_mutex};
@@ -112,6 +119,7 @@ void Save(u64 pid, std::string_view username, std::string_view friend_code,
     g_username = username;
     g_friend_code = friend_code;
     g_token = token;
+    ++g_generation;
     WriteFile();
 }
 
@@ -122,6 +130,7 @@ void Clear() {
     g_username.clear();
     g_friend_code.clear();
     g_token.clear();
+    ++g_generation;
     void(FS::RemoveFile(FilePath()));
 }
 

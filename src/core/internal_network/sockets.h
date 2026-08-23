@@ -5,7 +5,9 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
+#include <tuple>
 #include <utility>
 
 #if defined(_WIN32)
@@ -71,6 +73,11 @@ public:
                                          const SockAddrIn* addr) = 0;
 
     virtual Errno SetLinger(bool enable, u32 linger) = 0;
+
+    // [OpenPak] Splatoon 3's gRPC/NintendoSDK_NPLN stack sets SO_LINGER (via its vendor-private
+    // optname alias) once right after every connect, matching the SetReuseAddr/GetReuseAddr
+    // pattern below -- see bsd.cpp's SetSockOptImpl/GetSockOptImpl for the observed values.
+    virtual std::tuple<bool, u32, Errno> GetLinger() = 0;
 
     virtual Errno SetReuseAddr(bool enable) = 0;
 
@@ -162,6 +169,8 @@ public:
 
     Errno SetLinger(bool enable, u32 linger) override;
 
+    std::tuple<bool, u32, Errno> GetLinger() override;
+
     Errno SetReuseAddr(bool enable) override;
 
     Errno SetKeepAlive(bool enable) override;
@@ -201,6 +210,10 @@ public:
 
 private:
     bool is_non_blocking = false;
+    // [OpenPak] What SetNoDelay was last actually told, independent of whether a later
+    // GetNoDelay's own getsockopt() call can be trusted -- see the definition comment on
+    // GetNoDelay in network.cpp.
+    std::optional<bool> no_delay_cache;
 };
 
 std::pair<s32, Errno> Poll(std::vector<PollFD>& poll_fds, s32 timeout);

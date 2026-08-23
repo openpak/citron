@@ -57,6 +57,8 @@ public:
 
     Errno SetLinger(bool enable, u32 linger) override;
 
+    std::tuple<bool, u32, Errno> GetLinger() override;
+
     Errno SetReuseAddr(bool enable) override;
 
     Errno SetBroadcast(bool enable) override;
@@ -94,6 +96,8 @@ private:
     bool no_delay = false;
     bool reuse_addr = false;
     bool keep_alive = false;
+    bool linger_enable = false;
+    u32 linger_time = 0;
     bool closed = false;
     u32 send_timeout = 0;
     u32 receive_timeout = 0;

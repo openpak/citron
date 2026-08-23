@@ -14,10 +14,9 @@ namespace Loader::OpenPakS3Patches {
 
 namespace {
 
-// Raw IPS32 patch bytes, byte-for-byte identical to
-// ExternalReference/Ryujinx-Reference's OpenPakS3Patches.cs (_contournementCertificat /
-// _nomDePair as of that repo's 2026-08-16 revision) -- copied, not re-derived, so this stays a
-// known-good match to what's already confirmed working there.
+// Bytes match ExternalReference/Ryujinx-Reference's OpenPakS3Patches.cs. Offsets are Ryujinx's
+// stored constants as-is (reverted from a +0x100 adjustment -- see project_splatoon3_connectivity
+// memory for why that theory didn't pan out against a packet capture).
 
 // Bypasses the certificate check: the game pins Nintendo's certificates and refuses ours.
 // 19 bytes, fingerprint 219ee0cfea21fd4b...
@@ -45,10 +44,12 @@ struct KnownBuild {
 };
 
 // NSO build ID -> which patches it needs. An unrecognized build gets nothing, exactly like an
-// .ips file whose name didn't match any program. Two Splatoon 3 builds are covered.
-constexpr std::array<KnownBuild, 2> kKnownBuilds{{
+// .ips file whose name didn't match any program. v11.3.0's build was verified byte-identical to
+// v11.2.0's at all three patch offsets before adding it here (no re-derivation needed).
+constexpr std::array<KnownBuild, 3> kKnownBuilds{{
     {"6830B3A12406CB4716FEC5ADDC35D3E2DC92D212", true},
     {"726D2B882DD9EF10F4A9D73EED088740630FB6C8", false},
+    {"28C4287AEE36F7499DA60F3E68B54C70DA382D75", true},
 }};
 
 FileSys::VirtualFile MakeIpsFile(std::span<const u8> bytes) {

@@ -177,6 +177,10 @@ u64 NACP::GetDeviceSaveDataSize() const {
     return raw.device_save_data_size;
 }
 
+u64 NACP::GetBCATDeliveryCacheStorageSize() const {
+    return raw.bcat_delivery_cache_storage_size;
+}
+
 u32 NACP::GetParentalControlFlag() const {
     return raw.parental_control;
 }

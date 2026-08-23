@@ -97,6 +97,11 @@ struct Applet {
     // Process winding context (IProcessWindingController::PushContext/PopContext)
     std::optional<std::vector<u8>> wound_context{};
 
+    // Process winding reservation (IProcessWindingController::ReserveToStartAndWait[AndUnwindThis])
+    std::shared_ptr<Applet> reserved_applet{};
+    bool unwind_after_reserved{};
+    bool is_winding{};
+
     // Caller applet
     std::weak_ptr<Applet> caller_applet{};
     std::shared_ptr<AppletDataBroker> caller_applet_broker{};

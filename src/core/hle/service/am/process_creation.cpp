@@ -127,4 +127,20 @@ std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control,
     return process;
 }
 
+bool ReinitializeProcess(Core::System& system, Process& process, u64 program_id) {
+    auto& storage = system.GetContentProviderUnion();
+    const auto nca_raw = storage.GetEntryRaw(program_id, FileSys::ContentRecordType::Program);
+    if (!nca_raw) {
+        return false;
+    }
+
+    auto loader = Loader::GetLoader(system, nca_raw, program_id, 0);
+    if (!loader) {
+        return false;
+    }
+
+    Loader::ResultStatus status{};
+    return process.Initialize(*loader, status);
+}
+
 } // namespace Service::AM

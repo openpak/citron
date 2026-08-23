@@ -121,7 +121,7 @@ public:
         return ResultSuccess;
     }
 
-    Result DoHandshake() override {
+    Result DoHandshake(std::span<const std::string> /*requested_alpn_protos*/) override {
         OSStatus status = SSLHandshake(context);
 
         // If we're skipping verification and got errSSLServerAuthCompleted,

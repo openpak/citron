@@ -65,7 +65,7 @@ ILibraryAppletSelfAccessor::ILibraryAppletSelfAccessor(Core::System& system_,
         {19, D<&ILibraryAppletSelfAccessor::GetDesirableKeyboardLayout>, "GetDesirableKeyboardLayout"},
         {20, nullptr, "PopExtraStorage"},
         {25, nullptr, "GetPopExtraStorageEvent"},
-        {30, nullptr, "UnpopInData"},
+        {30, D<&ILibraryAppletSelfAccessor::UnpopInData>, "UnpopInData"},
         {31, nullptr, "UnpopExtraStorage"},
         {40, nullptr, "GetIndirectLayerProducerHandle"},
         {50, D<&ILibraryAppletSelfAccessor::ReportVisibleError>, "ReportVisibleError"},
@@ -93,6 +93,12 @@ ILibraryAppletSelfAccessor::~ILibraryAppletSelfAccessor() = default;
 Result ILibraryAppletSelfAccessor::PopInData(Out<SharedPointer<IStorage>> out_storage) {
     LOG_INFO(Service_AM, "called");
     R_RETURN(m_broker->GetInData().Pop(out_storage));
+}
+
+Result ILibraryAppletSelfAccessor::UnpopInData(SharedPointer<IStorage> storage) {
+    LOG_INFO(Service_AM, "called");
+    m_broker->GetInData().Unpop(storage);
+    R_SUCCEED();
 }
 
 Result ILibraryAppletSelfAccessor::PushOutData(SharedPointer<IStorage> storage) {

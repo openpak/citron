@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/scope_exit.h"
+#include "core/arm/debug.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_hardware_timer.h"
@@ -9,6 +12,7 @@
 #include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/svc.h"
+#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 
 namespace Kernel::Svc {
 namespace {
@@ -26,6 +30,20 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
               "called entry_point=0x{:08X}, arg=0x{:08X}, stack_bottom=0x{:08X}, "
               "priority=0x{:08X}, core_id=0x{:08X}",
               entry_point, arg, stack_bottom, priority, core_id);
+
+    // [OpenPak][DIAG] Every guest thread is spawned through the same SDK trampoline, so
+    // entry_point alone can't tell two CreateThread call sites apart -- capture the caller's
+    // own backtrace instead, which is unique per spawn site.
+    if (const auto* caller = GetCurrentThreadPointer(system.Kernel())) {
+        const auto backtrace = Core::GetBacktrace(caller);
+        std::string trace_str;
+        for (const auto& entry : backtrace) {
+            trace_str += fmt::format("\n    {}+0x{:x} ({})", entry.module, entry.offset, entry.name);
+        }
+        LOG_INFO(Kernel_SVC,
+                 "[OpenPak][DIAG] CreateThread entry_point=0x{:08X} caller backtrace:{}",
+                 entry_point, trace_str);
+    }
 
     // Adjust core id, if it's the default magic.
     auto& kernel = system.Kernel();
@@ -107,6 +125,17 @@ void SleepThread(Core::System& system, s64 ns) {
 
     LOG_TRACE(Kernel_SVC, "called nanoseconds={}", ns);
 
+    // [OpenPak][DIAG] SleepThread isn't covered by the WaitSynchronization deadline watch --
+    // if the game's retry/timer logic sleeps a thread directly instead of waiting on an object
+    // with a timeout, this is where that would show up.
+    const bool diag_sleep = ns > 50'000'000 && IsOpenPakDeadlineWatchActive();
+    std::chrono::steady_clock::time_point diag_sleep_start{};
+    if (diag_sleep) {
+        diag_sleep_start = std::chrono::steady_clock::now();
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] SleepThread starting, requested={}ms",
+                 ns / 1'000'000);
+    }
+
     // When the input tick is positive, sleep.
     if (ns > 0) {
         // Convert the timeout from nanoseconds to ticks.
@@ -126,6 +155,14 @@ void SleepThread(Core::System& system, s64 ns) {
         // Sleep.
         // NOTE: Nintendo does not check the result of this sleep.
         static_cast<void>(GetCurrentThread(kernel).Sleep(timeout));
+
+        if (diag_sleep) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - diag_sleep_start)
+                                         .count();
+            LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] SleepThread resolved after {}ms wall-clock",
+                     elapsed_ms);
+        }
     } else if (yield_type == Svc::YieldType::WithoutCoreMigration) {
         KScheduler::YieldWithoutCoreMigration(kernel);
     } else if (yield_type == Svc::YieldType::WithCoreMigration) {

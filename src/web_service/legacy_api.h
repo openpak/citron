@@ -83,6 +83,49 @@ std::string RemoveFriend(u64 pid);
 // Pushes the console nickname so friends and games see the account's name, not "Player".
 void PushProfileName(const std::string& name);
 
+// A player as seen in the current lobby or in the recent-encounters list. The server never
+// includes an IP address in either. avatar_url identifies whether the player has a picture;
+// fetch the bytes with GetAvatarByPid, which reconstructs the request path from pid rather than
+// trusting this field as a request target.
+struct LobbyPlayer {
+    u64 pid = 0;
+    std::string name;
+    bool known = false; // false when pid isn't a known OpenPak account (can't add/report)
+    std::string avatar_url;
+    std::string friend_code;
+    bool host = false;
+    bool is_me = false;
+    std::string title_id;
+    std::string seen_at; // RFC3339 UTC; empty when not applicable (current lobby members)
+};
+
+struct Lobby {
+    bool in_lobby = false;
+    std::string title_id;
+    std::string type;
+    std::string state;      // raw label from the game server; not for display
+    std::string state_code; // "searching" | "matched" | "" if the game server didn't classify
+    u64 id = 0;
+    int count = 0;
+    int max = 0;
+    std::vector<LobbyPlayer> players;
+};
+
+// The lobby the account is in right now, and who else is in it.
+Lobby GetMyLobby();
+
+// The last players encountered online, most recent first.
+std::vector<LobbyPlayer> GetRecentPlayers();
+
+// Downloads a player's avatar (base64 JPEG). Public, unauthenticated endpoint; the account token
+// is never attached. Empty on failure or if the player has no avatar set.
+std::string GetAvatarByPid(u64 pid);
+
+// Reports a player. The server refuses if the account never actually shared a lobby with pid.
+// Returns an empty string on success, else an error code ("not_encountered", "quota", or a
+// message fit to show the user).
+std::string ReportPlayer(u64 pid, const std::string& reason, const std::string& comment);
+
 // Publishes this player's presence so friends see them online and, for titles that use it,
 // joinable. app_id is the running title id; empty when nothing is running. app_name is the
 // display name already resolved locally (e.g. from NACP) so a friend can show it even without

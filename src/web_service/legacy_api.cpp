@@ -782,9 +782,27 @@ Friend ParseFriend(const nlohmann::json& json) {
         out.app_field = std::string{reinterpret_cast<const char*>(decoded.data()), decoded.size()};
         out.app_id = presence->value("app_id", std::string{});
         out.app_name = presence->value("app_name", std::string{});
-        LOG_DEBUG(WebService, "[OpenPak] ParseFriend pid={} status={} app_field={}", out.pid,
-                 out.presence_status, Common::HexToString(decoded, false));
     }
+    // [OpenPak] TEMP: unconditional (not gated on "presence" being present) so we can see
+    // whether name/username ever actually comes back non-empty from the account server, or
+    // whether the Friends viewer's blank tiles are a server-data gap rather than a client bug.
+    LOG_DEBUG(WebService, "[OpenPak] ParseFriend pid={} name='{}' status={} app_field={}",
+             out.pid, out.name, out.presence_status, Common::HexToString(
+                 std::vector<u8>(out.app_field.begin(), out.app_field.end()), false));
+    return out;
+}
+
+LobbyPlayer ParseLobbyPlayer(const nlohmann::json& json) {
+    LobbyPlayer out;
+    out.pid = json.value("pid", u64{0});
+    out.name = json.value("name", std::string{});
+    out.known = json.value("known", false);
+    out.avatar_url = json.value("avatar_url", std::string{});
+    out.friend_code = json.value("friend_code", std::string{});
+    out.host = json.value("host", false);
+    out.is_me = json.value("is_me", false);
+    out.title_id = json.value("title_id", std::string{});
+    out.seen_at = json.value("seen_at", std::string{});
     return out;
 }
 
@@ -931,6 +949,104 @@ void PushPresence(s32 status, const std::string& app_field, const std::string& a
         return;
     }
     LOG_DEBUG(WebService, "OpenPak presence published (status={})", status);
+}
+
+Lobby GetMyLobby() {
+    Lobby out;
+
+    const std::string token = Common::OpenPakAccount::GetToken();
+    if (token.empty()) {
+        return out;
+    }
+
+    const auto result = Send("GET", "/api/my-lobby", {}, token);
+    if (ClearSessionIfRejected(result) || !result || result->status != 200) {
+        return out;
+    }
+
+    try {
+        const auto json = nlohmann::json::parse(result->body);
+        out.in_lobby = json.value("in_lobby", false);
+        if (!out.in_lobby) {
+            return out;
+        }
+        out.title_id = json.value("title_id", std::string{});
+        if (const auto lobby = json.find("lobby"); lobby != json.end()) {
+            out.type = lobby->value("type", std::string{});
+            out.state = lobby->value("state", std::string{});
+            out.state_code = lobby->value("state_code", std::string{});
+            out.id = lobby->value("id", u64{0});
+            out.count = lobby->value("count", 0);
+            out.max = lobby->value("max", 0);
+        }
+        for (const auto& entry : json.value("players", nlohmann::json::array())) {
+            out.players.push_back(ParseLobbyPlayer(entry));
+        }
+    } catch (const nlohmann::json::exception& e) {
+        LOG_WARNING(WebService, "GetMyLobby: {}", e.what());
+        out = {};
+    }
+
+    return out;
+}
+
+std::vector<LobbyPlayer> GetRecentPlayers() {
+    std::vector<LobbyPlayer> out;
+
+    const std::string token = Common::OpenPakAccount::GetToken();
+    if (token.empty()) {
+        return out;
+    }
+
+    const auto result = Send("GET", "/api/recent-players", {}, token);
+    if (ClearSessionIfRejected(result) || !result || result->status != 200) {
+        return out;
+    }
+
+    try {
+        const auto json = nlohmann::json::parse(result->body);
+        for (const auto& entry : json.value("players", nlohmann::json::array())) {
+            out.push_back(ParseLobbyPlayer(entry));
+        }
+    } catch (const nlohmann::json::exception& e) {
+        LOG_WARNING(WebService, "GetRecentPlayers: {}", e.what());
+    }
+
+    return out;
+}
+
+std::string GetAvatarByPid(u64 pid) {
+    if (pid == 0) {
+        return {};
+    }
+    // No bearer: /api/avatar is public, and the token must never leave with a request whose
+    // target could be influenced by server-supplied data. The path is built from pid alone.
+    const auto result = Send("GET", fmt::format("/api/avatar?pid={}", pid), {}, {});
+    if (!result || result->status != 200) {
+        return {};
+    }
+    return Base64StdEncode(
+        std::span<const u8>{reinterpret_cast<const u8*>(result->body.data()), result->body.size()});
+}
+
+std::string ReportPlayer(u64 pid, const std::string& reason, const std::string& comment) {
+    const std::string token = Common::OpenPakAccount::GetToken();
+    if (token.empty()) {
+        return "Not signed in.";
+    }
+    const std::string body =
+        nlohmann::json{{"target_pid", pid}, {"reason", reason}, {"comment", comment}}.dump();
+    const auto result = Send("POST", "/api/report-player", body, token);
+    if (ClearSessionIfRejected(result)) {
+        return "Your session expired. Sign in again.";
+    }
+    if (!result) {
+        return "Could not reach the OpenPak account server.";
+    }
+    if (result->status != 200) {
+        return ErrorFrom(result->body, fmt::format("Request failed (HTTP {}).", result->status));
+    }
+    return {};
 }
 
 std::optional<int> PingBackend() {

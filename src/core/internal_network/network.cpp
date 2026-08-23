@@ -603,16 +603,25 @@ bool PeekPeerHungUp(SOCKET native_fd, bool& has_pending_data) {
         return false;
     }
     if (peek_result == 0) {
+        LOG_INFO(Network, "[OpenPak][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) returned 0 "
+                           "(orderly FIN), reporting hung up", native_fd);
         return true;
     }
 
-    switch (WSAGetLastError()) {
+    const int err = WSAGetLastError();
+    switch (err) {
     case WSAECONNRESET:
     case WSAECONNABORTED:
     case WSAENETRESET:
     case WSAESHUTDOWN:
+        LOG_INFO(Network, "[OpenPak][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) failed with "
+                           "{}, reporting hung up", native_fd, err);
         return true;
     default:
+        if (err != WSAEWOULDBLOCK) {
+            LOG_INFO(Network, "[OpenPak][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) failed "
+                               "with unexpected {}, NOT reporting hung up", native_fd, err);
+        }
         return false;
     }
 }
@@ -1075,6 +1084,14 @@ Errno Socket::SetLinger(bool enable, u32 linger) {
     return SetSockOpt(fd, SO_LINGER, MakeLinger(enable, linger));
 }
 
+std::tuple<bool, u32, Errno> Socket::GetLinger() {
+    auto [value, err] = GetSockOpt<decltype(MakeLinger(false, 0))>(fd, SO_LINGER);
+    if (err != Errno::SUCCESS) {
+        return {false, 0, err};
+    }
+    return {value.l_onoff != 0, static_cast<u32>(value.l_linger), Errno::SUCCESS};
+}
+
 Errno Socket::SetReuseAddr(bool enable) {
     return SetSockOpt<u32>(fd, SO_REUSEADDR, enable ? 1 : 0);
 }
@@ -1189,18 +1206,34 @@ Errno Socket::SetNoDelay(bool enable) {
     const int result = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&value),
                                    sizeof(value));
     if (result != SOCKET_ERROR) {
+        no_delay_cache = enable;
         return Errno::SUCCESS;
     }
     return GetAndLogLastError();
 }
 
+// [OpenPak] getsockopt(IPPROTO_TCP, TCP_NODELAY) on a socket that hasn't finished connect()
+// yet can come back with a short/zero-length value on Windows (confirmed live: the length
+// check below fails on every connect cycle for this exact call). Since `value` is
+// zero-initialized, a short write there silently reports nodelay=false even right after the
+// guest set it true. Prefer the last value the guest itself set -- SetNoDelay already proved
+// it took by checking setsockopt's own return -- over a getsockopt call whose length we can't
+// trust; only fall back to the raw read if the guest never called SetNoDelay on this socket.
 std::pair<bool, Errno> Socket::GetNoDelay() {
     int value = 0;
     socklen_t len = sizeof(value);
     const int result =
         getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&value), &len);
     if (result != SOCKET_ERROR) {
-        ASSERT(len == sizeof(value));
+        if (len != sizeof(value)) {
+            if (no_delay_cache) {
+                return {*no_delay_cache, Errno::SUCCESS};
+            }
+            LOG_WARNING(Network, "getsockopt(TCP_NODELAY) returned len={} (expected {}), and no "
+                                  "prior SetNoDelay to fall back on -- reporting false",
+                        len, sizeof(value));
+            return {false, Errno::SUCCESS};
+        }
         return {value != 0, Errno::SUCCESS};
     }
     return {false, GetAndLogLastError()};

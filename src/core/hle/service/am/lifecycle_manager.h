@@ -129,6 +129,7 @@ public:
     bool IsRunnable() const;
     bool UpdateRequestedFocusState();
     void SignalSystemEventIfNeeded();
+    void ResetForRelaunch();
 
 public:
     void PushUnorderedMessage(AppletMessage message);

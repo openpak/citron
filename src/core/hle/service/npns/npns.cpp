@@ -94,9 +94,9 @@ public:
             {155, nullptr, "CreateTokenAsyncWithApplicationId"},
             {156, nullptr, "CreateTokenWithNameAsync"},
             {161, C<&INpnsSystem::GetRequestChangeStateCancelEvent>, "GetRequestChangeStateCancelEvent"},
-            {162, nullptr, "RequestChangeStateForceTimedWithCancelEvent"},
-            {201, nullptr, "RequestChangeStateForceTimed"},
-            {202, nullptr, "RequestChangeStateForceAsync"},
+            {162, C<&INpnsSystem::RequestChangeStateForceTimedWithCancelEvent>, "RequestChangeStateForceTimedWithCancelEvent"},
+            {201, C<&INpnsSystem::RequestChangeStateForceTimed>, "RequestChangeStateForceTimed"},
+            {202, C<&INpnsSystem::RequestChangeStateForceAsync>, "RequestChangeStateForceAsync"},
             {203, nullptr, "UnknownCmd203"},
             {301, nullptr, "GetPassword"},
             {302, nullptr, "GetAllImmigration"},
@@ -147,6 +147,27 @@ private:
     Result GetRequestChangeStateCancelEvent(OutCopyHandle<Kernel::KEvent> out_event) {
         LOG_INFO(Service_NPNS, "called");
         *out_event = get_request_change_state_cancel_event;
+        R_SUCCEED();
+    }
+
+    // [OpenPak] These three were nullptr, which throws a guest-visible fatal (2010-0212) rather
+    // than a normal IPC error -- QLaunch's "Update" button on the Friends viewer calls this
+    // family to force an immediate push-service state refresh, so pressing it threw an error
+    // dialog every time. citron has no real push-notification backend behind this yet, so this
+    // is a plain success stub like the other unknown-signature NPNS commands above, not a full
+    // implementation -- it just stops the crash rather than driving a real state change.
+    Result RequestChangeStateForceTimedWithCancelEvent() {
+        LOG_WARNING(Service_NPNS, "(STUBBED) called");
+        R_SUCCEED();
+    }
+
+    Result RequestChangeStateForceTimed() {
+        LOG_WARNING(Service_NPNS, "(STUBBED) called");
+        R_SUCCEED();
+    }
+
+    Result RequestChangeStateForceAsync() {
+        LOG_WARNING(Service_NPNS, "(STUBBED) called");
         R_SUCCEED();
     }
 

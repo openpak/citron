@@ -154,6 +154,7 @@ private:
     std::shared_ptr<Network::SocketBase> socket;
     bool did_handshake = false;
     u32 verify_option = 0;
+    std::vector<std::string> requested_alpn_protos; // set via SetNextAlpnProto, see DoHandshakeImpl
 
     // fd's owning bsd:* port isn't known here; probe each instead of assuming "bsd:u".
     std::shared_ptr<Service::Sockets::BSD> FindBsdServiceOwning(s32 fd) {
@@ -241,7 +242,7 @@ private:
 
     Result DoHandshakeImpl() {
         ASSERT_OR_EXECUTE(!did_handshake && socket, { return ResultNoSocket; });
-        Result res = backend->DoHandshake();
+        Result res = backend->DoHandshake(requested_alpn_protos);
         did_handshake = res.IsSuccess();
         return res;
     }
@@ -587,7 +588,20 @@ private:
     void SetNextAlpnProto(HLERequestContext& ctx) {
         const auto alpn_data = ctx.ReadBuffer();
 
-        LOG_WARNING(Service_SSL, "(STUBBED) called, alpn_data_size={}", alpn_data.size());
+        // [OpenPak] Wire format: repeated [1-byte len][name]. Passed to DoHandshakeImpl.
+        requested_alpn_protos.clear();
+        size_t pos = 0;
+        while (pos < alpn_data.size()) {
+            const u8 len = alpn_data[pos++];
+            if (len == 0 || pos + len > alpn_data.size()) {
+                break;
+            }
+            requested_alpn_protos.emplace_back(reinterpret_cast<const char*>(alpn_data.data() + pos), len);
+            pos += len;
+        }
+
+        LOG_INFO(Service_SSL, "called, alpn_data_size={}, parsed {} protocol(s)", alpn_data.size(),
+                 requested_alpn_protos.size());
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
@@ -1138,13 +1152,19 @@ private:
         Out<u32> out_size, InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
         LOG_INFO(Service_SSL, "called");
         u32 num_entries;
-        R_RETURN(cert_store.GetCertificateBufSize(out_size, &num_entries, certificate_ids));
+        Result res = cert_store.GetCertificateBufSize(out_size, &num_entries, certificate_ids);
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificateBufSize -> size={} num_entries={} requested_ids={}",
+                 *out_size, num_entries, certificate_ids.size());
+        R_RETURN(res);
     }
 
     Result GetCertificates(Out<u32> out_num_entries, OutBuffer<BufferAttr_HipcMapAlias> out_buffer,
                            InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
         LOG_INFO(Service_SSL, "called");
-        R_RETURN(cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids));
+        Result res = cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids);
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificates -> num_entries={} requested_ids={}",
+                 *out_num_entries, certificate_ids.size());
+        R_RETURN(res);
     }
 
     void SetDebugOption(HLERequestContext& ctx) {
@@ -1331,13 +1351,19 @@ private:
         Out<u32> out_size, InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
         LOG_INFO(Service_SSL, "called");
         u32 num_entries;
-        R_RETURN(cert_store.GetCertificateBufSize(out_size, &num_entries, certificate_ids));
+        Result res = cert_store.GetCertificateBufSize(out_size, &num_entries, certificate_ids);
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificateBufSize -> size={} num_entries={} requested_ids={}",
+                 *out_size, num_entries, certificate_ids.size());
+        R_RETURN(res);
     }
 
     Result GetCertificates(Out<u32> out_num_entries, OutBuffer<BufferAttr_HipcMapAlias> out_buffer,
                            InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
         LOG_INFO(Service_SSL, "called");
-        R_RETURN(cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids));
+        Result res = cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids);
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificates -> num_entries={} requested_ids={}",
+                 *out_num_entries, certificate_ids.size());
+        R_RETURN(res);
     }
 
     void GetContextCount(HLERequestContext& ctx) {

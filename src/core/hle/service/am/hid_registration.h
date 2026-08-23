@@ -24,6 +24,7 @@ public:
     explicit HidRegistration(Core::System& system, Process& process);
     ~HidRegistration();
 
+    void RegisterCurrentProcess();
     void EnableAppletToGetInput(bool enable);
 
 private:

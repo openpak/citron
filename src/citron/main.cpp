@@ -2567,7 +2567,11 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     // codes/activation for this title alone. Citron's own prior check here only looked at
     // PatchType::Mod; cheats live in a separate PatchManager::GetCheats() list entirely and
     // were never checked, so a cheat could still be active while this dialog reported "clean".
-    if (title_id == 0x0100C2500FC20000ULL) {
+    const bool legacy_production_active =
+        Settings::values.enable_legacy.GetValue() &&
+        Settings::values.legacy_server_ip.GetValue() ==
+            Settings::values.legacy_server_ip.GetDefault();
+    if (title_id == 0x0100C2500FC20000ULL && legacy_production_active) {
         const FileSys::PatchManager pm{title_id, system->GetFileSystemController(),
                                        system->GetContentProvider()};
         QStringList active_mods;

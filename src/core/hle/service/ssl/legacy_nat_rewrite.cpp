@@ -277,9 +277,18 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
             return false; // Register(1) / ReplaceURL(7) only
         }
     } else {
-        // MatchmakeExtension(0x6D): CreateMatchmakeSessionWithParam(0x26) / JoinMatchmakeSessionWithParam(0x27) only.
-        if (method != 0x26 && method != 0x27) {
-            LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: MatchmakeExtension method 0x{:x} not Create/Join",
+        // MatchmakeExtension(0x6D): CreateMatchmakeSessionWithParam(0x26) / JoinMatchmakeSessionWithParam(0x27) /
+        // AutoMatchmakeWithParam(0x28) only. AutoMatchmakeWithParam was missing here even though it's the method
+        // "Global Games"/auto-matchmake actually uses -- every real join in this org's testing goes through 0x28,
+        // never 0x26/0x27 directly, so the station embedded in that call never got its private LAN address
+        // corrected to this console's real external IP. The base connection's station (via Register/ReplaceURL
+        // above) still gets fixed up, which is why basic connectivity and one side's hole-punch kept working --
+        // but whichever side's session got created via AutoMatchmakeWithParam advertised an uncorrected private
+        // address for that specific session, so the other side's punch back to them had nothing reachable to aim
+        // at. Confirmed 2026-08-19: server logs show every matchmake call in every test as proto=0x6d method=40
+        // (0x28), and the host side consistently never completes its NAT report -- exactly this gap.
+        if (method != 0x26 && method != 0x27 && method != 0x28) {
+            LOG_INFO(Service_SSL, "[OpenPak] [diag2] reject: MatchmakeExtension method 0x{:x} not Create/Join/AutoMatchmake",
                      method);
             return false;
         }
@@ -290,7 +299,8 @@ bool TryFixupStationAddress(std::span<const u8> input, std::vector<u8>& output) 
     const char* method_name = protocol == 0x0B
                                   ? (method == 0x1 ? "SecureConnection.Register" : "SecureConnection.ReplaceURL")
                                   : (method == 0x26 ? "MatchmakeExtension.CreateMatchmakeSessionWithParam"
-                                                    : "MatchmakeExtension.JoinMatchmakeSessionWithParam");
+                                                    : method == 0x27 ? "MatchmakeExtension.JoinMatchmakeSessionWithParam"
+                                                                     : "MatchmakeExtension.AutoMatchmakeWithParam");
     // TEMPORARY DIAGNOSTIC: confirm this packet type is actually being intercepted at all,
     // independent of whether any station inside it needs rewriting.
     LOG_INFO(Service_SSL, "[OpenPak] [diag] intercepted outgoing {} ({} byte body)", method_name,

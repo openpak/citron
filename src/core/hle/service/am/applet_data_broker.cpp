@@ -21,6 +21,13 @@ void AppletStorageChannel::Push(std::shared_ptr<IStorage> storage) {
     m_event.Signal();
 }
 
+void AppletStorageChannel::Unpop(std::shared_ptr<IStorage> storage) {
+    std::scoped_lock lk{m_lock};
+
+    m_data.emplace_front(std::move(storage));
+    m_event.Signal();
+}
+
 Result AppletStorageChannel::Pop(std::shared_ptr<IStorage>* out_storage) {
     std::scoped_lock lk{m_lock};
 

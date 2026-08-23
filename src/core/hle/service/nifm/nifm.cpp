@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstring>
+#include "common/cityhash.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -277,15 +279,44 @@ public:
         event1 = CreateKEvent(service_context, "IRequest:Event1");
         event2 = CreateKEvent(service_context, "IRequest:Event2");
         state = RequestState::Free;
+
+        // [OpenPak] ResolveState() (and the event1->Signal() it can trigger via UpdateState)
+        // previously only ever ran as a side effect of the GUEST calling GetRequestState/
+        // GetResult/Submit again. A title that creates this request, grabs event1's handle, and
+        // just waits on it -- exactly the point of an event-based readiness API, avoiding polling
+        // -- would see event1 signal at most once (whatever ResolveState() happened to observe at
+        // the last explicit call) and never again, even though the real network state can still
+        // change afterward. Confirmed live: Splatoon 3's own NPLN-readiness worker thread spins a
+        // timeout=0 WaitSynchronization probe on this exact event every ~16ms, forever, without
+        // ever re-invoking any IRequest method -- so it can only ever be woken by something
+        // proactively re-checking network state in the background, which nothing did. Poll every
+        // 100ms (plenty responsive for a state that changes on the order of seconds, nowhere near
+        // hot-path frequency) for the lifetime of this request and signal whenever it actually
+        // changes, matching what a real console's nifm does continuously regardless of whether the
+        // application is actively querying it.
+        state_poll_event = Core::Timing::CreateEvent(
+            "IRequest::StatePoll", [this](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+                std::scoped_lock lk{state_lock};
+                ResolveState();
+                return std::nullopt;
+            });
+        system.CoreTiming().ScheduleLoopingEvent(std::chrono::milliseconds(100),
+                                                 std::chrono::milliseconds(100), state_poll_event);
     }
 
     ~IRequest() override {
+        system.CoreTiming().UnscheduleEvent(state_poll_event);
         service_context.CloseEvent(event1);
         service_context.CloseEvent(event2);
     }
 
 private:
     // Resolves immediately; parking in OnHold made titles that poll GetRequestState hang.
+    // [OpenPak] Callable from either the IPC-dispatch thread (guest calling GetRequestState/
+    // GetResult/Submit) or the CoreTiming thread (state_poll_event above) -- state_lock (held by
+    // every caller, see LockService()'s own class comment about exactly this CoreTiming-thread
+    // access pattern) keeps the read-modify-write of `state` and the event signal consistent
+    // between the two.
     RequestState ResolveState() {
         const auto new_state = Network::GetHostIPv4Address().has_value() ? RequestState::Accepted
                                                                         : RequestState::Free;
@@ -296,6 +327,7 @@ private:
     }
 
     void Submit(HLERequestContext& ctx) {
+        std::scoped_lock lk{state_lock};
         LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(ResolveState()));
 
         IPC::ResponseBuilder rb{ctx, 2};
@@ -303,6 +335,7 @@ private:
     }
 
     void GetRequestState(HLERequestContext& ctx) {
+        std::scoped_lock lk{state_lock};
         const auto current = ResolveState();
 
         LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(current));
@@ -323,6 +356,7 @@ private:
     }
 
     void GetResult(HLERequestContext& ctx) {
+        std::scoped_lock lk{state_lock};
         const auto current = ResolveState();
         const auto result = current == RequestState::Accepted ? ResultSuccess
                                                              : ResultNetworkCommunicationDisabled;
@@ -375,6 +409,16 @@ private:
     void UpdateState(RequestState new_state) {
         state = new_state;
         event1->Signal();
+        // [OpenPak] event2 (the second handle GetSystemEventReadableHandles hands the guest) was
+        // never signaled anywhere in this file -- a title that waits on it instead of/alongside
+        // event1 would wait forever, no matter what the real network state is. Confirmed live:
+        // Splatoon 3's own NPLN-readiness worker thread polls exactly this shape of never-signaled
+        // event (timeout=0 WaitSynchronization probe, every ~16ms, forever) while event1's own
+        // state transition (this same call, moments earlier from Submit()/GetRequestState())
+        // already correctly resolved to Accepted. Signal both on every state change until the
+        // real, distinct semantics for event2 are known -- strictly better than never firing it at
+        // all, and safe: a spurious extra wake on an already-satisfied wait is harmless.
+        event2->Signal();
     }
 
     void SetRequirement(HLERequestContext& ctx) {
@@ -501,6 +545,8 @@ private:
     KernelHelpers::ServiceContext service_context;
 
     RequestState state;
+    std::mutex state_lock;
+    std::shared_ptr<Core::Timing::EventType> state_poll_event;
 
     Kernel::KEvent* event1;
     Kernel::KEvent* event2;
@@ -546,7 +592,7 @@ void IGeneralService::CreateRequest(HLERequestContext& ctx) {
 }
 
 void IGeneralService::GetCurrentNetworkProfile(HLERequestContext& ctx) {
-    LOG_WARNING(Service_NIFM, "(STUBBED) called");
+    LOG_DEBUG(Service_NIFM, "called");
 
     const auto net_iface = Network::GetSelectedNetworkInterface();
 
@@ -555,7 +601,15 @@ void IGeneralService::GetCurrentNetworkProfile(HLERequestContext& ctx) {
             return SfNetworkProfileData{};
         }
 
-        return SfNetworkProfileData{
+        const u64 name_hash = Common::CityHash64(net_iface->name.data(), net_iface->name.size());
+        const std::string ssid = "citron-" + net_iface->name;
+
+        const auto to_array = [](auto& array, const std::string& value) {
+            const size_t count = std::min(value.size(), array.size());
+            std::memcpy(array.data(), value.data(), count);
+        };
+
+        SfNetworkProfileData data{
             .ip_setting_data{
                 .ip_address_setting{
                     .is_automatic{true},
@@ -580,14 +634,13 @@ void IGeneralService::GetCurrentNetworkProfile(HLERequestContext& ctx) {
                 },
                 .mtu{1500},
             },
-            .uuid{0xdeadbeef, 0xdeadbeef},
-            .network_name{"citron Network"},
-            .wireless_setting_data{
-                .ssid_length{12},
-                .ssid{"citron Network"},
-                .passphrase{"citronpassword"},
-            },
+            .uuid{name_hash, name_hash},
         };
+        to_array(data.network_name, ssid);
+        data.wireless_setting_data.ssid_length = static_cast<u8>(std::min(ssid.size(), size_t{32}));
+        to_array(data.wireless_setting_data.ssid, ssid);
+        to_array(data.wireless_setting_data.passphrase, std::string{"citron00000000"});
+        return data;
     }();
 
     // When we're connected to a room, spoof the hosts IP address

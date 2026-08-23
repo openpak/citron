@@ -26,6 +26,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_process_page_table.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/sfdnsres.h"
@@ -388,6 +389,10 @@ public:
         return Network::Errno::SUCCESS;
     }
 
+    std::tuple<bool, u32, Network::Errno> GetLinger() override {
+        return {false, 0, Network::Errno::SUCCESS};
+    }
+
     Network::Errno SetReuseAddr(bool) override {
         return Network::Errno::SUCCESS;
     }
@@ -668,10 +673,12 @@ void BSD::Poll(HLERequestContext& ctx) {
     // live guest memory now, which another IPC call could have reused in the meantime.
     std::vector<u8> read_buffer;
     bool had_snapshot = false;
+    std::optional<std::chrono::steady_clock::time_point> existing_deadline;
     {
         std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
         if (const auto it = deferred_poll_snapshots.find(&ctx); it != deferred_poll_snapshots.end()) {
-            read_buffer = it->second;
+            read_buffer = it->second.read_buffer;
+            existing_deadline = it->second.deadline;
             had_snapshot = true;
         }
     }
@@ -680,20 +687,31 @@ void BSD::Poll(HLERequestContext& ctx) {
         read_buffer.assign(live_buffer.begin(), live_buffer.end());
     }
 
-    // [OpenPak] See sockets.h's SetBsdDeferralEvent declaration comment. Deliberately scoped
-    // to an infinite wait only (timeout == -1): deferring re-checks with a fresh timeout=0
-    // probe each retry rather than tracking how much of the original wait has elapsed, so
-    // deferring a *bounded* wait would silently turn it into an unbounded one and break a
-    // title that relies on the timeout itself (a periodic heartbeat/backoff loop, say). An
-    // infinite wait has no deadline to violate -- deferred-until-signaled is exactly equivalent
-    // to blocked-until-ready, just without pinning a BSD worker thread the whole time. Also
-    // requires an eventfd in the set and a deferral event to wait on; an ordinary title's poll
-    // (no eventfd, e.g. Splatoon 2/MK8/SSBU) is untouched and still blocks exactly as before,
-    // matching Ryujinx-Reference's own NEX-vs-gRPC split for this same failure.
-    if (timeout == -1 && GetBsdDeferralEvent() != nullptr &&
+    // [OpenPak] See sockets.h's SetBsdDeferralEvent declaration comment. Covers any nonzero
+    // timeout (matching Ryujinx-Reference's own `timeout != 0` condition), not just an infinite
+    // one -- a bounded wait's own deadline is tracked in DeferredPollState and enforced below on
+    // each re-check, so deferring it can't silently turn it into an unbounded wait. Also requires
+    // an eventfd in the set and a deferral event to wait on; an ordinary title's poll (no eventfd,
+    // e.g. Splatoon 2/MK8/SSBU) is untouched and still blocks exactly as before, matching
+    // Ryujinx-Reference's own NEX-vs-gRPC split for this same failure.
+    if (timeout != 0 && GetBsdDeferralEvent() != nullptr &&
         PollSetIncludesEventFd(read_buffer, nfds)) {
         std::vector<u8> write_buffer(ctx.GetWriteBufferSize());
         auto [ret, bsd_errno] = PollImpl(write_buffer, read_buffer, nfds, /*timeout=*/0);
+
+        // [OpenPak] Deadline expired while nothing became ready -- report ETIMEDOUT instead of
+        // deferring again, exactly like a real bounded poll() would once its time is up.
+        if (ret == 0 && bsd_errno == Errno::SUCCESS && existing_deadline &&
+            std::chrono::steady_clock::now() >= *existing_deadline) {
+            std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+            deferred_poll_snapshots.erase(&ctx);
+            IPC::ResponseBuilder rb{ctx, 4};
+            rb.Push(ResultSuccess);
+            rb.Push<s32>(0);
+            rb.PushEnum(Errno::SUCCESS);
+            return;
+        }
+
         if (ret == 0 && bsd_errno == Errno::SUCCESS) {
             // Nothing ready yet -- give up this thread instead of blocking it, so BSD's other
             // worker threads (and this one) stay free to service the eventfd Write() IPC that
@@ -701,7 +719,11 @@ void BSD::Poll(HLERequestContext& ctx) {
             // (re-parsing the same, still-buffered request) whenever the deferral event fires.
             if (!had_snapshot) {
                 std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
-                deferred_poll_snapshots[&ctx] = read_buffer;
+                const auto deadline = timeout == -1
+                                          ? std::optional<std::chrono::steady_clock::time_point>{}
+                                          : std::optional{std::chrono::steady_clock::now() +
+                                                           std::chrono::milliseconds(timeout)};
+                deferred_poll_snapshots[&ctx] = DeferredPollState{read_buffer, deadline};
             }
             LOG_DEBUG(Service, "[OpenPak] Poll deferred (nfds={} timeout={}), eventfd in set",
                       nfds, timeout);
@@ -880,6 +902,20 @@ void BSD::Shutdown(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. fd={} how={}", fd, how);
 
+    // [OpenPak][DIAG] Real guest call stack at the exact moment Shutdown() is called, for the
+    // socket that had its first ClientHello sent (sni_injected) -- to see which guest code
+    // actually makes this decision, directly, instead of inferring it from timing/absence of
+    // other activity.
+    if (IsFileDescriptorValid(fd) && file_descriptors[fd]->sni_injected) {
+        const auto backtrace = Core::GetBacktrace(&ctx.GetThread());
+        std::string trace_str;
+        for (const auto& entry : backtrace) {
+            trace_str += fmt::format("\n    {}+0x{:x} ({})", entry.module, entry.offset, entry.name);
+        }
+        LOG_INFO(Service, "[OpenPak][DIAG] Shutdown fd={} how={} guest backtrace:{}", fd, how,
+                 trace_str);
+    }
+
     BuildErrnoResponse(ctx, ShutdownImpl(fd, how));
 }
 
@@ -965,16 +1001,67 @@ void BSD::Read(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. fd={} len={}", fd, ctx.GetWriteBufferSize());
 
-    // [OpenPak] This was an unconditional stub returning ret=0/errno=0 -- i.e. "0 bytes, no
-    // error" -- for every fd, every time. That's indistinguishable from a real recv()'s EOF
-    // (peer/self-pipe closed), which is exactly what Splatoon 3's gRPC calls this on: its own
-    // wakeup eventfd (see EventFd()'s comment -- a real, pollable loopback UDP socket, not a
-    // synthetic counter), draining it once every retry cycle (measured: fd=1, len=8, on a
-    // perfectly steady ~5s cadence matching this title's outer connect-retry loop exactly).
-    // Reporting a fake EOF on that self-pipe every single cycle plausibly reads to gRPC as "my
-    // own wakeup channel just died", which is as good a reason as any to tear the whole
-    // connection down and start over -- regardless of how far the handshake on the *other*
-    // socket actually got. read() has no flags of its own; this is just recv(fd, buf, len, 0).
+    // [OpenPak] Real eventfd_read() drains one coalesced counter. This backing socket queues
+    // each Write() as its own datagram instead, so a single Read() only pops one of several
+    // pending signals, leaving the fd spuriously still-readable. Drain and sum them all here to
+    // match real eventfd semantics.
+    if (IsFileDescriptorValid(fd) && file_descriptors[fd]->is_eventfd) {
+        u64 total = 0;
+        s32 drained = 0;
+        Errno last_errno = Errno::SUCCESS;
+        for (int i = 0; i < 1024; ++i) {
+            // [OpenPak] Only the FIRST read may legitimately block -- a guest that calls Read()
+            // without polling first is entitled to wait for at least one value, matching real
+            // eventfd_read() semantics. Every read after that is purely this loop's own
+            // speculative "is there already more queued" check: RecvImpl(fd, 0, ...) doesn't
+            // force non-blocking here (no FLAG_MSG_DONTWAIT, and EventFd() never sets the
+            // backing socket non-blocking either), so without this guard a drain attempt past
+            // the last pending datagram calls a genuinely blocking recv() and hangs whichever
+            // BSD worker thread is running it. Confirmed live: this was the last socket-layer
+            // event before an ~19s stall, with Recv/RecvMMsg on Splatoon 3's TLS socket never
+            // running again for the rest of that connection attempt.
+            if (i > 0) {
+                std::vector<Network::PollFD> peek_fds{Network::PollFD{
+                    .socket = file_descriptors[fd]->socket.get(),
+                    .events = Network::PollEvents::In,
+                    .revents = Network::PollEvents{},
+                }};
+                const auto [peek_ret, peek_errno] = Network::Poll(peek_fds, 0);
+                if (peek_ret <= 0 || peek_errno != Network::Errno::SUCCESS ||
+                    False(peek_fds[0].revents & Network::PollEvents::In)) {
+                    break;
+                }
+            }
+            std::vector<u8> chunk(sizeof(u64));
+            const auto [chunk_ret, chunk_errno] = RecvImpl(fd, 0, chunk);
+            if (chunk_ret != sizeof(u64)) {
+                last_errno = chunk_errno;
+                break;
+            }
+            u64 value;
+            std::memcpy(&value, chunk.data(), sizeof(value));
+            total += value;
+            ++drained;
+        }
+
+        IPC::ResponseBuilder rb{ctx, 4};
+        if (drained > 0) {
+            std::vector<u8> message(sizeof(u64));
+            std::memcpy(message.data(), &total, sizeof(total));
+            ctx.WriteBuffer(message);
+            LOG_DEBUG(Service, "[OpenPak] eventfd fd={} Read coalesced {} pending write(s) into {}",
+                     fd, drained, total);
+            rb.Push(ResultSuccess);
+            rb.Push<s32>(sizeof(u64));
+            rb.PushEnum(Errno::SUCCESS);
+        } else {
+            rb.Push(ResultSuccess);
+            rb.Push<s32>(-1);
+            rb.PushEnum(last_errno);
+        }
+        return;
+    }
+
     std::vector<u8> message(ctx.GetWriteBufferSize());
     const auto [ret, bsd_errno] = RecvImpl(fd, 0, message);
     ctx.WriteBuffer(message);
@@ -1267,6 +1354,14 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
         entry.socket = file_descriptors[fds[i].fd]->socket.get();
         entry.events = Translate(fds[i].events);
         entry.revents = Network::PollEvents{};
+        // [OpenPak] gRPC polls its wakeup eventfd with a zero event mask (valid POSIX: normally
+        // means "only tell me about errors"), but expects readability to be reported anyway once
+        // it writes that eventfd. Matches Ryujinx-Reference's EventFileDescriptorPollManager fix
+        // for the same grpc behavior -- without it this poll never reports ready and grpc's
+        // wakeup loop stalls.
+        if (entry.events == Network::PollEvents{} && file_descriptors[fds[i].fd]->is_eventfd) {
+            entry.events |= Network::PollEvents::In;
+        }
         host_pollfds.push_back(entry);
     }
 
@@ -1293,6 +1388,19 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
             }
         }
         fds[i].revents = Translate(host_pollfds[j].revents);
+    }
+
+    for (size_t i = 0; i < fds.size(); ++i) {
+        if (fds[i].fd < 0 || fds[i].fd > static_cast<s32>(MAX_FD)) {
+            continue;
+        }
+        const auto& d = file_descriptors[fds[i].fd];
+        if (d && d->sni_injected) {
+            LOG_INFO(Service,
+                     "[OpenPak][DIAG] Poll fd={} requested_events={:#x} revents={:#x} timeout={}",
+                     fds[i].fd, static_cast<u16>(fds[i].events), static_cast<u16>(fds[i].revents),
+                     timeout);
+        }
     }
 
     s32 real_count = 0;
@@ -1565,6 +1673,8 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
         LOG_ERROR(Service, "Connect fd={} failed with errno={}", fd, static_cast<int>(result));
     } else {
         LOG_INFO(Service, "Connect fd={} succeeded", fd);
+        // [OpenPak][DIAG] See connect_success_time's declaration comment in bsd.h.
+        file_descriptors[fd]->connect_success_time = std::chrono::steady_clock::now();
     }
     return result;
 }
@@ -1670,8 +1780,17 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
     }
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
-        LOG_WARNING(Service, "(STUBBED) Unknown getsockopt level={}, returning INVAL", level);
-        return Errno::INVAL;
+        // [OpenPak] SetSockOptImpl already tolerates any level it doesn't specifically implement
+        // (returns SUCCESS, matching Ryujinx-Reference's own generic tolerant fallback) -- this must
+        // do the same rather than INVAL, or a title that sets an option at some other level (e.g.
+        // IPPROTO_IPV6 on a dual-stack socket) and reads it straight back to confirm sees a set-ok/
+        // get-fails mismatch. Ryujinx-Reference's own comment on this exact asymmetry: "grpc-core
+        // sets TCP_NODELAY / SO_REUSEADDR / etc. and reads them straight back; a set-ok / get-
+        // EOPNOTSUPP mismatch made it close before connect." Echo back zeroed bytes of the
+        // requested size rather than failing outright.
+        LOG_WARNING(Service, "(STUBBED) Unknown getsockopt level={}, echoing zeroed value", level);
+        std::ranges::fill(optval, 0);
+        return Errno::SUCCESS;
     }
 
     Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
@@ -1691,6 +1810,34 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
         }
         return Translate(getsockopt_err);
     };
+
+    // [OpenPak] optname=0x80000001 is never actually applied to the real socket (see
+    // SetSockOptImpl) -- echo back whatever bytes were "set", matching Ryujinx-Reference's
+    // _feignedSockOpts behavior, instead of querying the real (untouched) socket's linger state.
+    if (static_cast<u32>(optname) == 0x80000001) {
+        const auto& descriptor = *file_descriptors[fd];
+        optval.resize(8);
+        if (descriptor.vendor_linger_feigned) {
+            std::memcpy(optval.data(), descriptor.vendor_linger_feigned->data(), 8);
+        } else {
+            std::ranges::fill(optval, 0);
+        }
+        return Errno::SUCCESS;
+    }
+
+    // [OpenPak] SO_LINGER. A title that sets this and reads it back to confirm it took
+    // previously got INVAL, same failure class as the TCP_NODELAY/REUSEADDR gaps above.
+    if (optname == OptName::LINGER) {
+        auto [onoff, linger, getsockopt_err] = socket->GetLinger();
+        if (getsockopt_err == Network::Errno::SUCCESS) {
+            ASSERT_OR_EXECUTE_MSG(
+                optval.size() == sizeof(Linger), { return Errno::INVAL; },
+                "Incorrect getsockopt option size");
+            optval.resize(sizeof(Linger));
+            PutValue(optval, Linger{.onoff = onoff ? 1u : 0u, .linger = linger});
+        }
+        return Translate(getsockopt_err);
+    }
 
     switch (optname) {
     case OptName::ERROR_: {
@@ -1740,28 +1887,26 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
         return Errno::SUCCESS;
     }
 
-    Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
+    FileDescriptor& descriptor = *file_descriptors[fd];
+    Network::SocketBase* const socket = descriptor.socket.get();
 
-    // [OpenPak] optname=0x80000001 (SO_VENDOR+1, undocumented in public libnx headers) is
-    // Splatoon 3's NPLN/gRPC stack's own vendor-private setsockopt, called once right after
-    // every connect with an 8-byte payload -- exactly sizeof(Linger). Decoded live (see the
-    // byte-dump diagnostic above this in git blame/history): bytes were
-    // `01 00 00 00 02 00 00 00`, i.e. two little-endian u32s (1, 2) -- onoff=1, linger=2
-    // interpreted as a Linger struct, which are sane, plausible SO_LINGER values (enabled,
-    // 2-second timeout), not garbage. Previously this fell through to the generic stub
-    // (accepted, logged, discarded) -- meaning any actual linger-on-close semantics the game
-    // asked for were silently never applied. Treating it as Nintendo's proprietary spelling of
-    // SO_LINGER and actually applying it: if that guess is right, a real closed-gracefully
-    // window on Shutdown()/Close() may be what the game's higher-level protocol logic is
-    // depending on (it does an abrupt Shutdown()+Close() within a few ms of its own last send
-    // in every observed connect cycle -- see project memory for the trace). If this optname
-    // ever turns out NOT to carry Linger semantics for some other title, this needs
-    // restricting to something more specific than "any 8-byte 0x80000001" (e.g. gate on the
-    // NPLN/gRPC redirect path only) -- not expected to collide today since no other known
-    // title's socket traffic goes through this code path.
-    const bool is_vendor_linger_alias =
-        static_cast<u32>(optname) == 0x80000001 && optval.size() == sizeof(Linger);
-    if (optname == OptName::LINGER || is_vendor_linger_alias) {
+    // [OpenPak] optname=0x80000001 (undocumented in public libnx headers) is Splatoon 3's
+    // NPLN/gRPC stack's own vendor-private setsockopt, called once right after every connect
+    // with an 8-byte payload. A prior guess treated this as Nintendo's proprietary spelling of
+    // SO_LINGER and applied it for real (onoff=1, 2s timeout) -- but Ryujinx-Reference's own
+    // working reference implementation (ManagedSocket.SetSocketOption) does the opposite: an
+    // option that doesn't validate against its known BsdSocketOption table is fed straight to
+    // its generic tolerant fallback, which remembers the bytes for getsockopt to echo back but
+    // never calls the real socket's SetSocketOption at all. Match that here: stash the bytes so
+    // GetSockOptImpl can echo them back, but never touch the real socket's linger state.
+    if (static_cast<u32>(optname) == 0x80000001) {
+        std::array<u8, 8> stored{};
+        std::memcpy(stored.data(), optval.data(), std::min(optval.size(), stored.size()));
+        descriptor.vendor_linger_feigned = stored;
+        return Errno::SUCCESS;
+    }
+
+    if (optname == OptName::LINGER) {
         if (optval.size() != sizeof(Linger)) {
             LOG_WARNING(Service, "LINGER optval size mismatch: expected {}, got {}", sizeof(Linger),
                         optval.size());
@@ -1771,13 +1916,6 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
         if (linger.onoff != 0 && linger.onoff != 1) {
             LOG_WARNING(Service, "Invalid LINGER onoff value: {}", linger.onoff);
             return Errno::INVAL;
-        }
-
-        if (is_vendor_linger_alias) {
-            LOG_INFO(Service,
-                     "[OpenPak] Treating vendor optname=0x80000001 as SO_LINGER alias: "
-                     "onoff={} linger={}",
-                     linger.onoff, linger.linger);
         }
         return Translate(socket->SetLinger(linger.onoff != 0, linger.linger));
     }
@@ -1863,6 +2001,21 @@ Errno BSD::ShutdownImpl(s32 fd, s32 how) {
     }
     if (!file_descriptors[fd]->socket)
         return Errno::BADF;
+
+    // [OpenPak][DIAG] How long did this connection actually live before the guest gave up on
+    // it? Logged unconditionally (not gated on sni_injected/deadline-watch) so it's visible on
+    // whichever fd actually calls Shutdown, checking for a correlation with a round-number
+    // wall-clock deadline (grpc-core's deadline_filter is wall-clock-based).
+    if (const auto& t0 = file_descriptors[fd]->connect_success_time) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - *t0)
+                                     .count();
+        LOG_INFO(Service,
+                 "[OpenPak][DIAG] Shutdown fd={} how={} -- {}ms since Connect() succeeded on "
+                 "this fd",
+                 fd, how, elapsed_ms);
+    }
+
     const Network::ShutdownHow host_how = Translate(static_cast<ShutdownHow>(how));
     return Translate(file_descriptors[fd]->socket->Shutdown(host_how));
 }
@@ -1894,6 +2047,27 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
 
     auto [ret, bsd_errno] = Translate(descriptor.socket->Recv(flags, message));
 
+    if (descriptor.sni_injected) {
+        LOG_INFO(Service, "[OpenPak][DIAG] Recv fd={} requested={} ret={} errno={}", fd,
+                 message.size(), ret, static_cast<int>(bsd_errno));
+    }
+
+    // [OpenPak] awaiting_reply is meant as a one-shot grace period for the *next* would-block
+    // recv() right after a send -- but it was only ever consumed in the AGAIN branch below. If
+    // that next recv() instead succeeds immediately (the common case: a whole TLS flight already
+    // sitting in the kernel buffer, e.g. ServerHello+Certificate+ServerKeyExchange+ServerHelloDone
+    // arriving as one read), the flag survived untouched and stayed armed for whatever recv() came
+    // *after* that -- a routine "anything else?" follow-up call with genuinely nothing pending --
+    // forcing an unrelated, fully wasted 250ms block on a thread the guest's own gRPC deadline is
+    // timing against. Measured directly: this exact leak burned 250ms of a 731ms connect-to-
+    // shutdown budget on one connection, right where a working capture (Ryujinx-Reference, same
+    // server, same handshake) completes the whole sequence in ~350ms. A successful recv already
+    // means the wait condition this flag exists for has been satisfied -- clear it here so it
+    // can't leak into an unrelated later call.
+    if (ret > 0) {
+        descriptor.awaiting_reply = false;
+    }
+
     // [OpenPak] Splatoon 3's gRPC stack sends its TLS ClientKeyExchange/ChangeCipherSpec/
     // Finished flight, does exactly ONE opportunistic non-blocking recv() a fraction of a
     // millisecond later, and -- finding nothing, since no real network reply can possibly
@@ -1908,18 +2082,35 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
     // (i.e. only ever an actual OpenPak redirect, never an unrelated title's own socket), give
     // a would-block recv() one bounded blocking wait for real data before honoring it, so the
     // server's already-in-flight reply has an actual chance to arrive first.
-    if (bsd_errno == Errno::AGAIN && descriptor.sni_injected) {
+    //
+    if (bsd_errno == Errno::AGAIN && descriptor.sni_injected && descriptor.awaiting_reply) {
+        descriptor.awaiting_reply = false;
         std::vector<Network::PollFD> wait_fds{Network::PollFD{
             .socket = descriptor.socket.get(),
             .events = Network::PollEvents::In,
             .revents = Network::PollEvents{},
         }};
-        constexpr s32 handshake_reply_wait_ms = 800;
+        // [OpenPak] Was 800ms; a real reply here measures ~200ms round trip (see this block's
+        // opening comment), and a working Ryujinx-Reference capture completes its entire
+        // handshake-to-first-real-request sequence in well under 350ms total. Splatoon 3's gRPC
+        // call carries its own deadline (embedded grpc-core deadline_filter.cc) computed from
+        // wall-clock time since the call started -- every millisecond this wait burns without a
+        // real reply pending eats directly into that budget before the guest can even send its
+        // first real request. 250ms still comfortably covers the measured real round trip with
+        // margin, without spending 4x that on a wait that's usually going to time out anyway.
+        constexpr s32 handshake_reply_wait_ms = 250;
+        const auto wait_start = std::chrono::steady_clock::now();
         const auto [poll_ret, poll_errno] = Network::Poll(wait_fds, handshake_reply_wait_ms);
+        const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - wait_start)
+                                 .count();
         if (poll_ret > 0 && poll_errno == Network::Errno::SUCCESS &&
             True(wait_fds[0].revents & Network::PollEvents::In)) {
             std::tie(ret, bsd_errno) = Translate(descriptor.socket->Recv(flags, message));
         }
+        LOG_INFO(Service,
+                 "[OpenPak][DIAG] Recv fd={} grace-wait took {}ms poll_ret={} -> ret={} errno={}",
+                 fd, wait_ms, poll_ret, ret, static_cast<int>(bsd_errno));
     }
 
     // Restore original state
@@ -2069,6 +2260,14 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
     auto [sent_bytes, err] = descriptor.socket->Send(send_buf, flags);
     if (err == Network::Errno::SUCCESS && !injected_buf.empty()) {
         sent_bytes = static_cast<s32>(message.size());
+    }
+    if (err == Network::Errno::SUCCESS && descriptor.sni_injected) {
+        descriptor.awaiting_reply = true;
+    }
+    if (descriptor.sni_injected) {
+        LOG_INFO(Service, "[OpenPak][DIAG] Send fd={} len={} sent={} errno={} first_byte=0x{:02x}",
+                 fd, send_buf.size(), sent_bytes, static_cast<int>(Translate(err)),
+                 send_buf.empty() ? 0 : send_buf[0]);
     }
     if (err == Network::Errno::SUCCESS && descriptor.is_eventfd) {
         // [OpenPak] Wake any Poll() this game deferred waiting on this eventfd. See
@@ -2537,6 +2736,46 @@ struct MMsgEntry {
     u32 length = 0;
 };
 
+// [OpenPak] Diagnostic only -- logs the TLS record type/length (and handshake message type,
+// if applicable) of a SendMMsg/RecvMMsg payload, matching Ryujinx-Reference's own
+// "[DIAG] Bsd.SendMMsg TLS hs=0x.. len=.." logging (ManagedSocket.cs), generalized to cover
+// every record type (Ryujinx's only fires for content-type Handshake) so a final small
+// ApplicationData or Alert record right before a connection close is visible too. The TLS
+// record header (type, version, length) is always plaintext even once the session is
+// encrypted -- only the payload itself is opaque -- so this costs nothing and reveals real
+// protocol state without decrypting anything.
+void LogTlsRecordDiag(const char* what, std::span<const u8> data) {
+    if (data.size() < 5) {
+        return;
+    }
+    const u8 content_type = data[0];
+    if (content_type < 0x14 || content_type > 0x17) {
+        return; // not a TLS record (or content_type is genuinely opaque post-handshake noise)
+    }
+    const u16 record_len = static_cast<u16>((data[3] << 8) | data[4]);
+    const char* type_name = [content_type] {
+        switch (content_type) {
+        case 0x14:
+            return "ChangeCipherSpec";
+        case 0x15:
+            return "Alert";
+        case 0x16:
+            return "Handshake";
+        case 0x17:
+            return "ApplicationData";
+        default:
+            return "?";
+        }
+    }();
+    if (content_type == 0x16 && data.size() > 5) {
+        LOG_INFO(Service, "[OpenPak][DIAG] {} TLS type={}(0x{:02x}) hs=0x{:02x} record_len={} buf_len={}",
+                 what, type_name, content_type, data[5], record_len, data.size());
+    } else {
+        LOG_INFO(Service, "[OpenPak][DIAG] {} TLS type={}(0x{:02x}) record_len={} buf_len={}", what,
+                 type_name, content_type, record_len, data.size());
+    }
+}
+
 bool MMsgReadU32(std::span<const u8>& data, u32& out) {
     if (data.size() < sizeof(u32)) {
         return false;
@@ -2708,6 +2947,12 @@ void BSD::SendMMsg(HLERequestContext& ctx) {
             concatenated.insert(concatenated.end(), segment.begin(), segment.end());
         }
 
+        LogTlsRecordDiag("SendMMsg", concatenated);
+        if (Kernel::Svc::IsOpenPakDeadlineWatchActive()) {
+            const auto* cur = Kernel::GetCurrentThreadPointer(system.Kernel());
+            LOG_INFO(Service, "[OpenPak][SCHED-WATCH] SendMMsg on thread id={} prio={}",
+                     cur ? cur->GetThreadId() : 0, cur ? cur->GetPriority() : -1);
+        }
         auto [sent, send_errno] = SendImpl(fd, flags | msg.flags, concatenated);
         if (send_errno != Errno::SUCCESS) {
             last_errno = send_errno;
@@ -2788,6 +3033,11 @@ void BSD::RecvMMsg(HLERequestContext& ctx) {
         }
 
         std::vector<u8> received(capacity);
+        if (Kernel::Svc::IsOpenPakDeadlineWatchActive()) {
+            const auto* cur = Kernel::GetCurrentThreadPointer(system.Kernel());
+            LOG_INFO(Service, "[OpenPak][SCHED-WATCH] RecvMMsg (pre-recv) on thread id={} prio={}",
+                     cur ? cur->GetThreadId() : 0, cur ? cur->GetPriority() : -1);
+        }
         auto [ret, recv_errno] = RecvImpl(fd, flags | msg.flags, received);
         if (recv_errno != Errno::SUCCESS) {
             LOG_INFO(Service, "RecvMMsg fd={} capacity={}: recv_errno={}", fd, capacity,
@@ -2797,6 +3047,7 @@ void BSD::RecvMMsg(HLERequestContext& ctx) {
         }
 
         const size_t actual = ret < 0 ? 0 : static_cast<size_t>(ret);
+        LogTlsRecordDiag("RecvMMsg", std::span<const u8>(received).first(actual));
         // Distribute the received bytes back across this message's iovs in the same order
         // they were laid out on the way in.
         size_t offset = 0;

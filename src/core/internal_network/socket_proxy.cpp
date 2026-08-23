@@ -327,7 +327,14 @@ Errno ProxySocket::SetLinger(bool enable, u32 linger) {
     values.linger_enable = enable ? 1 : 0;
     values.linger_time = static_cast<u16>(linger);
 
+    linger_enable = enable;
+    linger_time = linger;
+
     return SetSockOpt(fd, SO_LINGER, values);
+}
+
+std::tuple<bool, u32, Errno> ProxySocket::GetLinger() {
+    return {linger_enable, linger_time, Errno::SUCCESS};
 }
 
 Errno ProxySocket::SetReuseAddr(bool enable) {

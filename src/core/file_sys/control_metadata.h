@@ -134,6 +134,7 @@ public:
     std::vector<u8> GetRawBytes() const;
     bool GetUserAccountSwitchLock() const;
     u64 GetDeviceSaveDataSize() const;
+    u64 GetBCATDeliveryCacheStorageSize() const;
     u32 GetParentalControlFlag() const;
     const std::array<u8, 0x20>& GetRatingAge() const;
 

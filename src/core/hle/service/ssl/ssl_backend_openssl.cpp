@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <mutex>
+#include <string_view>
+#include <vector>
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -40,6 +42,26 @@ void OneTimeInit();
 void OneTimeInitLogFile();
 bool OneTimeInitBIO();
 
+// [OpenPak] NPLN (Splatoon 3's gRPC/HTTP2 stack) needs h2; everyone else needs http/1.1-only
+// (NEX rides a WebSocket Upgrade that h2 breaks). Substring match: NPLN's session transport
+// connects via SNI "gs.nintendo.net", which doesn't contain "npln".
+bool IsNplnHost(std::string_view hostname) {
+    const std::string lower = Common::ToLower(std::string(hostname));
+    return lower.find("npln") != std::string::npos || lower.find("gs.nintendo.net") != std::string::npos;
+}
+
+std::vector<unsigned char> BuildAlpnWire(std::span<const std::string> protocols) {
+    std::vector<unsigned char> wire;
+    for (const std::string& proto : protocols) {
+        if (proto != "h2" && proto != "http/1.1") {
+            continue;
+        }
+        wire.push_back(static_cast<unsigned char>(proto.size()));
+        wire.insert(wire.end(), proto.begin(), proto.end());
+    }
+    return wire;
+}
+
 } // namespace
 
 class SSLConnectionBackendOpenSSL final : public SSLConnectionBackend {
@@ -60,11 +82,6 @@ public:
         }
 
         SSL_set_connect_state(ssl);
-
-        // [OpenPak] NEX (MK8/Splatoon 2) uses PRUDP over WebSocket which requires HTTP/1.1 Upgrade.
-        // Force ALPN to http/1.1 only so HTTP/2 is never negotiated.
-        const unsigned char alpn_protos[] = "\x08http/1.1";
-        SSL_set_alpn_protos(ssl, alpn_protos, sizeof(alpn_protos) - 1);
 
         bio = BIO_new(bio_meth);
         if (!bio) {
@@ -128,7 +145,7 @@ public:
         return ResultSuccess;
     }
 
-    Result DoHandshake() override {
+    Result DoHandshake(std::span<const std::string> requested_alpn_protos) override {
         // If SNI host is not set, try recovering host from peer IP
         if (socket && !SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)) {
             auto [peer_addr, err] = socket->GetPeerName();
@@ -145,6 +162,20 @@ public:
                     SSL_set_tlsext_host_name(ssl, last_host.c_str());
                 }
             }
+        }
+
+        static constexpr unsigned char kHttp11Only[] = "\x08http/1.1";
+        std::vector<unsigned char> npln_wire;
+        const char* servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+        if (servername && IsNplnHost(servername)) {
+            npln_wire = BuildAlpnWire(requested_alpn_protos);
+        }
+        if (!npln_wire.empty()) {
+            LOG_INFO(Service_SSL, "[OpenPak] NPLN host '{}': honoring game-requested ALPN ({} byte(s))",
+                     servername, npln_wire.size());
+            SSL_set_alpn_protos(ssl, npln_wire.data(), static_cast<unsigned int>(npln_wire.size()));
+        } else {
+            SSL_set_alpn_protos(ssl, kHttp11Only, sizeof(kHttp11Only) - 1);
         }
 
         // Bypassing verification for OpenPak compatibility

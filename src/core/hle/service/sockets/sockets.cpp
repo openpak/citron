@@ -44,7 +44,17 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("nsd:a", std::make_shared<NSD>(system, "nsd:a"));
     server_manager->RegisterNamedService("nsd:u", std::make_shared<NSD>(system, "nsd:u"));
     server_manager->RegisterNamedService("sfdnsres", std::make_shared<SFDNSRES>(system));
-    server_manager->StartAdditionalHostThreads("bsdsocket", 2);
+    // [OpenPak] This pool is shared across every socket-family service registered above
+    // (bsd:a/s/u/nu, bsdcfg, dns:priv, ethc:c/i, nsd:a/u, sfdnsres) plus whatever thread
+    // LoopProcess itself runs on. Connect() and sfdnsres's own DNS resolution can each block a
+    // worker thread of this pool for real wall-clock time (Connect()'s bounded wait up to 5s,
+    // a real getaddrinfo() call for however long DNS actually takes) -- with only 2 extra
+    // threads, two such blocking calls landing close together (e.g. a fresh npln connect racing
+    // its own preceding DNS resolution, or two sockets connecting concurrently) can exhaust the
+    // pool and queue up everything else this title's networking depends on behind them. Bumped
+    // to match Ryujinx-Reference's own thread-per-blocking-operation model more closely -- cheap
+    // (idle host threads cost nothing) and removes this as a source of contention entirely.
+    server_manager->StartAdditionalHostThreads("bsdsocket", 6);
 
     // [OpenPak] See sockets.h's declaration comment on SetBsdDeferralEvent.
     Kernel::KEvent* deferral_event{};

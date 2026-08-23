@@ -17,6 +17,7 @@ struct Entry {
     std::string name;
     s32 status = 0;        // 0 offline, 1 online, 2 in a game
     std::string app_field; // opaque per-title presence blob, raw bytes (already base64-decoded)
+    std::vector<u8> image; // profile picture, raw JPEG bytes (already base64-decoded); empty if none
 };
 
 void Set(std::vector<Entry> entries);

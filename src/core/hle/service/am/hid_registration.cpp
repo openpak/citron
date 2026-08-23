@@ -12,7 +12,10 @@ namespace Service::AM {
 
 HidRegistration::HidRegistration(Core::System& system, Process& process) : m_process(process) {
     m_hid_server = system.ServiceManager().GetService<HID::IHidServer>("hid", true);
+    this->RegisterCurrentProcess();
+}
 
+void HidRegistration::RegisterCurrentProcess() {
     if (m_process.IsInitialized()) {
         m_hid_server->GetResourceManager()->RegisterAppletResourceUserId(m_process.GetProcessId(),
                                                                          true);
