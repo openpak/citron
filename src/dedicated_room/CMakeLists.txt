@@ -4,8 +4,17 @@
 add_executable(citron-room
     precompiled_headers.h
     citron_room.cpp
-    citron_room.rc
 )
+
+# [OpenPak] Same fix as src/citron/CMakeLists.txt's citron_rc: keep citron_room.rc out of the
+# Boost/Qt include list so its RC-compile command line stays under Windows' length limit.
+if (WIN32)
+    add_library(citron_room_rc OBJECT citron_room.rc)
+    set_target_properties(citron_room_rc PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    target_link_libraries(citron-room PRIVATE citron_room_rc)
+else()
+    target_sources(citron-room PRIVATE citron_room.rc)
+endif()
 
 # Robust static linking order using GNU ld group to resolve cycles
 # Linker selection: For Clang, the global configuration defaults to lld.

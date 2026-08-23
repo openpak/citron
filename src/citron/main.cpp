@@ -2051,7 +2051,7 @@ void GMainWindow::ConnectMenuEvents() {
         if (kind != OpenPakToast::Kind::Request || !Common::OpenPakAccount::IsLinked()) {
             return;
         }
-        OpenPakAccountDialog(legacy_controller, *system, this, OpenPakAccountDialog::kRequestsPage)
+        OpenPakAccountDialog(legacy_controller, *system, this, OpenPakAccountDialog::kFriendsPage)
             .exec();
     });
     connect(ui->action_OpenPak_Population, &QAction::triggered, this,

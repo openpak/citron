@@ -44,23 +44,9 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("nsd:a", std::make_shared<NSD>(system, "nsd:a"));
     server_manager->RegisterNamedService("nsd:u", std::make_shared<NSD>(system, "nsd:u"));
     server_manager->RegisterNamedService("sfdnsres", std::make_shared<SFDNSRES>(system));
-    // [OpenPak] Previously ran 6 extra worker threads here, on the (incorrect) theory that this
-    // matched Ryujinx-Reference's threading model. It doesn't: Ryujinx runs exactly ONE dedicated
-    // host thread for its entire Bsd service (ServerBase/ServerLoop), so every socket IPC call is
-    // strictly serialized in arrival order with no possibility of two calls' HLE handlers running
-    // concurrently or completing out of order. citron's pool let up to 7 threads (each an
-    // anonymous, low-priority ThreadType::Dummy KThread with no identity tie to the calling guest
-    // thread) race for socket IPC work, so a later-arriving operation's worker could finish before
-    // an earlier one's if the host OS scheduler favored it -- breaking the ordering guarantee some
-    // guest code (e.g. a one-shot, non-blocking WaitSynchronization probe right after bringing up
-    // a connection) implicitly depends on. Reverted to 0 extra threads -- single dedicated thread,
-    // matching Ryujinx's actual model exactly -- to test whether this ordering gap explains
-    // Splatoon 3's deterministic RST_STREAM-before-HEADERS NPLN failure (see the Splatoon 3
-    // connectivity investigation memory). If this reintroduces the pool-exhaustion symptom the
-    // prior comment described (concurrent blocking Connect()/DNS calls queuing up other socket
-    // traffic), that's real signal too -- Ryujinx's own single-thread design apparently tolerates
-    // it, so citron's HLE call durations may need addressing directly rather than papered over
-    // with concurrency.
+    // [OpenPak] No extra worker threads: matches Ryujinx's single-threaded Bsd service, which
+    // serializes socket IPC in strict arrival order. citron's old 6-thread pool broke that
+    // ordering guarantee (calls could race and complete out of order).
     server_manager->StartAdditionalHostThreads("bsdsocket", 0);
 
     // [OpenPak] See sockets.h's declaration comment on SetBsdDeferralEvent.

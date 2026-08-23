@@ -1957,6 +1957,8 @@ build_common_cmake_args() {
         "-Dxbyak_FOUND=TRUE"
         "-Dcubeb_FOUND=TRUE"
         "-DENABLE_LIBUSB=ON"
+        # [OpenPak] Force OpenSSL instead of the Windows-default Schannel backend, matching local dev builds.
+        "-DENABLE_OPENSSL=ON"
         "-DVulkan_LIBRARY=${CMAKE_BUILD_ROOT}/vulkan-stub/libvulkan-1.a"
         "-DCITRON_USE_PRECOMPILED_HEADERS=OFF"
         "-DCITRON_USE_CPM=ON"
@@ -4805,6 +4807,7 @@ ${sccache_cmake_args}
   -DBUILD_TESTING=OFF -DCITRON_TESTS=OFF -DCITRON_SHADER_TOOL=OFF ^
   -DCITRON_CRASH_DUMPS=OFF ^
   -DCITRON_USE_AUTO_UPDATER=ON ^
+  -DENABLE_OPENSSL=ON ^
   -DENABLE_UNITY_BUILD=${UNITY_BUILD} ^
   -DPython3_EXECUTABLE="${python_win}" ^
   -DPERL_EXECUTABLE="${perl_win}" ^

@@ -47,11 +47,10 @@ class OpenPakAccountDialog : public QDialog {
 
 public:
     static constexpr int kHomePage = 0;
-    static constexpr int kFriendsPage = 1;
-    static constexpr int kRequestsPage = 2;
+    static constexpr int kFriendsPage = 1; // also hosts incoming/outgoing requests, side-by-side
+    static constexpr int kPlayersPage = 2;
     static constexpr int kHistoryPage = 3;
     static constexpr int kCloudSavesPage = 4;
-    static constexpr int kPlayersPage = 5;
 
     explicit OpenPakAccountDialog(OpenPakController* controller, Core::System& system,
                                    QWidget* parent = nullptr, int initial_page = kHomePage);

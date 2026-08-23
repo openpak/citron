@@ -23,8 +23,17 @@ add_executable(citron-cmd
     citron_sdl_config.cpp
     citron_sdl_config.h
     citron.cpp
-    citron.rc
 )
+
+# [OpenPak] Same fix as src/citron/CMakeLists.txt's citron_rc: keep citron.rc out of the
+# Boost/Qt include list so its RC-compile command line stays under Windows' length limit.
+if (WIN32)
+    add_library(citron_cmd_rc OBJECT citron.rc)
+    set_target_properties(citron_cmd_rc PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    target_link_libraries(citron-cmd PRIVATE citron_cmd_rc)
+else()
+    target_sources(citron-cmd PRIVATE citron.rc)
+endif()
 
 # Robust static linking and linker selection under GCC LTO
 # Linker selection: For Clang, the global configuration defaults to lld.

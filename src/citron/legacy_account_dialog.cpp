@@ -349,18 +349,6 @@ QLabel* MakeEmptyLabel(const QString& text) {
     return label;
 }
 
-QWidget* MakePage(std::initializer_list<QWidget*> widgets, int margin = 0) {
-    auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(margin, margin, margin, margin);
-    layout->setSpacing(8);
-    std::size_t i = 0;
-    for (QWidget* w : widgets) {
-        layout->addWidget(w, (++i == widgets.size()) ? 1 : 0);
-    }
-    return page;
-}
-
 class OpenPakToggleSwitch : public QWidget {
 public:
     explicit OpenPakToggleSwitch(QWidget* parent = nullptr) : QWidget(parent) {
@@ -904,7 +892,8 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     dash_requests_card->setStyleSheet(DashCardStyle());
     dash_requests_card->setFocusPolicy(Qt::NoFocus);
     static_cast<ClickableFrame*>(dash_requests_card)->on_click = [this] {
-        GoToPage(page_titles.indexOf(tr("Requests")));
+        // [OpenPak] Requests live on the Friends page now.
+        GoToPage(page_titles.indexOf(tr("Friends")));
     };
     auto* requests_card_layout = new QVBoxLayout(dash_requests_card);
     requests_card_layout->setContentsMargins(18, 16, 18, 16);
@@ -1139,13 +1128,6 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     friend_search->setClearButtonEnabled(true);
     friend_search->setStyleSheet(field_style);
 
-    auto* add_card = MakeDashCard();
-    auto* add_card_layout = new QVBoxLayout(add_card);
-    add_card_layout->setContentsMargins(18, 16, 18, 16);
-    add_card_layout->setSpacing(10);
-    add_card_layout->addLayout(add_row);
-    add_card_layout->addWidget(friend_search);
-
     friends_view = MakeCardList(this);
     friends_model = new QStandardItemModel(this);
     friends_view->setModel(friends_model);
@@ -1158,7 +1140,15 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     friends_stack->addWidget(friends_view);
     friends_stack->addWidget(MakeEmptyLabel(tr("No friends yet — add one by friend code above.")));
 
-    auto* friends_page = MakePage({add_card, friends_stack});
+    // [OpenPak] Friends and Requests, side-by-side on one page.
+    auto* friends_column_card = MakeDashCard();
+    auto* friends_column_layout = new QVBoxLayout(friends_column_card);
+    friends_column_layout->setContentsMargins(18, 16, 18, 16);
+    friends_column_layout->setSpacing(10);
+    friends_column_layout->addWidget(MakeCardTitle(tr("Friends")));
+    friends_column_layout->addLayout(add_row);
+    friends_column_layout->addWidget(friend_search);
+    friends_column_layout->addWidget(friends_stack, 1);
 
     requests_view = MakeCardList(this);
     requests_model = new QStandardItemModel(this);
@@ -1191,12 +1181,23 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     outgoing_section_layout->addWidget(outgoing_requests_view);
     outgoing_requests_section->setVisible(false);
 
-    auto* requests_page = new QWidget;
-    auto* requests_page_layout = new QVBoxLayout(requests_page);
-    requests_page_layout->setContentsMargins(0, 0, 0, 0);
-    requests_page_layout->setSpacing(0);
-    requests_page_layout->addWidget(requests_stack, 1);
-    requests_page_layout->addWidget(outgoing_requests_section);
+    auto* requests_column_card = MakeDashCard();
+    auto* requests_column_layout = new QVBoxLayout(requests_column_card);
+    requests_column_layout->setContentsMargins(18, 16, 18, 16);
+    requests_column_layout->setSpacing(10);
+    requests_column_layout->addWidget(MakeCardTitle(tr("Requests")));
+    requests_column_layout->addWidget(requests_stack, 1);
+    requests_column_layout->addWidget(outgoing_requests_section);
+
+    auto* friends_requests_row = new QHBoxLayout;
+    friends_requests_row->setSpacing(16);
+    friends_requests_row->addWidget(friends_column_card, 1);
+    friends_requests_row->addWidget(requests_column_card, 1);
+
+    auto* friends_page = new QWidget;
+    auto* friends_page_layout = new QVBoxLayout(friends_page);
+    friends_page_layout->setContentsMargins(0, 0, 0, 0);
+    friends_page_layout->addLayout(friends_requests_row);
 
     history_view = MakeCardList(this);
     history_model = new QStandardItemModel(this);
@@ -1319,18 +1320,26 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     recent_players_card_layout->addWidget(MakeCardTitle(tr("Recently Encountered")));
     recent_players_card_layout->addWidget(recent_players_stack, 1);
 
-    auto* players_page = MakePage({lobby_card, recent_players_card});
+    // [OpenPak] Current Lobby and Recently Encountered, side-by-side.
+    auto* players_row = new QHBoxLayout;
+    players_row->setSpacing(16);
+    players_row->addWidget(lobby_card, 1);
+    players_row->addWidget(recent_players_card, 1);
+
+    auto* players_page = new QWidget;
+    auto* players_page_layout = new QVBoxLayout(players_page);
+    players_page_layout->setContentsMargins(0, 0, 0, 0);
+    players_page_layout->addLayout(players_row);
 
     pages_stack = new QStackedWidget;
     pages_stack->addWidget(home_page);
     pages_stack->addWidget(friends_page);
-    pages_stack->addWidget(requests_page);
+    pages_stack->addWidget(players_page);
     pages_stack->addWidget(history_stack);
     pages_stack->addWidget(cloud_save_page);
-    pages_stack->addWidget(players_page);
 
-    page_titles = {tr("Home"), tr("Friends"), tr("Requests"), tr("Recently Played"),
-                  tr("Cloud Saves"), tr("Players")};
+    page_titles = {tr("Home"), tr("Friends"), tr("Players"), tr("Recently Played"),
+                  tr("Cloud Saves")};
 
     page_title_label = new QLabel;
     QFont page_title_font = page_title_label->font();

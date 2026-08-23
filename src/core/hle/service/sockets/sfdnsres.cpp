@@ -123,22 +123,10 @@ static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
     return std::string(env);
 }
 
-// [OpenPak] Was: hold the FIRST resolution of an "npln" host back by a delay, against a
-// hypothesized startup deadlock (grpc-core's connection setup allegedly stalling if it starts
-// during citron's heaviest JIT/shader-compile burst). DISABLED BY DEFAULT (max_wait_ms=0) as of
-// 2026-08-23: this was never actually confirmed to prevent anything, and the Splatoon 3
-// connectivity investigation has since PROVEN, live, against a zero-latency local test server,
-// that this delay has zero effect on the game's real (separate, still-open) connectivity bug --
-// four connect attempts spanning 22ms-316ms all failed identically, ruling out any
-// timing-sensitivity here (see the Splatoon 3 connectivity investigation memory). Meanwhile the
-// cost is real: the bsdsocket service now runs on a single thread (sockets.cpp), so any nonzero
-// delay here blocks every other socket IPC call in the process for its whole duration. A prior
-// version polled dynarmic's JIT translation counter to break out early once calm instead of
-// sleeping a fixed duration, but that depended on a dynarmic patch that was never pushed
-// anywhere CI could build from, and got clumsily reverted into an unconditional flat sleep
-// still using the adaptive version's 120000ms *ceiling* as if it were the actual duration --
-// blocking every boot for a full 2 minutes. OPENPAK_LEGACY_NPLN_DELAY_MS remains available to opt
-// back into a fixed wait if a real deadlock is ever actually observed and reproduced.
+// [OpenPak] Optional delay before the first "npln" host resolution, against a hypothesized
+// startup deadlock. Disabled by default (max_wait_ms=0) -- unconfirmed benefit, and a nonzero
+// delay now blocks every other socket IPC call too (bsdsocket is single-threaded).
+// OPENPAK_LEGACY_NPLN_DELAY_MS opts back into a fixed wait if ever needed.
 static std::once_flag g_npln_delay_once;
 
 static void MaybeDelayNplnInit(const std::string& host) {
