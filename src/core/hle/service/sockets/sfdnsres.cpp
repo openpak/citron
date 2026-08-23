@@ -96,6 +96,20 @@ static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) 
         return nat_ip;
     }
 
+    // [OpenPak] Mario Tennis Aces (NEX server id g23932a00) points at a real GeoDNS hostname
+    // instead of the fixed server_ip, so players get routed to whichever of the two live
+    // Tennis nodes is actually closest to them. Every other title is untouched -- the second
+    // node doesn't run their servers. OPENPAK_LEGACY_TENNIS_GEODNS=0 disables this and falls through
+    // to the normal fixed-IP redirect below.
+    const char* tennis_geodns_env = std::getenv("OPENPAK_LEGACY_TENNIS_GEODNS");
+    const bool tennis_geodns_disabled = tennis_geodns_env && std::string_view(tennis_geodns_env) == "0";
+    if (Common::ToLower(host).find("g23932a00") != std::string::npos && !tennis_geodns_disabled) {
+        static constexpr char TennisGeoHost[] = "tennis-geo.the Reference domain";
+        LOG_INFO(Service, "[OpenPak] Redirecting Tennis host '{}' -> GeoDNS '{}'", host,
+                 TennisGeoHost);
+        return std::string(TennisGeoHost);
+    }
+
     if (host == "nintendo.net" || host.ends_with(".nintendo.net") ||
         host == "nintendo.com" || host.ends_with(".nintendo.com") ||
         host == "nintendowifi.net" || host.ends_with(".nintendowifi.net") ||
