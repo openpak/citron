@@ -176,7 +176,22 @@ if (WIN32 AND NOT TARGET LibArchive::LibArchive)
     if (TARGET zlibstatic)
         set(ZLIB_INCLUDE_DIR "${ZLIB_SOURCE_DIR};${ZLIB_BINARY_DIR}" CACHE PATH "" FORCE)
         set(ZLIB_LIBRARY zlibstatic CACHE STRING "" FORCE)
+        # Without ZLIB_FOUND, FindZLIB's module-mode search still runs its own find_path/
+        # find_library despite the cache vars above being pre-seeded. Harmless defensive fix
+        # kept regardless of the real cause below.
+        set(ZLIB_FOUND TRUE CACHE BOOL "" FORCE)
     endif()
+    # [OpenPak] libarchive's POSIX_REGEX_LIB defaults to "AUTO", which cascades through THREE
+    # detection blocks (libc/libregex, then old PCRE, then PCRE2) trying to find a system regex
+    # implementation -- "ENABLE_PCREPOSIX OFF" below only disables the OLD PCRE1 block; the
+    # actual option guarding the PCRE2 block is the separate "ENABLE_PCRE2POSIX" (defaults ON),
+    # which was never set here. On this machine that search finds MSYS2's own pcre2/regex
+    # headers (C:/msys64/clang64/include) and, via libarchive's unscoped INCLUDE_DIRECTORIES()
+    # call, bakes that path into every libarchive source file's compile command -- breaking
+    # compilation ("expected ';' after top level declarator", MSYS2's process.h/stdlib.h being
+    # incompatible with clang-cl's MSVC-style headers). citron only uses libarchive for zip
+    # extraction, no regex needed: skip all three detection blocks outright instead of trying to
+    # disable each one individually.
     CPMAddPackage(
         NAME libarchive
         GITHUB_REPOSITORY libarchive/libarchive
@@ -194,6 +209,8 @@ if (WIN32 AND NOT TARGET LibArchive::LibArchive)
             "ENABLE_MBEDTLS OFF"
             "ENABLE_NETTLE OFF"
             "ENABLE_PCREPOSIX OFF"
+            "ENABLE_PCRE2POSIX OFF"
+            "POSIX_REGEX_LIB NONE"
             "ENABLE_LibGCC OFF"
             "ENABLE_CNG OFF"
             "ENABLE_TAR OFF"
