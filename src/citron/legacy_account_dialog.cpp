@@ -2691,12 +2691,16 @@ void OpenPakAccountDialog::OnPlayersViewClicked(const QModelIndex& index) {
 
     const QRect cell_rect = view->visualRect(index);
     const QPoint pos = view->viewport()->mapFromGlobal(QCursor::pos());
-    if (delegate->HitTestActions(cell_rect, pos, false) != OpenPakFriendDelegate::ActionHit::Primary) {
+    if (delegate->HitTestActions(cell_rect, pos, false) == OpenPakFriendDelegate::ActionHit::None) {
         return;
     }
 
     const u64 pid = SelectedPid(index);
-    if (pid == 0 || pid == Common::OpenPakAccount::GetPid() || !known_player_pids.contains(pid)) {
+    if (pid == 0 || pid == Common::OpenPakAccount::GetPid()) {
+        return;
+    }
+    if (!known_player_pids.contains(pid)) {
+        status->setText(tr("This player isn't a known OpenPak account."));
         return;
     }
     const std::string friend_code = index.data(OpenPakFriendItem::FriendCodeRole).toString().toStdString();
