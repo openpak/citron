@@ -18,10 +18,11 @@ public:
     static constexpr int AvatarB64Role = Qt::UserRole + 6;
     static constexpr int IsRequestRole = Qt::UserRole + 7;   // true in the incoming-requests list
     static constexpr int PillLabelRole = Qt::UserRole + 8;   // overrides the single-pill's default "Remove" text
+    static constexpr int IsMeRole = Qt::UserRole + 9;        // true for the local player's own row; suppresses the pill
 
     OpenPakFriendItem(u64 pid, const QString& name, const QString& friend_code, s32 presence,
                        const QString& game, const QString& avatar_b64, bool is_request,
-                       const QString& pill_label = QString{}) {
+                       const QString& pill_label = QString{}, bool is_me = false) {
         setEditable(false);
         setData(QVariant::fromValue<qulonglong>(pid), PidRole);
         setData(name, NameRole);
@@ -31,6 +32,7 @@ public:
         setData(avatar_b64, AvatarB64Role);
         setData(is_request, IsRequestRole);
         setData(pill_label, PillLabelRole);
+        setData(is_me, IsMeRole);
     }
 };
 

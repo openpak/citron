@@ -65,13 +65,16 @@ void OpenPakFriendDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
     PaintAvatar(painter, avatar_rect, index);
 
     const bool is_request = index.data(OpenPakFriendItem::IsRequestRole).toBool();
+    const bool is_me = index.data(OpenPakFriendItem::IsMeRole).toBool();
     const QString pill_label = index.data(OpenPakFriendItem::PillLabelRole).toString();
     const QRect actions = ActionsRect(card);
     const QRect text_rect(avatar_rect.right() + 10, card.top(), actions.left() - 6 - avatar_rect.right() - 10,
                           card.height());
     PaintNameAndStatus(painter, text_rect, option, index);
-    const qreal hov = hover_prog.value(QPersistentModelIndex(index), 0.0);
-    PaintActions(painter, card, is_request, pill_label, hov);
+    if (!is_me) {
+        const qreal hov = hover_prog.value(QPersistentModelIndex(index), 0.0);
+        PaintActions(painter, card, is_request, pill_label, hov);
+    }
 
     if (list_view && list_view->hasFocus() && list_view->currentIndex() == index) {
         painter->setPen(QPen(AccentColor(), 2));
