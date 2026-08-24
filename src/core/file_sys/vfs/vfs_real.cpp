@@ -59,7 +59,9 @@ constexpr FS::FileAccessMode ModeFlagsToFileAccessMode(OpenMode mode) {
 } // Anonymous namespace
 
 RealVfsFilesystem::RealVfsFilesystem() : VfsFilesystem(nullptr) {}
-RealVfsFilesystem::~RealVfsFilesystem() = default;
+RealVfsFilesystem::~RealVfsFilesystem() {
+    in_dtor = true;
+}
 
 std::string RealVfsFilesystem::GetName() const {
     return "Real";
@@ -230,6 +232,9 @@ RealVfsFilesystem::ListLockGuard RealVfsFilesystem::RefreshReference(const std::
 }
 
 void RealVfsFilesystem::DropReference(std::unique_ptr<FileReference>&& reference) {
+    if (in_dtor)
+        return;
+
     std::scoped_lock lk{list_lock};
 
     // Remove from list.
