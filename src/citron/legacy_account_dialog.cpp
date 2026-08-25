@@ -1134,6 +1134,9 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     friend_delegate = new OpenPakFriendDelegate(friends_view, this);
     friends_view->setItemDelegate(friend_delegate);
     connect(friends_view, &QListView::clicked, this, &OpenPakAccountDialog::OnFriendsViewClicked);
+    friends_view->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(friends_view, &QListView::customContextMenuRequested, this,
+           &OpenPakAccountDialog::ShowFriendsContextMenu);
     connect(friend_search, &QLineEdit::textChanged, this, &OpenPakAccountDialog::ApplyFriendFilter);
 
     friends_stack = new QStackedWidget;
@@ -1253,6 +1256,14 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     cloud_save_buttons->addWidget(cloud_save_download_button);
     cloud_save_buttons->addStretch(1);
 
+    // Governs only the automatic pull-on-boot/push-on-stop sync -- not the manual Download
+    // Save button above, which is already an explicit action each time it's clicked.
+    cloud_save_auto_sync_checkbox = new QCheckBox(tr("Automatically sync cloud saves"));
+    cloud_save_auto_sync_checkbox->setChecked(Settings::values.legacy_cloud_sync_enabled.GetValue());
+    cloud_save_auto_sync_checkbox->setCursor(Qt::PointingHandCursor);
+    connect(cloud_save_auto_sync_checkbox, &QCheckBox::toggled, this,
+            [](bool checked) { Settings::values.legacy_cloud_sync_enabled.SetValue(checked); });
+
     auto* cloud_save_card = new QFrame;
     cloud_save_card->setStyleSheet(DashCardStyle());
     auto* cloud_save_card_layout = new QVBoxLayout(cloud_save_card);
@@ -1265,6 +1276,8 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     cloud_save_card_layout->addWidget(cloud_save_status);
     cloud_save_card_layout->addSpacing(12);
     cloud_save_card_layout->addLayout(cloud_save_buttons);
+    cloud_save_card_layout->addSpacing(12);
+    cloud_save_card_layout->addWidget(cloud_save_auto_sync_checkbox, 0, Qt::AlignHCenter);
 
     auto* cloud_save_page = new QWidget;
     auto* cloud_save_layout = new QVBoxLayout(cloud_save_page);
@@ -2141,6 +2154,8 @@ void OpenPakAccountDialog::UpdateDashboard() {
         const QString game = index.data(OpenPakFriendItem::GamePresenceRole).toString();
         const std::string avatar_b64 =
             index.data(OpenPakFriendItem::AvatarB64Role).toString().toStdString();
+        const u64 pid = index.data(OpenPakFriendItem::PidRole).toULongLong();
+        const bool is_me = index.data(OpenPakFriendItem::IsMeRole).toBool();
 
         auto* avatar_label = new QLabel;
         avatar_label->setFixedSize(kPreviewAvatarSize, kPreviewAvatarSize);
@@ -2182,6 +2197,23 @@ void OpenPakAccountDialog::UpdateDashboard() {
 
         auto* row_widget = new QWidget;
         row_widget->setLayout(row_layout);
+        if (!is_me && pid != 0) {
+            row_widget->setContextMenuPolicy(Qt::CustomContextMenu);
+            const QString avatar_qb64 = QString::fromStdString(avatar_b64);
+            connect(row_widget, &QWidget::customContextMenuRequested, this,
+                   [this, row_widget, pid, name, avatar_qb64](const QPoint& pos) {
+                       QMenu menu(this);
+                       QAction* invite_action = menu.addAction(tr("Invite to Chat Room"));
+                       connect(invite_action, &QAction::triggered, this,
+                              [this, pid, name] { emit InviteToChatRequested(pid, name); });
+                       QAction* report_action = menu.addAction(tr("Report Player..."));
+                       connect(report_action, &QAction::triggered, this, [this, pid, name,
+                                                                          avatar_qb64] {
+                           OpenReportDialog(pid, name, avatar_qb64);
+                       });
+                       menu.exec(row_widget->mapToGlobal(pos));
+                   });
+        }
         dash_friends_list_layout->addWidget(row_widget);
     }
     dash_friends_list_layout->addStretch(1);
@@ -2459,9 +2491,10 @@ void OpenPakAccountDialog::RefreshFriends() {
 
 void OpenPakAccountDialog::RefreshCloudSaveTab() {
     const std::string app_id_hex = controller ? controller->GetLocalAppId() : std::string{};
+    const bool any_game_running = !app_id_hex.empty();
 
     u64 running_title_id = 0;
-    if (!app_id_hex.empty()) {
+    if (any_game_running) {
         try {
             running_title_id = std::stoull(app_id_hex, nullptr, 16);
         } catch (const std::exception&) {
@@ -2492,13 +2525,23 @@ void OpenPakAccountDialog::RefreshCloudSaveTab() {
 
     cloud_save_icon->setVisible(false);
     cloud_save_title->setVisible(false);
+
+    if (any_game_running) {
+        // A DIFFERENT (non-eligible) game is running. Downloading some other title's save
+        // into its NAND save directory while emulation is active isn't safe -- the running
+        // game may have that filesystem layer open -- so lock out the whole picker here too,
+        // not just the button for the running title.
+        cloud_save_download_button->setVisible(false);
+        cloud_save_picker_container->setVisible(false);
+        cloud_save_status->setText(tr("Stop the running game to download a cloud save."));
+        return;
+    }
+
     cloud_save_download_button->setVisible(true);
     cloud_save_picker_container->setVisible(true);
     RebuildCloudSaveTitlePicker();
 
-    if (!app_id_hex.empty()) {
-        cloud_save_status->setText(tr("The running game doesn't support cloud saves."));
-    } else if (!cloud_save_probing.empty()) {
+    if (!cloud_save_probing.empty()) {
         cloud_save_status->setText(tr("Checking for cloud saves..."));
     } else if (cloud_save_picker_row->count() > 0) {
         cloud_save_status->setText(tr("Pick a title to download its cloud save."));
@@ -2744,6 +2787,29 @@ void OpenPakAccountDialog::ShowPlayersContextMenu(QListView* view, const QPoint&
            [this, pid, name, avatar_b64] { OpenReportDialog(pid, name, avatar_b64); });
     menu.exec(view->viewport()->mapToGlobal(pos));
 #endif
+}
+
+void OpenPakAccountDialog::ShowFriendsContextMenu(const QPoint& pos) {
+    const QModelIndex index = friends_view->indexAt(pos);
+    if (!index.isValid()) {
+        return;
+    }
+    const bool is_me = index.data(OpenPakFriendItem::IsMeRole).toBool();
+    const u64 pid = SelectedPid(index);
+    if (pid == 0 || is_me) {
+        return;
+    }
+    const QString name = index.data(OpenPakFriendItem::NameRole).toString();
+    const QString avatar_b64 = index.data(OpenPakFriendItem::AvatarB64Role).toString();
+
+    QMenu menu(this);
+    QAction* invite_action = menu.addAction(tr("Invite to Chat Room"));
+    connect(invite_action, &QAction::triggered, this,
+           [this, pid, name] { emit InviteToChatRequested(pid, name); });
+    QAction* report_action = menu.addAction(tr("Report Player..."));
+    connect(report_action, &QAction::triggered, this,
+           [this, pid, name, avatar_b64] { OpenReportDialog(pid, name, avatar_b64); });
+    menu.exec(friends_view->viewport()->mapToGlobal(pos));
 }
 
 void OpenPakAccountDialog::OpenReportDialog(u64 pid, const QString& name,

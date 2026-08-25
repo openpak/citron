@@ -164,6 +164,8 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/loading_screen.h"
 #include "citron/main.h"
 #include "citron/legacy_account_dialog.h"
+#include "citron/legacy_chat_window.h"
+#include "citron/legacy_room_overlay.h"
 #include "citron/legacy_population_dialog.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_online_counts.h"
@@ -1349,6 +1351,15 @@ void GMainWindow::InitializeWidgets() {
     multiplayer_room_overlay = new MultiplayerRoomOverlay(this);
     multiplayer_room_overlay->hide();
 
+    legacy_room_overlay = new OpenPakRoomOverlay(this, legacy_controller);
+    connect(legacy_room_overlay, &OpenPakRoomOverlay::InvitePickerRequested, this, [this] {
+        OpenPakAccountDialog dialog(legacy_controller, *system, this,
+                                     OpenPakAccountDialog::kFriendsPage);
+        connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
+                [this](u64 pid, const QString& name) { OpenOpenPakChatWindow({}, pid, name); });
+        dialog.exec();
+    });
+
     vram_overlay = new VramOverlay(this);
     vram_overlay->hide();
 
@@ -2044,18 +2055,38 @@ void GMainWindow::ConnectMenuEvents() {
         }
         OpenPakAccountDialog dialog(legacy_controller, *system, this);
         legacy_account_dialog_instance = &dialog;
+        connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
+                [this](u64 pid, const QString& name) { OpenOpenPakChatWindow({}, pid, name); });
         dialog.exec();
         legacy_account_dialog_instance = nullptr;
     });
     connect(legacy_toast, &OpenPakToast::clicked, this, [this](OpenPakToast::Kind kind) {
-        if (kind != OpenPakToast::Kind::Request || !Common::OpenPakAccount::IsLinked()) {
+        if (!Common::OpenPakAccount::IsLinked()) {
             return;
         }
-        OpenPakAccountDialog(legacy_controller, *system, this, OpenPakAccountDialog::kFriendsPage)
-            .exec();
+        if (kind == OpenPakToast::Kind::Request) {
+            OpenPakAccountDialog dialog(legacy_controller, *system, this,
+                                         OpenPakAccountDialog::kFriendsPage);
+            connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
+                    [this](u64 pid, const QString& name) { OpenOpenPakChatWindow({}, pid, name); });
+            dialog.exec();
+        } else if (kind == OpenPakToast::Kind::ChatRequest) {
+            OpenOpenPakChatWindow(pending_chat_invite_room_id);
+        }
     });
     connect(ui->action_OpenPak_Population, &QAction::triggered, this,
             [this] { OpenPakPopulationDialog(this).exec(); });
+    // Prototype: no .ui entry yet (still being pitched for real integration), added here
+    // instead of the designer file to keep this easy to pull out later.
+    auto* action_chat_rooms = ui->menu_OpenPak->addAction(tr("Chat Rooms (Prototype)"));
+    connect(action_chat_rooms, &QAction::triggered, this, [this] {
+        if (!Common::OpenPakAccount::IsLinked()) {
+            QMessageBox::information(this, tr("Chat Rooms"),
+                                     tr("Sign in to OpenPak Network first."));
+            return;
+        }
+        OpenOpenPakChatWindow();
+    });
     connect(ui->action_OpenPak_Sign_In, &QAction::triggered, legacy_controller,
             &OpenPakController::SignIn);
     connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, legacy_controller,
@@ -2150,6 +2181,31 @@ void GMainWindow::ConnectMenuEvents() {
                 legacy_toast->Show(tr("Friend Request Sent!"), friend_code, {},
                                      OpenPakToast::Kind::RequestSent);
             });
+    connect(legacy_controller, &OpenPakController::ChatInviteReceived, this,
+            [this](const QString& room_id, const QString& room_name, u64 /*from_pid*/,
+                   const QString& from_name) {
+                legacy_toast->Show(from_name, tr("invited you to \"%1\"").arg(room_name), {},
+                                     OpenPakToast::Kind::ChatRequest);
+                pending_chat_invite_room_id = room_id;
+            });
+    connect(legacy_controller, &OpenPakController::ChatInviteSent, this, [this](u64 /*target_pid*/) {
+        legacy_toast->Show(tr("Chat Invite Sent!"), {}, {}, OpenPakToast::Kind::RequestSent);
+    });
+    connect(legacy_controller, &OpenPakController::ChatMemberJoined, this,
+            [this](const QString& /*room_id*/, u64 /*pid*/, const QString& name) {
+                legacy_toast->Show(name, tr("joined your chat room"), {},
+                                     OpenPakToast::Kind::Online);
+            });
+    connect(legacy_controller, &OpenPakController::ChatBanned, this, [this](const QString& reason) {
+        if (legacy_room_overlay) {
+            legacy_room_overlay->hide();
+        }
+        QMessageBox::warning(this, tr("Chat Rooms"),
+                             reason.isEmpty()
+                                 ? tr("You have been banned from using this feature.")
+                                 : tr("You have been banned from using this feature.\n\nReason: %1")
+                                       .arg(reason));
+    });
     connect(legacy_controller, &OpenPakController::QuickStartRequested, this, [this](u64 title_id) {
         const QString path = game_list->GetGamePath(title_id);
         if (!path.isEmpty()) {
@@ -2600,7 +2656,9 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     }
 
     OfferOpenPakByamlDownload(title_id);
-    OpenPak::SaveSync::Pull(*system, title_id);
+    if (Settings::values.legacy_cloud_sync_enabled.GetValue()) {
+        OpenPak::SaveSync::Pull(*system, title_id);
+    }
 
     if (type == StartGameType::Normal) {
         // Load per game settings if it is a normal boot
@@ -2867,7 +2925,7 @@ void GMainWindow::OnEmulationStopped() {
 #ifdef ENABLE_WEB_SERVICE
     // Only safe past this point: emu_thread has fully exited (no more concurrent guest access to
     // the VFS) and InitializeContentSystem() just rebuilt a fresh save-data factory.
-    {
+    if (Settings::values.legacy_cloud_sync_enabled.GetValue()) {
         auto save_zip = OpenPak::SaveSync::CaptureForPush(*system, current_title_id);
         if (!save_zip.empty()) {
             std::thread{[title_id = current_title_id, zip = std::move(save_zip)]() mutable {
@@ -5985,6 +6043,36 @@ double GMainWindow::GetEmulationSpeed() const {
     return last_perf_stats.emulation_speed * 100.0;
 }
 
+void GMainWindow::OpenOpenPakChatWindow(const QString& auto_join_room_id, u64 invite_pid,
+                                         const QString& invite_name) {
+    if (!auto_join_room_id.isEmpty()) {
+        // Invite-toast click: we already know the room, skip straight to it.
+        legacy_room_overlay->JoinRoom(auto_join_room_id);
+        return;
+    }
+    if (invite_pid != 0) {
+        // Friends-list invite: create/reuse our own room, then invite once host is confirmed.
+        legacy_room_overlay->InviteFriendOnJoin(invite_pid, invite_name);
+        legacy_room_overlay->ShowOverlay();
+        return;
+    }
+    if (legacy_room_overlay->IsInRoom()) {
+        legacy_room_overlay->ShowOverlay();
+        return;
+    }
+
+    // Not in a room yet -- show the Create/Join picker. It closes itself once
+    // the overlay confirms a room was actually joined.
+    auto* launcher = new OpenPakChatWindow(this);
+    launcher->setAttribute(Qt::WA_DeleteOnClose);
+    connect(launcher, &OpenPakChatWindow::CreateRoomRequested, legacy_room_overlay,
+            &OpenPakRoomOverlay::CreateRoom);
+    connect(launcher, &OpenPakChatWindow::JoinRoomRequested, legacy_room_overlay,
+            &OpenPakRoomOverlay::JoinRoom);
+    connect(legacy_room_overlay, &OpenPakRoomOverlay::RoomJoined, launcher, &QDialog::accept);
+    launcher->exec();
+}
+
 void GMainWindow::OnAlbum() {
     constexpr u64 AlbumId = static_cast<u64>(Service::AM::AppletProgramId::PhotoViewer);
     auto bis_system = system->GetFileSystemController().GetSystemNANDContents();
@@ -7007,7 +7095,17 @@ void GMainWindow::UpdateUITheme() {
     if (game_list) {
         game_list->RefreshTheme();
     }
- 
+
+    // UISettings::IsDarkTheme() only reflects the value just published above, so this
+    // has to run after it -- multiplayer_room_overlay is constructed once at startup and
+    // otherwise only repaints via a themeChanged signal that's declared but never emitted.
+    if (multiplayer_room_overlay) {
+        multiplayer_room_overlay->UpdateTheme();
+    }
+    if (legacy_room_overlay) {
+        legacy_room_overlay->UpdateTheme();
+    }
+
     m_is_updating_theme = false;
 }
 

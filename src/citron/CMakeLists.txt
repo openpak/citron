@@ -265,7 +265,18 @@ add_executable(citron
     legacy_account_page_p.h
     legacy_avatar_cache.cpp
     legacy_avatar_cache.h
+    legacy_chat_client.cpp
+    legacy_chat_client.h
+    legacy_chat_room.cpp
+    legacy_chat_room.h
+    legacy_chat_room.ui
+    legacy_chat_room_member_delegate.cpp
+    legacy_chat_room_member_delegate.h
+    legacy_chat_window.cpp
+    legacy_chat_window.h
     legacy_controller.cpp
+    legacy_room_overlay.cpp
+    legacy_room_overlay.h
     legacy_controller.h
     legacy_friend_delegate.cpp
     legacy_friend_delegate.h

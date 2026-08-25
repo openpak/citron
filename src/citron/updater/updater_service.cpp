@@ -39,11 +39,11 @@ namespace Updater {
 // /releases omits nightly-windows entirely even though it's fetchable by tag -- fetch by tag.
 const std::string NIGHTLY_UPDATE_URL =
 #if defined(_WIN32)
-    "https://api.github.com/repos/CollectingW/CI/releases/tags/nightly-windows";
+    "archived external source";
 #elif defined(__linux__)
-    "https://api.github.com/repos/CollectingW/CI/releases/tags/nightly-linux";
+    "archived external source";
 #else
-    "https://api.github.com/repos/CollectingW/CI/releases";
+    "archived external source";
 #endif
 
 std::string ExtractCommitHash(const std::string& version_string) {

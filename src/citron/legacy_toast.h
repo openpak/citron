@@ -20,7 +20,7 @@ class OpenPakToast : public QWidget {
 
 public:
     enum class Corner { TopRight, TopLeft, BottomRight, BottomLeft };
-    enum class Kind { Online, Offline, Request, RequestSent };
+    enum class Kind { Online, Offline, Request, RequestSent, ChatRequest };
 
     explicit OpenPakToast(QWidget* main_window);
     ~OpenPakToast() override;
