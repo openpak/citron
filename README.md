@@ -1,6 +1,6 @@
 # Citron Neo — Reference Network / NZ:P Edition
 
-A fork of the [Citron](https://git.citron-emu.org/citron/emu) with two
+A fork of the [Citron Neo](https://github.com/citron-neo/emulator) with two
 purposes:
 
 1. **Reference Network online play** — connect a Reference Network account and play supported titles
