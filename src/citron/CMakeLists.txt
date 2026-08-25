@@ -292,6 +292,8 @@ add_executable(citron
     legacy_population_dialog.h
     legacy_population_history.cpp
     legacy_population_history.h
+    nzp_online_count.cpp
+    nzp_online_count.h
     legacy_save_sync.cpp
     legacy_save_sync.h
     legacy_toast.cpp

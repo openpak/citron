@@ -169,6 +169,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/legacy_population_dialog.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_online_counts.h"
+#include "citron/nzp_online_count.h"
 #include "citron/legacy_population_history.h"
 #include "citron/legacy_save_sync.h"
 #include "citron/legacy_toast.h"
@@ -1302,6 +1303,7 @@ void GMainWindow::InitializeWidgets() {
     legacy_controller = new OpenPakController(*system, this, this);
     legacy_toast = new OpenPakToast(this);
     OpenPak::OnlineCounts::Start(this);
+    OpenPak::NzpOnlineCount::Start(this);
     OpenPak::PopulationHistory::Start(this);
 
     // Create status bar
