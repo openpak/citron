@@ -233,6 +233,159 @@ std::string DescribePrudpLite(std::span<const u8> data) {
     return out;
 }
 
+// Photon Realtime uses these UDP ports for its Name, Master and Game servers. Keep this
+// diagnostic deliberately narrow and metadata-only: authentication packets may contain a
+// platform ticket, so never write their payload to disk. The short prefix covers the Photon
+// transport header; the FNV fingerprint lets two retries be compared without retaining the
+// credential-bearing body.
+bool IsPhotonPort(u16 port) {
+    return port == 5055 || port == 5056 || port == 5058 ||
+           (port >= 27000 && port <= 27003);
+}
+
+std::string DescribePhotonPacket(std::span<const u8> data) {
+    constexpr u64 fnv_offset = 14695981039346656037ULL;
+    constexpr u64 fnv_prime = 1099511628211ULL;
+    u64 fingerprint = fnv_offset;
+    for (const u8 byte : data) {
+        fingerprint ^= byte;
+        fingerprint *= fnv_prime;
+    }
+    if (data.size() < 12) {
+        return fmt::format("short-frame fingerprint={:016x}", fingerprint);
+    }
+
+    const auto read_be16 = [](const u8* value) {
+        return static_cast<u16>((static_cast<u16>(value[0]) << 8) | value[1]);
+    };
+    const auto read_be32 = [](const u8* value) {
+        return (static_cast<u32>(value[0]) << 24) | (static_cast<u32>(value[1]) << 16) |
+               (static_cast<u32>(value[2]) << 8) | static_cast<u32>(value[3]);
+    };
+
+    const u8 command_count = data[3];
+    std::string commands;
+    size_t offset = 12;
+    for (u8 index = 0; index < command_count && index < 16; ++index) {
+        if (data.size() - offset < 12) {
+            commands += fmt::format(" c{}=truncated", index);
+            break;
+        }
+        const u8 type = data[offset];
+        const u8 channel = data[offset + 1];
+        const u32 command_len = read_be32(data.data() + offset + 4);
+        if (command_len < 12 || command_len > data.size() - offset) {
+            commands += fmt::format(" c{}=badlen:{}", index, command_len);
+            break;
+        }
+
+        commands += fmt::format(" c{}=type:{}:ch{}:len{}", index, type, channel, command_len);
+        size_t payload_offset = offset + 12;
+        if (type == 7 && command_len >= 16) { // SendUnreliable: four-byte sequence follows.
+            payload_offset += 4;
+        } else if ((type == 8 || type == 12) && command_len >= 32) {
+            // Fragment metadata is safe and is enough to correlate the split BAAS auth request.
+            const u32 fragment_count = read_be32(data.data() + offset + 16);
+            const u32 fragment_number = read_be32(data.data() + offset + 20);
+            const u32 total_length = read_be32(data.data() + offset + 24);
+            const u32 fragment_offset = read_be32(data.data() + offset + 28);
+            commands += fmt::format(":frag{}/{}:total{}:off{}", fragment_number + 1,
+                                    fragment_count, total_length, fragment_offset);
+            payload_offset = offset + 32;
+        }
+
+        if ((type == 6 || type == 7) && payload_offset + 2 <= offset + command_len &&
+            (data[payload_offset] == 0xf3 || data[payload_offset] == 0xfd)) {
+            const u8 wire_type = data[payload_offset + 1];
+            const bool encrypted = (wire_type & 0x80) != 0;
+            const u8 message_type = wire_type & 0x7f;
+            commands += fmt::format(":msg{}:{}", message_type,
+                                    encrypted ? "encrypted" : "plain");
+            if (!encrypted && message_type == 0) {
+                // Init chooses the virtual Photon application. App IDs are public client
+                // identifiers (not credentials) and appear as 32 ASCII hex digits. Extract
+                // only that exact shape; do not print arbitrary init bytes or custom data.
+                const size_t message_end = offset + command_len;
+                bool found_app_id = false;
+                for (size_t candidate = payload_offset + 2;
+                     candidate + 32 <= message_end; ++candidate) {
+                    bool is_app_id = true;
+                    for (size_t byte = 0; byte < 32; ++byte) {
+                        const u8 value = data[candidate + byte];
+                        if (!((value >= '0' && value <= '9') ||
+                              (value >= 'a' && value <= 'f') ||
+                              (value >= 'A' && value <= 'F'))) {
+                            is_app_id = false;
+                            break;
+                        }
+                    }
+                    if (is_app_id) {
+                        commands += fmt::format(
+                            ":app_id={}",
+                            std::string{reinterpret_cast<const char*>(data.data() + candidate),
+                                        32});
+                        found_app_id = true;
+                        break;
+                    }
+                }
+                if (!found_app_id) {
+                    // ponytail: temporary structural dump. The ASCII-hex scan above found
+                    // nothing, so the App ID (still public, non-secret) is encoded some other
+                    // way -- e.g. a raw 16-byte GUID or a dashed/length-prefixed string. Dump
+                    // this small Init body (App ID + SDK/app version only, no auth material) so
+                    // the real layout can be read back. Remove once the layout is confirmed.
+                    const auto body = data.subspan(payload_offset + 2, message_end - payload_offset - 2);
+                    commands += fmt::format(":init_body[{}]={}", body.size(),
+                                            Common::HexToString(body, false));
+                }
+            }
+            // OperationResponse/InternalOpResponse: code + return code are the first three
+            // body bytes in GpBinaryV16.
+            if (!encrypted && (message_type == 3 || message_type == 7) &&
+                payload_offset + 5 <= offset + command_len) {
+                const u8 operation_code = data[payload_offset + 2];
+                const s16 return_code_be = static_cast<s16>(
+                    read_be16(data.data() + payload_offset + 3));
+                const u16 return_code_le = static_cast<u16>(
+                    data[payload_offset + 3] |
+                    (static_cast<u16>(data[payload_offset + 4]) << 8));
+                commands += fmt::format(":op{}:rc_be{}:rc_le{}", operation_code,
+                                        return_code_be, return_code_le);
+                if (operation_code == 230) {
+                    // ponytail: temporary dump of the rest of the Authenticate
+                    // OperationResponse body -- Photon's own non-secret rejection
+                    // reason (a DebugMessage parameter), not auth/token material.
+                    // Remove once the reason is confirmed.
+                    const size_t message_end = offset + command_len;
+                    const size_t rest_offset = payload_offset + 5;
+                    if (rest_offset < message_end) {
+                        const auto rest = data.subspan(rest_offset, message_end - rest_offset);
+                        commands += fmt::format(":op230_rest[{}]={}", rest.size(),
+                                                Common::HexToString(rest, false));
+                    }
+                }
+            }
+        }
+        offset += command_len;
+    }
+
+    return fmt::format("peer={} frame_flags=0x{:02x} commands={}{} fingerprint={:016x}",
+                       read_be16(data.data()), data[2], command_count, commands, fingerprint);
+}
+
+void LogPhotonPacket(const char* direction, s32 fd, const Network::SockAddrIn& peer,
+                     std::span<const u8> data) {
+    if (!IsPhotonPort(peer.portno)) {
+        return;
+    }
+    const std::string ip = Network::IPv4AddressToString(peer.ip);
+    const std::string host = Service::Sockets::GetLastHostForIp(ip);
+    LOG_INFO(Service, "[Nextendo][PHOTON] {} fd={} host={} peer={}:{} len={} {}", direction,
+             fd, host.empty() ? "<server-hop>" : host,
+             Network::IPv4AddressToRedactedString(peer.ip), peer.portno, data.size(),
+             DescribePhotonPacket(data));
+}
+
 static bool TryInjectTlsSni(std::span<const u8> input, const std::string& host_name, std::vector<u8>& output) {
     if (input.size() < 43 || input[0] != 0x16) return false;
     size_t recordLen = (static_cast<size_t>(input[3]) << 8) | input[4];
@@ -2047,6 +2200,14 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
 
     auto [ret, bsd_errno] = Translate(descriptor.socket->Recv(flags, message));
 
+    if (ret > 0 && !descriptor.is_connection_based) {
+        const auto [peer, peer_err] = descriptor.socket->GetPeerName();
+        if (peer_err == Network::Errno::SUCCESS) {
+            LogPhotonPacket("RX", fd, peer,
+                            std::span<const u8>{message.data(), static_cast<size_t>(ret)});
+        }
+    }
+
     if (descriptor.sni_injected) {
         LOG_INFO(Service, "[Nextendo][DIAG] Recv fd={} requested={} ret={} errno={}", fd,
                  message.size(), ret, static_cast<int>(bsd_errno));
@@ -2210,6 +2371,10 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
                       Network::IPv4AddressToRedactedString(addr_in.ip), addr_in.portno, ret,
                       DescribePrudpLite(std::span<const u8>{message.data(),
                                                             static_cast<size_t>(std::max(ret, 0))}));
+            if (ret > 0) {
+                LogPhotonPacket("RX", fd, addr_in,
+                                std::span<const u8>{message.data(), static_cast<size_t>(ret)});
+            }
 
             // nncs reply is 4x u32 BE: [type][ext port][ext ip][server ip]. Remember the ext
             // ip so nextendo_nat_rewrite.cpp can fix up ReplaceURL's stale station address.
@@ -2258,6 +2423,12 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
     }
 
     auto [sent_bytes, err] = descriptor.socket->Send(send_buf, flags);
+    if (err == Network::Errno::SUCCESS && !descriptor.is_connection_based) {
+        const auto [peer, peer_err] = descriptor.socket->GetPeerName();
+        if (peer_err == Network::Errno::SUCCESS) {
+            LogPhotonPacket("TX", fd, peer, send_buf);
+        }
+    }
     if (err == Network::Errno::SUCCESS && !injected_buf.empty()) {
         sent_bytes = static_cast<s32>(message.size());
     }
@@ -2311,6 +2482,7 @@ std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> mes
         LOG_DEBUG(Service, "SendTo fd={} -> {}:{} len={} {}", fd,
                   Network::IPv4AddressToRedactedString(p_addr_in->ip), p_addr_in->portno,
                   message.size(), DescribePrudpLite(message));
+        LogPhotonPacket("TX", fd, *p_addr_in, message);
     }
 
     return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));

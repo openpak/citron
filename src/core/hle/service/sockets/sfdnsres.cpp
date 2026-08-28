@@ -146,6 +146,24 @@ static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
     return std::string(env);
 }
 
+// [Nextendo] Redirects Outbound's Photon traffic (ns.photonengine.io and friends) to our own
+// self-hosted Photon-protocol-compatible server instead of Photon Cloud -- see HANDOFF.md's
+// "Self-hosted Photon server" section in outbound-nextendo for why. Independent of
+// enable_nextendo, same reasoning as GetNplnDebugProxyIp above: a separate redirect target,
+// unset by default so it never affects a normal (non-Outbound) run.
+// NEXTENDO_PHOTON_IP=<ip> to enable.
+static std::optional<std::string> GetPhotonRedirectIp(const std::string& host) {
+    if (Common::ToLower(host).find("photonengine.io") == std::string::npos) {
+        return std::nullopt;
+    }
+    const char* env = std::getenv("NEXTENDO_PHOTON_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[Nextendo] Redirecting Photon host '{}' -> '{}'", host, env);
+    return std::string(env);
+}
+
 // [Nextendo] Optional delay before the first "npln" host resolution, against a hypothesized
 // startup deadlock. Disabled by default (max_wait_ms=0) -- unconfirmed benefit, and a nonzero
 // delay now blocks every other socket IPC call too (bsdsocket is single-threaded).
@@ -350,7 +368,10 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     }
 
     std::string query_host = host;
-    auto redirect = GetNextendoRedirectIp(host);
+    auto redirect = GetPhotonRedirectIp(host);
+    if (!redirect.has_value()) {
+        redirect = GetNextendoRedirectIp(host);
+    }
     if (redirect.has_value()) {
         query_host = *redirect;
     } else if (blocked_domains.find(host) != blocked_domains.end()) {
@@ -363,10 +384,11 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
         return {0, Translate(res.error())};
     }
 
-    if (redirect.has_value()) {
-        for (const auto& addrinfo : res.value()) {
-            SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
-        }
+    // Preserve hostname context for diagnostics even when no Nextendo redirect is active.
+    // This lets the BSD layer identify Outbound's Photon Name Server packets without logging
+    // any packet payload. Literal-IP queries still bypass this block above.
+    for (const auto& addrinfo : res.value()) {
+        SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
     }
 
     const std::vector<u8> data = SerializeAddrInfoAsHostEnt(res.value(), host);
@@ -535,6 +557,9 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     std::string query_host = host;
     auto redirect = GetNplnDebugProxyIp(host);
     if (!redirect.has_value()) {
+        redirect = GetPhotonRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
         redirect = GetNextendoRedirectIp(host);
     }
     if (redirect.has_value()) {
@@ -590,6 +615,12 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
             if (service_port.has_value()) {
                 SetLastIpForPort(*service_port, addrinfo.addr.ip);
             }
+        }
+    } else {
+        // Same metadata-only hostname tracking as GetHostByNameRequestImpl above. Normal DNS
+        // results were previously discarded, leaving Photon traffic identifiable only by port.
+        for (const auto& addrinfo : res.value()) {
+            SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
         }
     }
 
