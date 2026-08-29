@@ -256,6 +256,7 @@ public:
             {20105, &IFriendService::GetFriendListForViewer, "GetFriendListForViewer"},
             {20106, &IFriendService::UpdateFriendInfoForViewer, "UpdateFriendInfoForViewer"},
             {20107, &IFriendService::GetFriendDetailedInfoV2, "GetFriendDetailedInfoV2"},
+            {20108, &IFriendService::GetFriendDetailedInfoV3, "GetFriendDetailedInfoV3"},
             {20110, &IFriendService::LoadFriendSetting, "LoadFriendSetting"},
             {20200, &IFriendService::GetReceivedFriendRequestCount, "GetReceivedFriendRequestCount"},
             {20201, &IFriendService::GetFriendRequestList, "GetFriendRequestList"},
@@ -437,6 +438,7 @@ private:
     void GetFriendListForViewer(HLERequestContext& ctx);
     void UpdateFriendInfoForViewer(HLERequestContext& ctx);
     void GetFriendDetailedInfoV2(HLERequestContext& ctx);
+    void GetFriendDetailedInfoV3(HLERequestContext& ctx);
     void LoadFriendSetting(HLERequestContext& ctx);
     void GetFriendRequestList(HLERequestContext& ctx);
     void GetFriendRequestListV2(HLERequestContext& ctx);
@@ -1295,6 +1297,34 @@ void IFriendService::GetFriendDetailedInfoV2(HLERequestContext& ctx) {
              requested_ids.size(), out_count);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
+}
+
+void IFriendService::GetFriendDetailedInfoV3(HLERequestContext& ctx) {
+    // [Nextendo] Added in firmware 20.0.0. Citron had no case for this command id at all, which
+    // sent Outbound into the system Error applet on Invite Friends -- so this must return
+    // *something*. Every content we've tried for the 0x800+ MapAlias output buffer has produced
+    // a live crash or visible corruption on a real Switch+Citron run: this file's own FriendImpl
+    // struct (guest walked off into unmapped reads past our short data), the buffer left
+    // untouched (guest read back live heap garbage as a pointer and wrote through it forever),
+    // an all-zero fill sized to the guest's own allocation (still glitched into a garbled
+    // framebuffer then froze), and one real entry copied into a computed per-entry stride (same
+    // failure). We do not have a confirmed real layout for whatever struct this buffer holds,
+    // and guessing further risks repeating the same crash under a new guise. The one approach
+    // not yet tried: fail the call outright and never touch the output buffer at all, so the
+    // guest's own "did this call succeed" check -- which every other content variant skipped
+    // past, since we always returned ResultSuccess -- is what actually gates whether it reads
+    // the buffer. ErrorModule::Friends's exact codes aren't documented anywhere we have access
+    // to; this uses an arbitrary non-zero code purely to be reliably not ResultSuccess.
+    IPC::RequestParser rp{ctx};
+    const auto uuid = rp.PopRaw<Common::UUID>();
+    [[maybe_unused]] const auto network_service_account_id = rp.PopRaw<u64>();
+
+    LOG_INFO(Service_Friend, "[Nextendo] GetFriendDetailedInfoV3 uuid=0x{} -> failing, not "
+                              "touching buffer (see comment: every success-path content tried so "
+                              "far corrupted the guest)",
+             uuid.RawString());
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(Result{ErrorModule::Friends, 1});
 }
 
 void IFriendService::LoadFriendSetting(HLERequestContext& ctx) {

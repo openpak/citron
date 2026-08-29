@@ -16,6 +16,8 @@ public:
     ~IDisplayController() override;
 
 private:
+    Result GetLastApplicationCaptureImageEx(Out<bool> out_was_written,
+                                            OutBuffer<BufferAttr_HipcMapAlias> out_image_data);
     Result GetCallerAppletCaptureImageEx(Out<bool> out_was_written,
                                          OutBuffer<BufferAttr_HipcMapAlias> out_image_data);
     Result TakeScreenShotOfOwnLayer(bool unknown0, s32 fbshare_layer_index);

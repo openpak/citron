@@ -1355,17 +1355,14 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
         UNIMPLEMENTED_MSG("SOCK_RAW errno management");
     }
 
-    [[maybe_unused]] const bool unk_flag = (static_cast<u32>(type) & 0x20000000) != 0;
-    UNIMPLEMENTED_IF_MSG(unk_flag, "Unknown flag in type");
+    // Horizon/libnx defines these as socket-creation flags OR'ed into the base type.
+    // Preserve SOCK_NONBLOCK instead of merely stripping it: otherwise a guest polling
+    // recvfrom() becomes a literal blocking host call and can stall the title indefinitely.
+    const bool socket_nonblock = (static_cast<u32>(type) & 0x20000000) != 0;
     type = static_cast<Type>(static_cast<u32>(type) & ~0x20000000);
 
-    // [Nextendo] A second, separate unknown flag bit — observed set alongside 0x20000000 on the
-    // socket Fusion/Photon (Outbound) opens for its own NAT-punch/local-UDP transport, distinct
-    // from the Photon-relay connection. Left unstripped, it survives into Translate(Type), which
-    // has no case for it and asserts, corrupting this socket (subsequent Bind/Connect calls on it
-    // then fail with EBADF) right as a hosted session tries to move past its initial bootstrap.
-    [[maybe_unused]] const bool unk_flag2 = (static_cast<u32>(type) & 0x10000000) != 0;
-    UNIMPLEMENTED_IF_MSG(unk_flag2, "Unknown flag 0x10000000 in type");
+    // SOCK_CLOEXEC has no distinct meaning for Citron's emulated descriptor table, but it must
+    // not be passed to Translate(Type) as part of the base socket type.
     type = static_cast<Type>(static_cast<u32>(type) & ~0x10000000);
 
     const s32 fd = FindFreeFileDescriptorHandle();
@@ -1412,6 +1409,15 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
             constexpr u32 kGenerousUdpRcvBuf = 1024 * 1024;
             descriptor.socket->SetRcvBuf(kGenerousUdpRcvBuf);
         }
+    }
+
+    if (socket_nonblock) {
+        const auto nonblock_errno = descriptor.socket->SetNonBlock(true);
+        if (nonblock_errno != Network::Errno::SUCCESS) {
+            file_descriptors[fd].reset();
+            return {-1, Translate(nonblock_errno)};
+        }
+        descriptor.flags |= Network::FLAG_O_NONBLOCK;
     }
 
     return {fd, Errno::SUCCESS};

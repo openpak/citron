@@ -18,7 +18,7 @@ IDisplayController::IDisplayController(Core::System& system_, std::shared_ptr<Ap
         {3, nullptr, "GetCallerAppletCaptureImage"},
         {4, nullptr, "UpdateCallerAppletCaptureImage"},
         {5, nullptr, "GetLastForegroundCaptureImageEx"},
-        {6, nullptr, "GetLastApplicationCaptureImageEx"},
+        {6, D<&IDisplayController::GetLastApplicationCaptureImageEx>, "GetLastApplicationCaptureImageEx"},
         {7, D<&IDisplayController::GetCallerAppletCaptureImageEx>, "GetCallerAppletCaptureImageEx"},
         {8, D<&IDisplayController::TakeScreenShotOfOwnLayer>, "TakeScreenShotOfOwnLayer"},
         {9, nullptr, "CopyBetweenCaptureBuffers"},
@@ -47,6 +47,16 @@ IDisplayController::IDisplayController(Core::System& system_, std::shared_ptr<Ap
 }
 
 IDisplayController::~IDisplayController() = default;
+
+Result IDisplayController::GetLastApplicationCaptureImageEx(
+    Out<bool> out_was_written, OutBuffer<BufferAttr_HipcMapAlias> out_image_data) {
+    LOG_WARNING(Service_AM, "(STUBBED) called");
+    // No application capture has actually been taken -- report honestly so callers (e.g. a
+    // friend-invitation card wanting a screenshot) fall back cleanly instead of reading an
+    // uninitialized buffer.
+    *out_was_written = false;
+    R_SUCCEED();
+}
 
 Result IDisplayController::GetCallerAppletCaptureImageEx(
     Out<bool> out_was_written, OutBuffer<BufferAttr_HipcMapAlias> out_image_data) {
