@@ -1300,40 +1300,69 @@ void IFriendService::GetFriendDetailedInfoV2(HLERequestContext& ctx) {
 }
 
 void IFriendService::GetFriendDetailedInfoV3(HLERequestContext& ctx) {
-    // [Nextendo] Added in firmware 20.0.0. Citron had no case for this command id at all, which
-    // sent Outbound into the system Error applet on Invite Friends. Earlier attempts assumed the
-    // crash was about the per-entry struct layout inside the 0x800+ MapAlias output buffer, but
-    // failing the call outright (ResultSuccess never returned) also stops the crash -- which
-    // means the guest is gated on the *result code*, not the buffer content, same as every
-    // other function in this file. That points at a different, more precise bug: this file's
-    // sibling batch calls (GetFriendListForViewer, GetProfileList) that also return a variable
-    // number of entries out of a fixed-capacity buffer always push an explicit `count` scalar
-    // (IPC::ResponseBuilder{ctx, 3}) alongside ResultSuccess, since the buffer's own size can't
-    // tell the caller how many of those slots are actually valid. GetFriendDetailedInfoV3 never
-    // requests an id list, only a single Uid, but still writes into a fixed 300-slot buffer --
-    // it needs that same count scalar for the same reason, and previously only pushed
-    // {ctx, 2} (Result only). A missing count almost certainly reads as garbage on the guest
-    // side, which fits exactly the "walks off into billions of bytes" unmapped-read pattern the
-    // all-zero-buffer attempt produced -- not a struct-layout bug, a missing response word.
-    // Succeeding with an honest count=0 (no detailed entries returned, matching that we don't
-    // have real per-entry data to offer) should let the guest bound its own read at zero instead
-    // of an uninitialized stack value.
+    // [Nextendo] Added in firmware 20.0.0. The real bug behind every earlier crash on this call
+    // (see git history) was a missing `count` response word, not the per-entry struct layout --
+    // proven by the fact that failing the call outright (never returning ResultSuccess) also
+    // stopped the crash, alongside every buffer-content variant that returned success. This
+    // file's sibling batch calls that return a variable number of entries out of a fixed-
+    // capacity buffer (GetFriendListForViewer, GetProfileList) all push an explicit u32 count
+    // alongside ResultSuccess for exactly this reason. With that fixed and confirmed live
+    // (count=0, zeroed buffer -> the real "no friends" empty state, no crash, no session
+    // teardown on cancel), it's now safe to also forward real data: reuses FriendImpl the same
+    // way GetFriendDetailedInfo(V2) already do (independently confirmed correct via live
+    // disassembly of Outbound's own nn.friends bindings -- see HANDOFF.md), zero-padded to
+    // whatever the real per-entry stride turns out to be if the guest's buffer isn't an exact
+    // multiple of MaxRequestedIds * sizeof(FriendImpl).
     IPC::RequestParser rp{ctx};
     const auto uuid = rp.PopRaw<Common::UUID>();
     [[maybe_unused]] const auto network_service_account_id = rp.PopRaw<u64>();
 
+    constexpr std::size_t MaxCandidates = 300;
     const auto buffer_size = ctx.GetWriteBufferSize();
+    const auto entry_stride = (buffer_size > 0 && buffer_size % MaxCandidates == 0)
+                                  ? buffer_size / MaxCandidates
+                                  : sizeof(FriendImpl);
+
+    const auto entries = Common::NextendoFriends::Get();
+    u32 count = 0;
     if (buffer_size > 0) {
-        const std::vector<u8> zeroed(buffer_size, 0);
-        ctx.WriteBuffer(zeroed);
+        std::vector<u8> out(buffer_size, 0);
+        if (entry_stride >= sizeof(FriendImpl)) {
+            const auto capacity = std::min<std::size_t>(buffer_size / entry_stride, MaxCandidates);
+            count = static_cast<u32>(std::min(entries.size(), capacity));
+            // [Nextendo] Confirmed live that MyPage's follow-up GetFriendProfileImage/
+            // GetFriendDetailedInfoV2 calls still read a zero Uid out of this buffer even with
+            // FriendImpl written at offset 0 -- so FriendImpl's real position inside each
+            // entry_stride-sized slot isn't offset 0 (name/status/image never render, even
+            // though the tile itself does -- something near the front still lines up, just not
+            // the Uid specifically). Real disassembly of MyPage's own compiled code (see
+            // HANDOFF.md) found the exact command-dispatch stub for GetFriendProfileImage and
+            // confirmed it dereferences a Uid pointer, but tracing the call site back to its
+            // source struct needs full vtable reconstruction -- decompiler-grade work, not
+            // pattern-matching. Writing FriendImpl at both offset 0 and the tail-aligned offset
+            // (entry_stride - sizeof(FriendImpl), i.e. right-aligned, in case a header precedes
+            // it rather than padding following it) is a cheap hedge against either guess being
+            // right, confirmed live to be a net improvement: it's what unlocked the friend tile
+            // actually being selectable through to a real "Invite" / "Invitation sent" outcome,
+            // even though the avatar/name specifically still don't render. Keep both writes.
+            const auto tail_offset = entry_stride - sizeof(FriendImpl);
+            for (u32 i = 0; i < count; ++i) {
+                const FriendImpl info = MakeFriend(entries[i]);
+                std::memcpy(out.data() + i * entry_stride, &info, sizeof(FriendImpl));
+                if (tail_offset != 0) {
+                    std::memcpy(out.data() + i * entry_stride + tail_offset, &info, sizeof(FriendImpl));
+                }
+            }
+        }
+        ctx.WriteBuffer(out);
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendDetailedInfoV3 uuid=0x{} -> zeroed {} bytes, "
-                              "count=0",
-             uuid.RawString(), buffer_size);
+    LOG_INFO(Service_Friend,
+             "[Nextendo] GetFriendDetailedInfoV3 uuid=0x{} -> {} bytes, stride={}, count={}",
+             uuid.RawString(), buffer_size, entry_stride, count);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u32>(0);
+    rb.Push<u32>(count);
 }
 
 void IFriendService::LoadFriendSetting(HLERequestContext& ctx) {
