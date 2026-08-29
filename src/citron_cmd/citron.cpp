@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <regex>
@@ -22,6 +24,7 @@
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
+#include "core/file_sys/content_archive.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/am/applet_manager.h"
@@ -196,6 +199,46 @@ int main(int argc, char** argv) {
     Common::Log::SetColorConsoleBackendEnabled(true);
     Common::Log::Start();
     Common::DetachedTasks detached_tasks;
+
+    // [Nextendo] Scratch one-off: extract an NCA's ExeFS to plain files on disk. citron has no
+    // GUI equivalent of Ryujinx's "Extract Data -> ExeFS" (only Dump RomFS exists), and this is
+    // needed to decompile a system title's own main NSO (not a game's) for research purposes.
+    // Not meant to stay long-term -- gated behind an argv[1] flag unlikely to collide with any
+    // real usage, exits immediately after, never touches the emulation loop below.
+    if (argc >= 4 && std::string(argv[1]) == "--nextendo-nca-extract") {
+        const std::string nca_path = argv[2];
+        const std::string out_dir = argv[3];
+
+        auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+        const auto nca_file = vfs->OpenFile(nca_path, FileSys::OpenMode::Read);
+        if (nca_file == nullptr) {
+            fmt::print(stderr, "Failed to open {}\n", nca_path);
+            return 1;
+        }
+
+        const FileSys::NCA nca{nca_file};
+        if (nca.GetStatus() != Loader::ResultStatus::Success) {
+            fmt::print(stderr, "NCA parse failed, status={}\n", static_cast<int>(nca.GetStatus()));
+            return 1;
+        }
+
+        const auto exefs = nca.GetExeFS();
+        if (exefs == nullptr) {
+            fmt::print(stderr, "No ExeFS in this NCA\n");
+            return 1;
+        }
+
+        std::filesystem::create_directories(out_dir);
+        for (const auto& file : exefs->GetFiles()) {
+            const auto data = file->ReadAllBytes();
+            const auto out_path = std::filesystem::path(out_dir) / file->GetName();
+            std::ofstream out(out_path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(data.data()),
+                      static_cast<std::streamsize>(data.size()));
+            fmt::print("wrote {} ({} bytes)\n", out_path.string(), data.size());
+        }
+        return 0;
+    }
 
     int option_index = 0;
 #ifdef _WIN32
