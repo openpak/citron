@@ -1301,30 +1301,39 @@ void IFriendService::GetFriendDetailedInfoV2(HLERequestContext& ctx) {
 
 void IFriendService::GetFriendDetailedInfoV3(HLERequestContext& ctx) {
     // [Nextendo] Added in firmware 20.0.0. Citron had no case for this command id at all, which
-    // sent Outbound into the system Error applet on Invite Friends -- so this must return
-    // *something*. Every content we've tried for the 0x800+ MapAlias output buffer has produced
-    // a live crash or visible corruption on a real Switch+Citron run: this file's own FriendImpl
-    // struct (guest walked off into unmapped reads past our short data), the buffer left
-    // untouched (guest read back live heap garbage as a pointer and wrote through it forever),
-    // an all-zero fill sized to the guest's own allocation (still glitched into a garbled
-    // framebuffer then froze), and one real entry copied into a computed per-entry stride (same
-    // failure). We do not have a confirmed real layout for whatever struct this buffer holds,
-    // and guessing further risks repeating the same crash under a new guise. The one approach
-    // not yet tried: fail the call outright and never touch the output buffer at all, so the
-    // guest's own "did this call succeed" check -- which every other content variant skipped
-    // past, since we always returned ResultSuccess -- is what actually gates whether it reads
-    // the buffer. ErrorModule::Friends's exact codes aren't documented anywhere we have access
-    // to; this uses an arbitrary non-zero code purely to be reliably not ResultSuccess.
+    // sent Outbound into the system Error applet on Invite Friends. Earlier attempts assumed the
+    // crash was about the per-entry struct layout inside the 0x800+ MapAlias output buffer, but
+    // failing the call outright (ResultSuccess never returned) also stops the crash -- which
+    // means the guest is gated on the *result code*, not the buffer content, same as every
+    // other function in this file. That points at a different, more precise bug: this file's
+    // sibling batch calls (GetFriendListForViewer, GetProfileList) that also return a variable
+    // number of entries out of a fixed-capacity buffer always push an explicit `count` scalar
+    // (IPC::ResponseBuilder{ctx, 3}) alongside ResultSuccess, since the buffer's own size can't
+    // tell the caller how many of those slots are actually valid. GetFriendDetailedInfoV3 never
+    // requests an id list, only a single Uid, but still writes into a fixed 300-slot buffer --
+    // it needs that same count scalar for the same reason, and previously only pushed
+    // {ctx, 2} (Result only). A missing count almost certainly reads as garbage on the guest
+    // side, which fits exactly the "walks off into billions of bytes" unmapped-read pattern the
+    // all-zero-buffer attempt produced -- not a struct-layout bug, a missing response word.
+    // Succeeding with an honest count=0 (no detailed entries returned, matching that we don't
+    // have real per-entry data to offer) should let the guest bound its own read at zero instead
+    // of an uninitialized stack value.
     IPC::RequestParser rp{ctx};
     const auto uuid = rp.PopRaw<Common::UUID>();
     [[maybe_unused]] const auto network_service_account_id = rp.PopRaw<u64>();
 
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendDetailedInfoV3 uuid=0x{} -> failing, not "
-                              "touching buffer (see comment: every success-path content tried so "
-                              "far corrupted the guest)",
-             uuid.RawString());
-    IPC::ResponseBuilder rb{ctx, 2};
-    rb.Push(Result{ErrorModule::Friends, 1});
+    const auto buffer_size = ctx.GetWriteBufferSize();
+    if (buffer_size > 0) {
+        const std::vector<u8> zeroed(buffer_size, 0);
+        ctx.WriteBuffer(zeroed);
+    }
+
+    LOG_INFO(Service_Friend, "[Nextendo] GetFriendDetailedInfoV3 uuid=0x{} -> zeroed {} bytes, "
+                              "count=0",
+             uuid.RawString(), buffer_size);
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0);
 }
 
 void IFriendService::LoadFriendSetting(HLERequestContext& ctx) {
