@@ -1359,6 +1359,15 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
     UNIMPLEMENTED_IF_MSG(unk_flag, "Unknown flag in type");
     type = static_cast<Type>(static_cast<u32>(type) & ~0x20000000);
 
+    // [Nextendo] A second, separate unknown flag bit — observed set alongside 0x20000000 on the
+    // socket Fusion/Photon (Outbound) opens for its own NAT-punch/local-UDP transport, distinct
+    // from the Photon-relay connection. Left unstripped, it survives into Translate(Type), which
+    // has no case for it and asserts, corrupting this socket (subsequent Bind/Connect calls on it
+    // then fail with EBADF) right as a hosted session tries to move past its initial bootstrap.
+    [[maybe_unused]] const bool unk_flag2 = (static_cast<u32>(type) & 0x10000000) != 0;
+    UNIMPLEMENTED_IF_MSG(unk_flag2, "Unknown flag 0x10000000 in type");
+    type = static_cast<Type>(static_cast<u32>(type) & ~0x10000000);
+
     const s32 fd = FindFreeFileDescriptorHandle();
     if (fd < 0) {
         LOG_ERROR(Service, "No more file descriptors available");
