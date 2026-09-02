@@ -50,6 +50,15 @@ public:
     void RefreshFriendCache();
     void NotifyFriendRequestSent(const QString& friend_code);
 
+    // Skips the native Invite Friends applet (blocked by an unrecovered firmware struct
+    // layout, see HANDOFF.md) entirely: injects the friend's already-fetched presence
+    // app_field straight into the local pending-invitation queue, as if a real invitation
+    // had just arrived, so the running/next-launched title's own
+    // TryPopFromFriendInvitationStorageChannel poll picks it up normally. Returns a
+    // human-readable result so the caller can show it directly -- StatusChanged alone isn't
+    // reliably visible from every page/dialog this can be triggered from.
+    QString JoinFriendSession(u64 pid);
+
     void ManualSaveDownload(u64 title_id);
     void QuickStart(u64 title_id);
 
@@ -86,6 +95,14 @@ signals:
     // itself decides what it cares about instead of this class knowing every message shape.
     void ChatRawMessage(QJsonObject obj);
 
+    // [Nextendo] Real hardware surfaces a game-session invitation as a HOME-menu-level
+    // notification, independent of whether the target title happens to be running -- not
+    // something the receiving GAME renders itself. PollInvitations emits this the same way
+    // FriendRequestReceived does, so main.cpp can show it as a toast regardless of what's
+    // currently running; the underlying delivery into TryPopFromFriendInvitationStorageChannel
+    // (see SetPendingInvitations) still happens unconditionally alongside it.
+    void FriendInvitationReceived(u64 from_pid, QString from_name);
+
 private:
     void ApplyProfileName(const std::string& name);
     // Forces the active Switch profile's picture to match the linked Nextendo account's
@@ -94,10 +111,12 @@ private:
     void SyncProfileAvatar();
     void WriteProfileAvatar(const Common::UUID& uuid, const std::string& avatar_b64);
     void PollFriends();
+    void PollInvitations();
 
     Core::System& system;
     QWidget* main_window;
     QTimer friend_poll_timer;
+    QTimer invitation_poll_timer;
     std::map<u64, s32> last_known_status;
     std::map<u64, int> offline_streak; // consecutive polls seen offline, not yet confirmed
     std::set<u64> last_known_requests;

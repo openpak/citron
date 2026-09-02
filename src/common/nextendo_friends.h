@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,5 +55,43 @@ std::string GetLocalAppField();
 // account server's presence TTL from expiring while the state is unchanged (e.g. idle in a hosted
 // room). False means neither condition applies yet -- don't publish.
 bool TakeLocalPresenceForPublish(s32& status, std::string& app_field);
+
+// A real-time game-session invitation waiting for this account, relayed via the account
+// server's own mailbox (see nextendo-account's invitations.go) -- not a friend, just an
+// invite. app_param is the opaque, game-defined bytes the sender's own game constructed;
+// never interpreted here, only carried through to TryPopFromFriendInvitationStorageChannel.
+struct PendingInvitation {
+    u64 from_pid = 0;
+    std::string from_name;
+    std::vector<u8> app_param;
+};
+
+// Same "frontend polls the network, service reads a cheap cache" split as Set()/Get() above,
+// and for the same reason: TryPopFromFriendInvitationStorageChannel is called from the guest's
+// own polling loop, dozens of times a second while a friend-invite screen is open -- an IPC
+// handler must never itself block on a network round trip. Appends rather than replacing: the
+// account server's own GET already pops (consumes) its queue on every poll, so an item this
+// call adds must survive until PopPendingInvitation() actually delivers it to the guest, even
+// across a poll that lands before that happens.
+void SetPendingInvitations(std::vector<PendingInvitation> invitations);
+
+// Pops (removes and returns) the oldest queued invitation, or nullopt if none are waiting --
+// matches TryPopFromFriendInvitationStorageChannel's own single-item pop semantics.
+std::optional<PendingInvitation> PopPendingInvitation();
+
+// Real HOS semantics for this channel are event-driven: the guest calls
+// GetFriendInvitationStorageChannelEvent once, then waits on that event rather than polling
+// TryPopFromFriendInvitationStorageChannel in a tight loop. IApplicationFunctions registers a
+// callback here (weak-bound to its own Applet) for the lifetime of the running application;
+// SetPendingInvitations invokes it after adding new items so a guest genuinely blocked on the
+// event wakes immediately, instead of depending on the game happening to poll again on its own
+// schedule. No-op if nothing is registered (no application running).
+void SetInvitationSignalCallback(std::function<void()> callback);
+
+// Opaque join parameter supplied to the native MyPage invite applet by the running title.
+// MyPage performs Nintendo's network send internally on hardware; Citron uses this cached copy
+// to reproduce that side effect after the applet reports a successful selection.
+void SetOutgoingInvitationParameter(std::vector<u8> app_param);
+std::vector<u8> TakeOutgoingInvitationParameter();
 
 } // namespace Common::NextendoFriends

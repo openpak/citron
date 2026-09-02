@@ -328,6 +328,16 @@ void GDBStub::ExecuteCommand(std::string_view packet, std::vector<DebuggerAction
     case 'c':
         actions.push_back(DebuggerAction::Continue);
         break;
+    case 'D':
+        // [Nextendo] Standard GDB detach: resume emulation and let the
+        // socket close — NOT the kill path. gdb falls back to 'k'
+        // (ShutdownEmulation here) when it cannot detach, which would
+        // shut the game down mid-session; experiment tooling needs
+        // clean attach/study/detach cycles (amongus-nextendo,
+        // 2026-08-31). Must reply OK or gdb retries and times out.
+        actions.push_back(DebuggerAction::Continue);
+        SendReply(GDB_STUB_REPLY_OK);
+        break;
     case 'Z':
         HandleBreakpointInsert(command);
         break;

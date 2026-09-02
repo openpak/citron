@@ -246,10 +246,30 @@ std::optional<std::string> SanitizeBaseUrl(std::string raw) {
     if (scheme != "https") {
         return std::nullopt;
     }
-    if (host != "nextendo.network" && !host.ends_with(".nextendo.network")) {
-        return std::nullopt;
+    if (host == "nextendo.network" || host.ends_with(".nextendo.network")) {
+        return raw;
     }
-    return raw;
+    // [Nextendo] Self-hosted deployments may serve the account API on their own
+    // https domain (e.g. account.tobagin.eu behind the tester's Traefik).
+    // Opt-in comma-separated suffix list; a match on dot boundaries accepts the
+    // bare domain and any subdomain of it. Fails closed: unset means only
+    // nextendo.network is trusted, exactly as before.
+    if (const char* trusted = std::getenv("NEXTENDO_API_TRUSTED_SUFFIX"); trusted && *trusted) {
+        std::string list = trusted;
+        size_t pos = 0;
+        while (pos <= list.size()) {
+            size_t comma = list.find(',', pos);
+            if (comma == std::string::npos) {
+                comma = list.size();
+            }
+            std::string suffix = Common::StripSpaces(list.substr(pos, comma - pos));
+            if (!suffix.empty() && (host == suffix || host.ends_with("." + suffix))) {
+                return raw;
+            }
+            pos = comma + 1;
+        }
+    }
+    return std::nullopt;
 }
 
 httplib::Client& SharedClient() {
@@ -1069,6 +1089,68 @@ std::string ReportPlayer(u64 pid, const std::string& reason, const std::string& 
         return ErrorFrom(result->body, fmt::format("Request failed (HTTP {}).", result->status));
     }
     return {};
+}
+
+std::string SendInvitation(const std::vector<u64>& target_pids, std::span<const u8> app_param) {
+    const std::string token = Common::NextendoAccount::GetToken();
+    if (token.empty()) {
+        return "Not signed in.";
+    }
+    if (target_pids.empty()) {
+        return {};
+    }
+    const nlohmann::json body{
+        {"target_pids", target_pids},
+        {"app_param_base64", Base64StdEncode(app_param)},
+    };
+    const auto result = Send("POST", "/api/invitations", body.dump(), token);
+    if (ClearSessionIfRejected(result)) {
+        return "Your session expired. Sign in again.";
+    }
+    if (!result) {
+        return "Could not reach the Nextendo account server.";
+    }
+    if (result->status != 200) {
+        return ErrorFrom(result->body, fmt::format("Request failed (HTTP {}).", result->status));
+    }
+    return {};
+}
+
+std::vector<ReceivedInvitation> PollInvitations() {
+    std::vector<ReceivedInvitation> out;
+    const std::string token = Common::NextendoAccount::GetToken();
+    if (token.empty()) {
+        return out;
+    }
+    const auto result = Send("GET", "/api/invitations", {}, token);
+    if (ClearSessionIfRejected(result)) {
+        LOG_WARNING(WebService, "[Nextendo] PollInvitations: session rejected");
+        return out;
+    }
+    if (!result) {
+        LOG_WARNING(WebService, "[Nextendo] PollInvitations: request failed (no response)");
+        return out;
+    }
+    if (result->status != 200) {
+        LOG_WARNING(WebService, "[Nextendo] PollInvitations: HTTP {}", result->status);
+        return out;
+    }
+    try {
+        const auto json = nlohmann::json::parse(result->body);
+        for (const auto& entry : json.value("invitations", nlohmann::json::array())) {
+            ReceivedInvitation inv;
+            inv.from_pid = entry.value("from_pid", u64{0});
+            inv.from_name = entry.value("from_name", std::string{});
+            inv.app_param = Base64StdDecode(entry.value("app_param_base64", std::string{}));
+            out.push_back(std::move(inv));
+        }
+    } catch (const nlohmann::json::exception& e) {
+        LOG_WARNING(WebService, "PollInvitations: unexpected response: {}", e.what());
+    }
+    if (!out.empty()) {
+        LOG_INFO(WebService, "[Nextendo] PollInvitations: {} invitation(s)", out.size());
+    }
+    return out;
 }
 
 std::optional<int> PingBackend() {

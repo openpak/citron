@@ -214,6 +214,12 @@ private:
     // GetNoDelay's own getsockopt() call can be trusted -- see the definition comment on
     // GetNoDelay in network.cpp.
     std::optional<bool> no_delay_cache;
+    // [Nextendo] Raw-ICMP sockets are opened as Linux unprivileged ping sockets
+    // (SOCK_DGRAM) -- see Socket::Initialize in network.cpp. is_ping_socket selects
+    // the identifier-binding behavior in SendTo so echo replies match the guest's
+    // requests; ping_id_bound makes that bind happen once, on the first request.
+    bool is_ping_socket = false;
+    bool ping_id_bound = false;
 };
 
 std::pair<s32, Errno> Poll(std::vector<PollFD>& poll_fds, s32 timeout);

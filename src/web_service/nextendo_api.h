@@ -83,6 +83,26 @@ std::string RemoveFriend(u64 pid);
 // Pushes the console nickname so friends and games see the account's name, not "Player".
 void PushProfileName(const std::string& name);
 
+// A real-time game-session invitation, e.g. nn::friends SendFriendInvitation/
+// TryPopFromFriendInvitationStorageChannel. app_param is the opaque, game-defined bytes the
+// sending title itself constructed (its own room code / join info) -- never interpreted here,
+// only relayed byte-for-byte.
+struct ReceivedInvitation {
+    u64 from_pid = 0;
+    std::string from_name;
+    std::vector<u8> app_param;
+};
+
+// Sends target_pids (must already be mutual friends of the caller) an invitation carrying
+// app_param verbatim. Returns an empty string on success, else a message fit to show the user.
+std::string SendInvitation(const std::vector<u64>& target_pids, std::span<const u8> app_param);
+
+// Pops (consumes) every invitation currently queued for this account. Empty on failure or if
+// none are waiting -- there is no way to distinguish the two from this call alone, matching
+// TryPopFromFriendInvitationStorageChannel's own "no data" vs "call failed" ambiguity on
+// real hardware.
+std::vector<ReceivedInvitation> PollInvitations();
+
 // A player as seen in the current lobby or in the recent-encounters list. The server never
 // includes an IP address in either. avatar_url identifies whether the player has a picture;
 // fetch the bytes with GetAvatarByPid, which reconstructs the request path from pid rather than

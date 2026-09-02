@@ -20,6 +20,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/server_manager.h"
+#include "web_service/nextendo_api.h"
 
 // [UNITY-FIX] undef Win32 macros shadowing ServiceContext methods.
 #undef CreateEvent
@@ -1330,21 +1331,13 @@ void IFriendService::GetFriendDetailedInfoV3(HLERequestContext& ctx) {
         if (entry_stride >= sizeof(FriendImpl)) {
             const auto capacity = std::min<std::size_t>(buffer_size / entry_stride, MaxCandidates);
             count = static_cast<u32>(std::min(entries.size(), capacity));
-            // [Nextendo] Confirmed live that MyPage's follow-up GetFriendProfileImage/
-            // GetFriendDetailedInfoV2 calls still read a zero Uid out of this buffer even with
-            // FriendImpl written at offset 0 -- so FriendImpl's real position inside each
-            // entry_stride-sized slot isn't offset 0 (name/status/image never render, even
-            // though the tile itself does -- something near the front still lines up, just not
-            // the Uid specifically). Real disassembly of MyPage's own compiled code (see
-            // HANDOFF.md) found the exact command-dispatch stub for GetFriendProfileImage and
-            // confirmed it dereferences a Uid pointer, but tracing the call site back to its
-            // source struct needs full vtable reconstruction -- decompiler-grade work, not
-            // pattern-matching. Writing FriendImpl at both offset 0 and the tail-aligned offset
-            // (entry_stride - sizeof(FriendImpl), i.e. right-aligned, in case a header precedes
-            // it rather than padding following it) is a cheap hedge against either guess being
-            // right, confirmed live to be a net improvement: it's what unlocked the friend tile
-            // actually being selectable through to a real "Invite" / "Invitation sent" outcome,
-            // even though the avatar/name specifically still don't render. Keep both writes.
+            // [Nextendo] The FRONT-TEST/TAIL-TEST probe (see HANDOFF.md) settled its question:
+            // neither offset 0 nor the tail-aligned offset is what the picker TILE reads for
+            // name/status -- both stayed blank/offline live, so that summary comes from
+            // somewhere this buffer doesn't cover (needs real decompiler-grade RE, not more
+            // guessing). Reverted to writing real entries at both offsets: this is the known
+            // combination that already got a tile selectable through to a real completed send
+            // (see HANDOFF.md "follow-up 4"), even with the tile's own name/avatar still blank.
             const auto tail_offset = entry_stride - sizeof(FriendImpl);
             for (u32 i = 0; i < count; ++i) {
                 const FriendImpl info = MakeFriend(entries[i]);
@@ -1769,16 +1762,58 @@ void IFriendService::ClearPlayLog(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
 }
 
-void IFriendService::SendFriendInvitation(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) SendFriendInvitation called");
+namespace {
+
+// [Nextendo] Real send path for SendFriendInvitation/V2. Real SDK signature (confirmed via
+// Ryujinx-Nextendo's own independently reverse-engineered IFriendService.cs, cmd 30900):
+// (Uid userId, NetworkServiceAccountId[] friendIds [type-X buffer], in
+// FriendInvitationGameModeDescription description [0xC0-byte type-A buffer],
+// ApplicationInfo applicationInfo [raw scalar], byte[] appParameter [type-A buffer], bool).
+// We only need friendIds (raw u64 pids -- NOT the still-unresolved synthetic Uid this file's
+// other calls have been stuck on all session, see HANDOFF.md) and appParameter (the opaque,
+// game-defined join-info bytes Outbound itself constructed; never interpreted here, only
+// relayed verbatim to nextendo-account, which relays it to the target's own console).
+// FriendInvitationGameModeDescription's real size is independently confirmed as exactly 0xC0
+// (192) bytes from Outbound's own compiled nn.friends bindings (see HANDOFF.md) -- used here
+// to disambiguate the two type-A buffers by size rather than trusting buffer-index order
+// alone, in case Ryujinx's own guessed declaration order doesn't match citron's HIPC buffer
+// numbering exactly.
+void SendFriendInvitationImpl(HLERequestContext& ctx, const char* name) {
+    const auto friend_ids_raw = ctx.ReadBufferX(0);
+    std::vector<u64> target_pids;
+    if (!friend_ids_raw.empty()) {
+        target_pids.resize(friend_ids_raw.size() / sizeof(u64));
+        std::memcpy(target_pids.data(), friend_ids_raw.data(),
+                    target_pids.size() * sizeof(u64));
+    }
+
+    constexpr std::size_t DescriptionSize = 0xC0;
+    std::vector<u8> app_param;
+    for (std::size_t i = 0; i < ctx.BufferDescriptorA().size(); ++i) {
+        const auto buf = ctx.ReadBufferA(i);
+        if (buf.size() != DescriptionSize && !buf.empty()) {
+            app_param.assign(buf.begin(), buf.end());
+            break;
+        }
+    }
+
+    const auto error = WebService::NextendoApi::SendInvitation(target_pids, app_param);
+    LOG_INFO(Service_Friend,
+             "[Nextendo] {} target_pids={} app_param_size={} -> {}", name, target_pids.size(),
+             app_param.size(), error.empty() ? "ok" : error);
+
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
 }
 
+} // Anonymous namespace
+
+void IFriendService::SendFriendInvitation(HLERequestContext& ctx) {
+    SendFriendInvitationImpl(ctx, "SendFriendInvitation");
+}
+
 void IFriendService::SendFriendInvitationV2(HLERequestContext& ctx) {
-    LOG_WARNING(Service_Friend, "(STUBBED) SendFriendInvitationV2 called");
-    IPC::ResponseBuilder rb{ctx, 2};
-    rb.Push(ResultSuccess);
+    SendFriendInvitationImpl(ctx, "SendFriendInvitationV2");
 }
 
 void IFriendService::ReadFriendInvitation(HLERequestContext& ctx) {

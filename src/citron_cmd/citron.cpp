@@ -26,6 +26,7 @@
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/registered_cache.h"
+#include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -225,6 +226,75 @@ int main(int argc, char** argv) {
         const auto exefs = nca.GetExeFS();
         if (exefs == nullptr) {
             fmt::print(stderr, "No ExeFS in this NCA\n");
+            return 1;
+        }
+
+        std::filesystem::create_directories(out_dir);
+        for (const auto& file : exefs->GetFiles()) {
+            const auto data = file->ReadAllBytes();
+            const auto out_path = std::filesystem::path(out_dir) / file->GetName();
+            std::ofstream out(out_path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(data.data()),
+                      static_cast<std::streamsize>(data.size()));
+            fmt::print("wrote {} ({} bytes)\n", out_path.string(), data.size());
+        }
+        return 0;
+    }
+
+    // [Nextendo] Companion to --nextendo-nca-extract above, for a full game NSP instead of a
+    // single already-known NCA -- FileSys::NSP resolves the base Program NCA internally, so this
+    // needs no NCA-picking logic of its own. Same research-only purpose and lifecycle: exits
+    // immediately, never touches the emulation loop below.
+    if (argc >= 4 && (std::string(argv[1]) == "--nextendo-nsp-extract" ||
+                      std::string(argv[1]) == "--nextendo-nsp-extract-update")) {
+        const bool include_updates = std::string(argv[1]) == "--nextendo-nsp-extract-update";
+        const std::string nsp_path = argv[2];
+        const std::string out_dir = argv[3];
+
+        auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+        const auto nsp_file = vfs->OpenFile(nsp_path, FileSys::OpenMode::Read);
+        if (nsp_file == nullptr) {
+            fmt::print(stderr, "Failed to open {}\n", nsp_path);
+            return 1;
+        }
+
+        const FileSys::NSP nsp{nsp_file};
+        if (nsp.GetStatus() != Loader::ResultStatus::Success) {
+            fmt::print(stderr, "NSP parse failed, status={}\n", static_cast<int>(nsp.GetStatus()));
+            return 1;
+        }
+
+        FileSys::VirtualDir exefs = nsp.GetExeFS();
+        if (exefs == nullptr) {
+            // Distribution (non-extracted) NSP: NSP::GetExeFS() only covers
+            // extracted ExeFS directories, so scan the collapsed NCAs for a
+            // base Program NCA (TitleID & 0x800 == 0) with a readable ExeFS
+            // instead. Same research-only purpose.
+            for (const auto& nca : nsp.GetNCAsCollapsed()) {
+                fmt::print(stderr, "[dbg] NCA id={:016X} type={} status={}\n",
+                           nca->GetTitleId(), static_cast<int>(nca->GetType()),
+                           static_cast<int>(nca->GetStatus()));
+                if (nca->GetType() != FileSys::NCAContentType::Program ||
+                    nca->GetStatus() != Loader::ResultStatus::Success) {
+                    continue;
+                }
+                // Base mode keeps the classic base-program filter; update mode
+                // accepts update-title NCAs instead (TitleID & 0x800 != 0), so
+                // update-only NSPs (e.g. Among Us v2026.18.0 research) can have
+                // their ExeFS extracted too.
+                const bool is_update_nca = (nca->GetTitleId() & 0x800) != 0;
+                if (include_updates != is_update_nca) {
+                    continue;
+                }
+                if (nca->GetExeFS() != nullptr) {
+                    fmt::print("using Program NCA {:016X} ExeFS\n", nca->GetTitleId());
+                    exefs = nca->GetExeFS();
+                    break;
+                }
+            }
+        }
+        if (exefs == nullptr) {
+            fmt::print(stderr, "No ExeFS in this NSP's base program\n");
             return 1;
         }
 

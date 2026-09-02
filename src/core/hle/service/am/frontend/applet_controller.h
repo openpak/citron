@@ -30,6 +30,11 @@ enum class ControllerAppletVersion : u32_le {
     Version5 = 0x5, // 6.0.0 - 7.0.1
     Version7 = 0x7, // 8.0.0 - 10.2.0
     Version8 = 0x8, // 11.0.0+
+    // [Nextendo] Seen live from Outbound on firmware 20.0.0: same arg_size (0x430) as
+    // Version7/Version8, i.e. ControllerSupportArgNew's layout -- just a version bump with no
+    // struct change. Real firmware boundary unconfirmed (no public reference for it), but the
+    // matching arg_size makes the layout unambiguous.
+    Version9 = 0x9,
 };
 
 enum class ControllerSupportMode : u8 {

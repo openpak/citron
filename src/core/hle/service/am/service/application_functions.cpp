@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/nextendo_friends.h"
 #include "common/settings.h"
 #include "common/uuid.h"
 #include "core/file_sys/control_metadata.h"
@@ -9,6 +10,8 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/hle/kernel/k_transfer_memory.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/nextendo_guest_call.h"
 #include "core/hle/service/am/am_results.h"
 #include "core/hle/service/am/applet.h"
 #include "core/hle/service/am/service/application_functions.h"
@@ -25,6 +28,16 @@ namespace Service::AM {
 
 IApplicationFunctions::IApplicationFunctions(Core::System& system_, std::shared_ptr<Applet> applet)
     : ServiceFramework{system_, "IApplicationFunctions"}, m_applet{std::move(applet)} {
+    // [Nextendo] Weak-bound so a callback firing after this application (and its Applet) has
+    // been torn down is a harmless no-op rather than a signal into a dead object. The next
+    // application's own constructor overwrites this registration, so there is nothing to
+    // explicitly unregister on exit.
+    std::weak_ptr<Applet> weak_applet = m_applet;
+    Common::NextendoFriends::SetInvitationSignalCallback([weak_applet] {
+        if (const auto applet = weak_applet.lock()) {
+            applet->friend_invitation_storage_channel_event.Signal();
+        }
+    });
     // clang-format off
     static const FunctionInfo functions[] = {
         {1, D<&IApplicationFunctions::PopLaunchParameter>, "PopLaunchParameter"},
@@ -79,7 +92,7 @@ IApplicationFunctions::IApplicationFunctions(Core::System& system_, std::shared_
         {130, D<&IApplicationFunctions::GetGpuErrorDetectedSystemEvent>, "GetGpuErrorDetectedSystemEvent"},
         {131, nullptr, "SetDelayTimeToAbortOnGpuError"},
         {140, D<&IApplicationFunctions::GetFriendInvitationStorageChannelEvent>, "GetFriendInvitationStorageChannelEvent"},
-        {141, D<&IApplicationFunctions::TryPopFromFriendInvitationStorageChannel>, "TryPopFromFriendInvitationStorageChannel"},
+        {141, &IApplicationFunctions::TryPopFromFriendInvitationStorageChannel, "TryPopFromFriendInvitationStorageChannel"},
         {150, D<&IApplicationFunctions::GetNotificationStorageChannelEvent>, "GetNotificationStorageChannelEvent"},
         {151, nullptr, "TryPopFromNotificationStorageChannel"},
         {160, D<&IApplicationFunctions::GetHealthWarningDisappearedSystemEvent>, "GetHealthWarningDisappearedSystemEvent"},
@@ -520,10 +533,98 @@ Result IApplicationFunctions::GetFriendInvitationStorageChannelEvent(
     R_SUCCEED();
 }
 
-Result IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
-    Out<SharedPointer<IStorage>> out_storage) {
-    LOG_INFO(Service_AM, "(STUBBED) called");
-    R_THROW(AM::ResultNoDataInChannel);
+namespace {
+// [Nextendo] Same deterministic pid->Uid derivation as friend.cpp's UidForPid (kept local
+// rather than shared across a header for one 5-line pure function) -- needed here because real
+// hardware's storage-channel payload is NOT a bare byte blob: switchbrew documents the popped
+// IStorage as a 0x10-byte sender Uid followed by the actual application-defined payload at
+// offset 0x10. We were previously pushing app_param at offset 0 with no Uid header at all --
+// if the receiving game validates/reads that leading Uid before trusting the payload that
+// follows (as its own PushInData-to-MyPage capture already showed it constructing a real
+// version/length-prefixed parameter, i.e. it does structured parsing, not a raw copy), a
+// missing header would explain a clean pop with no visible in-game effect afterward.
+Common::UUID InvitationUidForPid(u64 pid) {
+    std::array<u8, 16> raw{};
+    std::memcpy(raw.data(), &pid, sizeof(pid));
+    const u64 high = 0x1100000000000000ULL;
+    std::memcpy(raw.data() + 8, &high, sizeof(high));
+    return Common::UUID{raw};
+}
+} // namespace
+
+// [Nextendo] RAW ctx handler -- see the header comment for why this is not D<>:
+// ctx.GetThread() is the REAL requesting guest thread, while the D<>/cmif path
+// executes on a ServerManager host thread whose GetCurrentThreadPointer() is a
+// per-thread DUMMY KThread -- arming against that dummy never fires.
+void IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
+    HLERequestContext& ctx) {
+    // [Nextendo] Real data now: SendFriendInvitation (friend.cpp) relays a sender's invite
+    // through nextendo-account's own mailbox; NextendoController polls it in the background
+    // (same pattern as the friends-list poll) into Common::NextendoFriends's pending-
+    // invitation cache, which this call only ever reads synchronously -- never a network call
+    // from an IPC handler. The storage content is the sender's Uid (0x10 bytes, real hardware's
+    // documented header) followed by the app_param bytes verbatim, exactly as the sending game
+    // constructed them via its own StartSendingFriendInvitation call: this channel relays the
+    // payload byte-for-byte, so the receiving game's own parsing of its own format is what
+    // actually needs to succeed, not anything decoded on our end -- only the Uid header itself
+    // is our own construction, since real hardware's channel always carries one.
+    const auto invitation = Common::NextendoFriends::PopPendingInvitation();
+    if (!invitation) {
+        LOG_DEBUG(Service_AM, "called, no invitation waiting");
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(AM::ResultNoDataInChannel);
+        return;
+    }
+
+    LOG_INFO(Service_AM,
+             "[Nextendo] TryPopFromFriendInvitationStorageChannel: from_pid={} "
+             "from_name='{}' app_param_size={}",
+             invitation->from_pid, invitation->from_name, invitation->app_param.size());
+
+    const auto uid = InvitationUidForPid(invitation->from_pid);
+    std::vector<u8> storage_data(sizeof(uid) + invitation->app_param.size());
+    std::memcpy(storage_data.data(), &uid, sizeof(uid));
+    std::memcpy(storage_data.data() + sizeof(uid), invitation->app_param.data(),
+                invitation->app_param.size());
+
+    // [Nextendo] Outbound's own mailbox-consumption path can never join by itself (its
+    // JoinSessionRequest is built from a hardcoded empty PlatformSessionID and
+    // NetworkSystemSwitch.JoinSession is a no-op on this platform -- both confirmed by
+    // full static disassembly, see outbound-re NOTES). A delivered invitation is
+    // otherwise consumed and silently discarded. Drive the game's own real, working
+    // join-by-code path (NetworkManager.Join + StartCoroutine) with the room code from
+    // this invitation's application parameter instead. See nextendo_guest_call.h.
+    // ... and arm the guest-call injection against ctx.GetThread() -- the REAL
+    // requesting guest thread (Unity main).
+    const auto& app_param = invitation->app_param;
+    if (app_param.size() >= 6 && app_param.size() == 5 + app_param[4]) {
+        const char* code_bytes = reinterpret_cast<const char*>(app_param.data()) + 5;
+        const std::string_view room_code(code_bytes, app_param[4]);
+        LOG_INFO(Service_AM, "[Nextendo] invitation room code: '{}'", room_code);
+        // [Nextendo] RECORD only: the injection must fire when the USER accepts the
+        // invite (toast click) from the multiplayer menu -- auto-firing on delivery
+        // joins from whatever screen the joiner is on and crashes on the main menu
+        // (observed live: guest svcBreak + freeze).
+        Core::NextendoGuestCall::RecordInvite(ctx.GetThread(), *system.ApplicationProcess(),
+                                              room_code);
+    } else {
+        LOG_INFO(Service_AM,
+                 "[Nextendo] invitation app_param does not match the u32_le(1) || u8(len) || "
+                 "ascii format (size={}) -- no join armed",
+                 app_param.size());
+    }
+
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(ResultSuccess);
+    auto storage = std::make_shared<IStorage>(system, std::move(storage_data));
+    // Match the cmif path: domain sessions register domain objects, non-domain
+    // sessions register the HLE interface. Getting this wrong corrupts the session
+    // (observed live: hle_ipc "object_id too big" assert + guest svcBreak + freeze).
+    if (ctx.GetManager()->IsDomain()) {
+        ctx.AddDomainObject(std::move(storage));
+    } else {
+        ctx.AddMoveInterface(std::move(storage));
+    }
 }
 
 Result IApplicationFunctions::GetNotificationStorageChannelEvent(

@@ -199,6 +199,8 @@ Network::Protocol Translate(Protocol protocol) {
     switch (protocol) {
     case Protocol::Unspecified:
         return Network::Protocol::Unspecified;
+    case Protocol::ICMP:
+        return Network::Protocol::ICMP;
     case Protocol::TCP:
         return Network::Protocol::TCP;
     case Protocol::UDP:
@@ -213,6 +215,8 @@ Protocol Translate(Network::Protocol protocol) {
     switch (protocol) {
     case Network::Protocol::Unspecified:
         return Protocol::Unspecified;
+    case Network::Protocol::ICMP:
+        return Protocol::ICMP;
     case Network::Protocol::TCP:
         return Protocol::TCP;
     case Network::Protocol::UDP:

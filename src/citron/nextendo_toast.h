@@ -20,7 +20,7 @@ class NextendoToast : public QWidget {
 
 public:
     enum class Corner { TopRight, TopLeft, BottomRight, BottomLeft };
-    enum class Kind { Online, Offline, Request, RequestSent, ChatRequest };
+    enum class Kind { Online, Offline, Request, RequestSent, ChatRequest, GameInvite };
 
     explicit NextendoToast(QWidget* main_window);
     ~NextendoToast() override;

@@ -57,6 +57,10 @@ private:
         Network::Protocol protocol = Network::Protocol::UDP;
         u16 bound_port = 0;
         bool sni_injected = false;
+        // [Nextendo][DIAG] Public hostname parsed from the first TLS ClientHello. Used only by
+        // the opt-in Stardew certificate-validation probe; no payload or credential is retained.
+        std::string tls_sni;
+        bool tls_server_flight_received = false;
         // [Nextendo] RecvImpl's post-handshake grace-wait (see bsd.cpp) should only cover a
         // reply that might genuinely still be in flight -- set true by SendImpl right after the
         // guest writes something on this socket, and consumed (cleared) the first time RecvImpl

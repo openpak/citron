@@ -1212,6 +1212,8 @@ add_library(core STATIC
     loader/xci.h
     memory.cpp
     memory.h
+    nextendo_guest_call.cpp
+    nextendo_guest_call.h
     memory/cheat_engine.cpp
     memory/cheat_engine.h
     memory/dmnt_cheat_types.h

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <iterator>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #include "common/nextendo_account.h"
 #include "common/nextendo_friends.h"
@@ -88,6 +90,57 @@ bool TakeLocalPresenceForPublish(s32& status, std::string& app_field) {
     status = g_local_status;
     app_field = g_local_app_field;
     return true;
+}
+
+namespace {
+std::mutex g_invitations_mutex;
+std::vector<PendingInvitation> g_pending_invitations;
+std::vector<u8> g_outgoing_invitation_parameter;
+std::function<void()> g_invitation_signal_callback;
+} // Anonymous namespace
+
+void SetPendingInvitations(std::vector<PendingInvitation> invitations) {
+    if (invitations.empty()) {
+        return;
+    }
+    std::function<void()> signal_callback;
+    {
+        std::lock_guard lock{g_invitations_mutex};
+        g_pending_invitations.insert(g_pending_invitations.end(),
+                                     std::make_move_iterator(invitations.begin()),
+                                     std::make_move_iterator(invitations.end()));
+        signal_callback = g_invitation_signal_callback;
+    }
+    // Called outside the lock: the callback ends up signaling a kernel event, which must never
+    // happen while holding a Common-layer mutex a kernel callback could re-enter through.
+    if (signal_callback) {
+        signal_callback();
+    }
+}
+
+void SetInvitationSignalCallback(std::function<void()> callback) {
+    std::lock_guard lock{g_invitations_mutex};
+    g_invitation_signal_callback = std::move(callback);
+}
+
+std::optional<PendingInvitation> PopPendingInvitation() {
+    std::lock_guard lock{g_invitations_mutex};
+    if (g_pending_invitations.empty()) {
+        return std::nullopt;
+    }
+    auto front = std::move(g_pending_invitations.front());
+    g_pending_invitations.erase(g_pending_invitations.begin());
+    return front;
+}
+
+void SetOutgoingInvitationParameter(std::vector<u8> app_param) {
+    std::lock_guard lock{g_invitations_mutex};
+    g_outgoing_invitation_parameter = std::move(app_param);
+}
+
+std::vector<u8> TakeOutgoingInvitationParameter() {
+    std::lock_guard lock{g_invitations_mutex};
+    return std::exchange(g_outgoing_invitation_parameter, {});
 }
 
 } // namespace Common::NextendoFriends

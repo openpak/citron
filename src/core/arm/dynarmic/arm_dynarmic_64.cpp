@@ -11,11 +11,76 @@
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
+#include "core/nextendo_guest_call.h"
 
 namespace Core {
 
 using Vector = Dynarmic::A64::Vector;
 using namespace Common::Literals;
+
+namespace {
+// [Nextendo] Real fix for Outbound's (title ID 0100ED9024EB8000) friend-invite join -- see
+// the full explanation at the MemoryReadCode call site below. All of this is gated on the
+// title ID and must never affect any other game.
+//
+// First attempt redirected NetworkManager.StartJoin(InviteData), the delegate
+// OnGameReadyForSessionEvents calls with a ready invite -- confirmed live that
+// OnGameReadyForSessionEvents itself is NEVER called on this platform (a diagnostic hook on
+// its own entry never fired across multiple real invites, even from the multiplayer menu),
+// so StartJoin never runs either, and the redirect there was inert. Redirecting instead from
+// CheckForInvite itself, right where it already builds a byte-correct CustomData array (into
+// x21) just before feeding empty strings into the dead InviteData/JoinPlatformSession
+// pipeline -- CheckForInvite is proven to run every single frame regardless of game state.
+constexpr u64 OutboundTitleId = 0x0100ED9024EB8000ULL;
+// [Nextendo][DIAG] shared across MemoryReadCode/AddTicks -- see their comments.
+u64 s_network_system_switch_instance = 0;
+bool s_cached_invite_seen_logged = false;
+// [Nextendo] Redesigned redirect point: right after guardB (the actual "did the native pop
+// succeed" check), instead of after the whole guardC/indirect-call/guardD block. That block
+// turned out to gate a real indirect call whose target is only valid when its own dictionary
+// lookup succeeds (confirmed live -- forcing past it crashed by jumping through garbage). We
+// don't need any of that logic at all: the raw popped bytes are already fully valid right
+// after guardB, in x20 (data at +0x20), with the real byte count at [x29,#0x18] (x29 is
+// CheckForInvite's own frame pointer, unchanged and still valid here). Redirecting this early
+// also means we must manually restore the stack/frame CheckForInvite's own prologue set up,
+// since we're bypassing its normal epilogue entirely -- see the trampoline's tail.
+constexpr u64 CheckForInviteRedirectVA = 0x83F3ABA0ULL;
+constexpr u32 CheckForInviteRedirectInstruction = 0x1400d730u;
+constexpr u64 TrampolineVA = 0x83F70860ULL;
+// NetworkManager.Instance isn't reachable from CheckForInvite's own context (NetworkSystemSwitch
+// has no back-reference to it, and its generic-base static storage isn't statically resolvable
+// without guessing at IL2Cpp's RGCTX layout). Instead it's captured opportunistically off any
+// NetworkManager instance method we can prove actually runs (Host(), SendInvitation()) and
+// stashed here; the trampoline loads it at runtime, not bake-time, so a capture that happens
+// after the trampoline's first translation still takes effect on the next invite.
+constexpr u64 MailboxVA = 0x83F70920ULL;
+// [Nextendo] Hardened after a reproducible crash: the previous version trusted guardB to mean
+// "there really is an invite," but a real invite never being queued still somehow reached this
+// point with an unvalidated byte count read from [x29,#0x18] -- if the native pop genuinely
+// never wrote that output (thrown before reaching it), it's leftover stack garbage, not zero.
+// Now explicitly rejects a byte count that's <=0 or > the mailbox's own 1024-byte max before
+// doing anything else, regardless of what the guest guards claim.
+//
+// Hand-assembled (keystone, ARM64) and disassembly-verified trampoline body, written into the
+// confirmed-dead (zero real callers, checked across the whole binary) bodies of
+// nn.friends.Friends.ShowFriendList / ShowUserDetailInfo / StartSendingFriendRequest. Reads
+// NetworkManager.Instance from MailboxVA (bails out, with the stack/frame properly restored,
+// if not yet captured), allocates a real System.String via Outbound's own string allocator
+// sized to the popped byte count, copies the raw popped bytes in as UTF-16 chars, restores
+// CheckForInvite's caller's frame/LR/SP (read via x29, CheckForInvite's own frame pointer),
+// then tail-jumps into NetworkManager.Join(code, false) -- the same real, complete, working
+// connect path a manual code-entry UI would use (confirmed via full disassembly: validates
+// the code, sets sessionName, and calls Fusion's own NetworkRunner.JoinSessionLobby).
+constexpr u32 TrampolineWords[] = {
+    0xd100c3ff, 0xf9000bf4, 0xb9401ba9, 0x7100013f, 0x540004cd, 0x7110013f, 0x5400048c,
+    0xf9000fe9, 0xd2812400, 0xf2b07ee0, 0xf9400000, 0xb4000340, 0xaa0003f3, 0xaa0903e0,
+    0x9719b737, 0xf90013e0, 0xf9400be8, 0xb9401be9, 0xf94013ea, 0x91008108, 0x9100514a,
+    0xaa1f03eb, 0xeb09017f, 0x540000ca, 0x386b690c, 0xd37ff96d, 0x782d694c, 0x9100056b,
+    0x17fffffa, 0xaa1303e0, 0xf94013e1, 0x52800002, 0xf94007be, 0xf94003a8, 0x910103bf,
+    0xaa0803fd, 0x17721b74, 0xf94007be, 0xf94003a8, 0x910103bf, 0xaa0803fd, 0xd65f03c0,
+    0xf94007be, 0xf94003a8, 0x910103bf, 0xaa0803fd, 0xd65f03c0,
+};
+} // namespace
 
 class DynarmicCallbacks64 : public Dynarmic::A64::UserCallbacks {
 public:
@@ -46,6 +111,155 @@ public:
         return {m_memory.Read64(vaddr), m_memory.Read64(vaddr + 8)};
     }
     std::optional<u32> MemoryReadCode(u64 vaddr) override {
+        // [Nextendo] Everything below is gated on Outbound's title ID and must never affect
+        // any other game.
+        if (m_process->GetProgramId() == OutboundTitleId) {
+            // [Nextendo][GUESTCALL] Capture NetworkManager.Instance (x0 at the entry of
+            // any of its known instance methods). Runtime-base-aware, unlike the
+            // hardcoded-VA checks further below -- see nextendo_guest_call.cpp.
+            Core::NextendoGuestCall::ObserveInstanceCapture(
+                vaddr, *m_process, m_parent.m_jit->GetRegister(0));
+
+            // [Nextendo] MailboxVA sits inside the dead-code scratch region, which still
+            // contains the REAL original compiled bytes of Outbound's own code until this
+            // exact address is substituted -- MemoryReadCode substitution never touches
+            // underlying guest memory, only what the JIT compiles as instructions there. So
+            // before anything ever writes a real NetworkManager.Instance capture, a read of
+            // MailboxVA returns leftover non-zero instruction bytes, not zero. The trampoline's
+            // `cbz x0, bail` then misreads that garbage as a "valid" pointer and uses it as
+            // Join()'s `this` -- confirmed live as the cause of a real (delayed) crash.
+            // Explicitly zero it out before anything else can possibly run.
+            static bool s_mailbox_initialized = false;
+            if (!s_mailbox_initialized) {
+                s_mailbox_initialized = true;
+                const bool valid = m_memory.IsValidVirtualAddressRange(MailboxVA, 8);
+                LOG_INFO(Core_ARM,
+                         "[Nextendo][DIAG] mailbox init: vaddr={:#x} range_valid={} "
+                         "value_before={:#x}",
+                         vaddr, valid, valid ? m_memory.Read64(MailboxVA) : 0);
+                if (valid) {
+                    m_memory.Write64(MailboxVA, 0);
+                    LOG_INFO(Core_ARM, "[Nextendo][DIAG] mailbox init: value_after={:#x}",
+                             m_memory.Read64(MailboxVA));
+                }
+            }
+            static bool s_join_movenext_logged = false;
+            static bool s_sanity_logged = false;
+            if (!s_sanity_logged && vaddr == 0x83F3AA90) {
+                s_sanity_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] SANITY: CheckForInvite/Update reached "
+                                    "(hook mechanism works)");
+            }
+            // Capture NetworkSystemSwitch's `this` (x0 at Update()'s entry, an instance
+            // method) so AddTicks can poll _cachedInvite (this+0x28) continuously below --
+            // MemoryReadCode only ever fires once per address (JIT caches the compiled
+            // block after that), so it can't observe state on any later, real invocation.
+            if (vaddr == 0x83F3AA90) {
+                s_network_system_switch_instance = m_parent.m_jit->GetRegister(0);
+            }
+            // Opportunistic NetworkManager.Instance capture -- see MailboxVA's comment above.
+            // Host() and SendInvitation() are both proven-live starter functions taking
+            // NetworkManager itself as x0; stash it for the trampoline every time, not just
+            // once, since the object can be recreated (e.g. on a scene reload).
+            // [Nextendo][GUESTCALL] The hardcoded VAs here assumed one specific ASLR base
+            // (0x80000000) and silently missed every other launch. The authoritative capture
+            // now runs base-aware via ObserveInstanceCapture above (including joiner-side
+            // NetworkManager.Start/OnEnable); only the guest-side MailboxVA mirror write is
+            // kept here for the (currently disabled) trampoline diagnostics.
+            {
+                const u64 nm_base = GetInteger(m_process->GetEntryPoint());
+                if (vaddr == nm_base + 0x1BF7570 || vaddr == nm_base + 0x1BFC760) {
+                    const u64 x0 = m_parent.m_jit->GetRegister(0);
+                    if (m_memory.IsValidVirtualAddressRange(MailboxVA, 8)) {
+                        m_memory.Write64(MailboxVA, x0);
+                    }
+                    LOG_INFO(Core_ARM, "[Nextendo][DIAG] NetworkManager instance captured: {:#x}",
+                             x0);
+                }
+            }
+            // NetworkManager.Join(string, bool).MoveNext -- confirms the redirect actually
+            // landed a real join attempt.
+            if (!s_join_movenext_logged && vaddr == 0x81C00850) {
+                s_join_movenext_logged = true;
+                const u64 x0 = m_parent.m_jit->GetRegister(0);
+                LOG_INFO(Core_ARM,
+                         "[Nextendo][DIAG] Join.MoveNext reached via redirect! this={:#x}", x0);
+            }
+            // Real fix for the friend-invite join: NetworkSystemSwitch.JoinSession is a
+            // confirmed no-op on this platform (never reads its own argument, never connects),
+            // and NetworkManager.StartJoin(InviteData) -- the entry point that was supposed to
+            // hand a ready invite to JoinPlatformSession -- is never even called, because its
+            // only caller, OnGameReadyForSessionEvents, itself never runs here (confirmed live).
+            // So an accepted invite's CustomData -- proven to arrive byte-correct via our
+            // mailbox -- never turns into a real Fusion connection through any path Outbound's
+            // own code takes on Switch. Instead we redirect from CheckForInvite itself, right
+            // where it already has a byte-correct CustomData array built (in x21) and is about
+            // to feed empty strings into the dead pipeline. See TrampolineWords' comment above
+            // for what the trampoline itself does.
+            // [Nextendo][DIAG] CheckForInvite's own internal guard checks, to find exactly
+            // which one bails before ever reaching the redirect point.
+            static bool s_guardA_logged = false;
+            if (!s_guardA_logged && vaddr == 0x83F3AB64) {
+                s_guardA_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] guardA (initial precondition) w0={:#x}",
+                         m_parent.m_jit->GetRegister(0));
+            }
+            static bool s_guardB_logged = false;
+            if (!s_guardB_logged && vaddr == 0x83F3AB9C) {
+                s_guardB_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] guardB (pop succeeded?) w0={:#x}",
+                         m_parent.m_jit->GetRegister(0));
+            }
+            static bool s_guardC_logged = false;
+            if (!s_guardC_logged && vaddr == 0x83F3ABEC) {
+                s_guardC_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] guardC (dictionary lookup) w0={:#x}",
+                         m_parent.m_jit->GetRegister(0));
+            }
+            static bool s_bail1_logged = false;
+            if (!s_bail1_logged && vaddr == 0x83F3AD90) {
+                s_bail1_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] BAIL at 0x3f3ad90 (early return)");
+            }
+            static bool s_bail2_logged = false;
+            if (!s_bail2_logged && vaddr == 0x83F3ADA8) {
+                s_bail2_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] BAIL at 0x3f3ada8 (guardC failure path)");
+            }
+            // [Nextendo][DIAG] granular checkpoints inside/around the redirect+trampoline, to
+            // see exactly how far execution gets if Join.MoveNext never fires.
+            static bool s_redirect_reached_logged = false;
+            if (!s_redirect_reached_logged && vaddr == CheckForInviteRedirectVA) {
+                s_redirect_reached_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] CheckForInvite redirect point reached "
+                                    "(x20 raw pop buffer={:#x})",
+                         m_parent.m_jit->GetRegister(20));
+            }
+            static bool s_mailbox_checked_logged = false;
+            if (!s_mailbox_checked_logged && vaddr == TrampolineVA + 0x2C) {
+                s_mailbox_checked_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] trampoline: mailbox value = {:#x}",
+                         m_parent.m_jit->GetRegister(0));
+            }
+            static bool s_pre_join_call_logged = false;
+            if (!s_pre_join_call_logged && vaddr == TrampolineVA + 0x90) {
+                s_pre_join_call_logged = true;
+                LOG_INFO(Core_ARM,
+                         "[Nextendo][DIAG] trampoline: about to call Join(), x0(this)={:#x} "
+                         "x1(code str)={:#x}",
+                         m_parent.m_jit->GetRegister(0), m_parent.m_jit->GetRegister(1));
+            }
+            // [Nextendo] DISABLED AGAIN: still crashes (same "jump to address 0" signature)
+            // even with the byte-count validation added, and at a similarly early/consistent
+            // time regardless of any real invite. That rules out the "garbage byte count"
+            // theory -- the bug is somewhere more fundamental in this redirect's own
+            // register/stack assumptions, and needs a reliable live debugger to pin down
+            // rather than more static guessing. Do not re-enable blind.
+            (void)CheckForInviteRedirectVA;
+            (void)CheckForInviteRedirectInstruction;
+            (void)TrampolineVA;
+        }
+
         if (!m_memory.IsValidVirtualAddressRange(vaddr, sizeof(u32)))
             return std::nullopt;
         auto const aligned_vaddr = vaddr & ~Core::Memory::CITRON_PAGEMASK;
@@ -135,6 +349,17 @@ public:
         case Dynarmic::A64::Exception::Yield:
             return;
         case Dynarmic::A64::Exception::NoExecuteFault: {
+            // [Nextendo][GUESTCALL] A fault at pc=0 while an injected call is running is
+            // our intentional LR=0 sentinel return -- keep the log quiet and don't
+            // pollute the fault counters/backtrace; PhysicalCore::OnFault handles it.
+            if (pc == 0 && Core::NextendoGuestCall::SentinelPending()) {
+                LOG_INFO(Core_ARM,
+                         "[Nextendo][GUESTCALL] sentinel return reached (pc=0) -- chaining/"
+                         "restoring");
+                ReturnException(pc, PrefetchAbort);
+                return;
+            }
+
             LOG_CRITICAL(Core_ARM, "Cannot execute instruction at unmapped address {:#016x}", pc);
 
             m_consecutive_faults++;
@@ -169,6 +394,20 @@ public:
     }
 
     void AddTicks(u64 ticks) override {
+        // [Nextendo][DIAG] AddTicks fires continuously during real execution (unlike
+        // MemoryReadCode, which only ever fires once per address), so it's the only reliable
+        // way to observe _cachedInvite's value on whatever real invocation of CheckForInvite
+        // actually processes an invite, not just the first-ever (usually invite-less) one.
+        if (m_process->GetProgramId() == OutboundTitleId && !s_cached_invite_seen_logged &&
+            s_network_system_switch_instance != 0 &&
+            m_memory.IsValidVirtualAddressRange(s_network_system_switch_instance + 0x28, 8)) {
+            const u64 cached_invite = m_memory.Read64(s_network_system_switch_instance + 0x28);
+            if (cached_invite != 0) {
+                s_cached_invite_seen_logged = true;
+                LOG_INFO(Core_ARM, "[Nextendo][DIAG] _cachedInvite became non-null: {:#x}",
+                         cached_invite);
+            }
+        }
         ASSERT_MSG(!m_parent.m_uses_wall_clock, "Dynarmic ticking disabled");
 
         // Divide the number of ticks by the amount of CPU cores. TODO(Subv): This yields only a

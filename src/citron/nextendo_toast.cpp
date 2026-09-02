@@ -105,7 +105,14 @@ void NextendoToast::Show(const QString& headline, const QString& detail,
     const bool minimized = main_window->isMinimized() ||
                            (main_window->windowHandle() &&
                             main_window->windowHandle()->visibility() == QWindow::Minimized);
-    if (minimized || !qApp->activeWindow()) {
+    // [Nextendo] A game invite is time-sensitive and, on real hardware, interrupts regardless
+    // of what has focus (the HOME overlay shows it even mid-game). The other kinds are routine
+    // presence pings -- fine to withhold while this window isn't the one being looked at, same
+    // as before. Still respects minimized: a truly hidden window has nowhere to draw a toast.
+    if (minimized) {
+        return;
+    }
+    if (kind_ != Kind::GameInvite && !qApp->activeWindow()) {
         return;
     }
 
@@ -315,6 +322,7 @@ QColor NextendoToast::AccentColor() const {
         return QColor(148, 152, 161); // muted gray -- went offline
     case Kind::Request:
     case Kind::ChatRequest:
+    case Kind::GameInvite:
         return QColor(180, 120, 240); // purple -- incoming request, wants attention
     case Kind::RequestSent:
         return QColor(100, 149, 237); // blue -- confirmation of your own action
@@ -334,6 +342,8 @@ QString NextendoToast::CategoryLabel() const {
         return tr("REQUEST SENT");
     case Kind::ChatRequest:
         return tr("CHAT INVITE");
+    case Kind::GameInvite:
+        return tr("GAME INVITE");
     }
     return {};
 }

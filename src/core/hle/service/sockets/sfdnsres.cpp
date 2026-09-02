@@ -109,6 +109,17 @@ static std::optional<std::string> GetNextendoRedirectIp(const std::string& host)
         return std::nullopt;
     }
 
+    // [Nextendo][DIAG] Opt-in certificate-validation control for Stardew. Only this exact public
+    // tenant hostname bypasses redirection; bsd.cpp suppresses the first client record after the
+    // server flight so no authenticated request can reach the normal endpoint.
+    if (host == "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net") {
+        const char* probe = std::getenv("NEXTENDO_STARDEW_TLS_PROBE");
+        if (probe != nullptr && *probe != '\0' && std::string_view(probe) != "0") {
+            LOG_INFO(Service, "[Nextendo][DIAG] Stardew TLS probe using normal DNS for '{}'", host);
+            return std::nullopt;
+        }
+    }
+
     const std::string server_ip =
         GetConfiguredIp(Settings::values.nextendo_server_ip.GetValue(), "NEXTENDO_SERVER_IP");
     const std::string nat_ip =
@@ -161,6 +172,202 @@ static std::optional<std::string> GetPhotonRedirectIp(const std::string& host) {
         return std::nullopt;
     }
     LOG_INFO(Service, "[Nextendo] Redirecting Photon host '{}' -> '{}'", host, env);
+    return std::string(env);
+}
+
+// [Nextendo] Clean-room PvZ: Battle for Neighborville (Switch) research hook. BFN is an EA
+// Frostbite title: static string analysis of its own executable (2026-08-31, see pvz-nextendo
+// handoff.md) found an EA GOS/Blaze + Nucleus backend — service discovery via
+// spring18.gosredirector.ea.com, identity via accounts/gateway/signin.ea.com. None of these are
+// covered by the generic Nintendo redirect. Unlike the CTR hook (exact-host, one auth host
+// known), the full set of *.ea.com hosts the client may contact is not yet known, so this
+// matches the whole .ea.com suffix — but is gated by its own env var so it is dead code unless
+// someone explicitly runs PvZ research. Fails closed: if the var is unset, EA hosts resolve
+// normally (i.e. NOT our problem), and with the var set every .ea.com name goes to the local
+// research stub instead of production. NEXTENDO_PVZ_EA_IP=<ip> to enable.
+static std::optional<std::string> GetPvzEaRedirectIp(const std::string& host) {
+    const std::string lower_host = Common::ToLower(host);
+    const std::string suffix = ".ea.com";
+    const bool is_ea = lower_host == "ea.com" ||
+                       (lower_host.size() > suffix.size() &&
+                        lower_host.compare(lower_host.size() - suffix.size(), suffix.size(),
+                                           suffix) == 0);
+    if (!is_ea) {
+        return std::nullopt;
+    }
+    const char* env = std::getenv("NEXTENDO_PVZ_EA_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[Nextendo] Redirecting PvZ EA host '{}' -> '{}'", host, env);
+    return std::string(env);
+}
+
+// [Nextendo] Clean-room Crash Team Racing Nitro-Fueled research hook. CTR:NF authenticates
+// against Demonware, not Nintendo BAAS/NEX -- confirmed live 2026-08-31 (see ctr-nextendo's
+// handoff.md), so it isn't covered by GetNextendoRedirectIp's Nintendo-hostname redirect below.
+// Exact-host only, same shape as the Fall Guys EOS hook: unset by default, never applied to
+// telemetry hosts. Covers both the auth3 host and the lobby ("LSG") host that the client
+// resolves next once auth looks accepted -- static analysis of CTR:NF's own binary found an
+// igNetTaskLsgGetTicket/igNetTaskLsgAuthenticateTicket sequence suggesting auth alone was never
+// going to be sufficient (see handoff.md, Experiment 2026-08-31-7). Same env vars answer both for
+// now, since they're being pointed at the same research stub; split them if that stops making
+// sense. NEXTENDO_CTR_AUTH_IP=<ip> to enable.
+static std::optional<std::string> GetCtrDemonwareAuthRedirectIp(const std::string& host) {
+    const std::string lower_host = Common::ToLower(host);
+    if (lower_host != "lavender-switch-auth3.prod.demonware.net" &&
+        lower_host != "lavender-switch-lobby.prod.demonware.net") {
+        return std::nullopt;
+    }
+    const char* env = std::getenv("NEXTENDO_CTR_AUTH_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[Nextendo] Redirecting CTR:NF Demonware host '{}' -> '{}'", host, env);
+    return std::string(env);
+}
+
+// [Nextendo] Clean-room Among Us research hook. The Switch client's own cached
+// region list (observed 2026-08-31 in a JKSV save backup, see
+// amongus-nextendo handoff.md Experiment 2026-08-31-1) names three HTTPS
+// matchmaker hosts: matchmaker.among.us (NA), matchmaker-eu.among.us (EU),
+// matchmaker-as.among.us (Asia), all on port 443. Exact-host only, gated by
+// its own env var, unset by default so it never affects any other title's
+// run. NEXTENDO_AMONGUS_IP=<ip> to enable.
+static std::optional<std::string> GetAmongUsMatchmakerRedirectIp(const std::string& host) {
+    const std::string lower_host = Common::ToLower(host);
+    if (lower_host != "matchmaker.among.us" && lower_host != "matchmaker-eu.among.us" &&
+        lower_host != "matchmaker-as.among.us") {
+        return std::nullopt;
+    }
+    const char* env = std::getenv("NEXTENDO_AMONGUS_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[Nextendo] Redirecting Among Us matchmaker host '{}' -> '{}'", host, env);
+    return std::string(env);
+}
+
+// [Nextendo] Clean-room Among Us safety block. Among Us research may run client
+// versions older than the current production architecture (e.g. a base dump
+// predating the HTTPS matchmaker era). Such versions can try legacy production
+// endpoints -- old matchmaker hosts, Photon Cloud -- that this project has not
+// approved for redirection. Opt-in gate NEXTENDO_AMONGUS_BLOCK=1 makes every
+// resolution under the Among Us-era domains fail fast (EAI_AGAIN) WITHOUT
+// reaching production; the requested hostname is still logged by the standard
+// resolution logging above, so nothing is lost for research. Never blocks the
+// three matchmaker hosts when NEXTENDO_AMONGUS_IP is set -- the redirect chain
+// runs first and wins. Default unset so it never affects any other title.
+static bool ShouldBlockAmongUsRelatedHost(const std::string& host) {
+    const char* env = std::getenv("NEXTENDO_AMONGUS_BLOCK");
+    if (!env || !*env) {
+        return false;
+    }
+    const std::string lower_host = Common::ToLower(host);
+    const auto has_suffix = [&lower_host](const std::string& suffix) {
+        return lower_host.size() >= suffix.size() &&
+               lower_host.compare(lower_host.size() - suffix.size(), suffix.size(),
+                                  suffix) == 0;
+    };
+    return has_suffix(".among.us") || lower_host == "among.us" ||
+           has_suffix(".photonengine.io") || lower_host == "photonengine.io" ||
+           has_suffix(".photonengine.com") || lower_host == "photonengine.com" ||
+           has_suffix(".exitgames.com") || lower_host == "exitgames.com" ||
+           // EOS (observed 2026-08-31: the 2026.18.0 client embeds
+           // EOSSDK-Switch-Shipping.nrs and retries api.epicgames.dev endlessly
+           // during sign-in against production -- blocked here so Among Us runs
+           // neither leak to EOS nor hang on a login that can never complete with
+           // our local identity). NOTE: gate overlaps fallguys-nextendo's
+           // NEXTENDO_FALLGUYS_EOS_IP redirect for the same host; that env var is
+           // unset during Among Us runs, so the redirect chain never claims it
+           // first and this block is the one that applies.
+           lower_host == "api.epicgames.dev" ||
+           // Unity Cloud Content / CCD telemetry + CDN hosts (observed at menu
+           // load): read-only, but they are production contact -- block under the
+           // same gate.
+           has_suffix(".unity3dusercontent.com") ||
+           lower_host == "unity3dusercontent.com";
+}
+
+// [Nextendo] Among Us EOS redirect. The 2026.18.0 client embeds the Epic Online
+// Services SDK (EOSSDK-Switch-Shipping.nrs) and its sign-in path loops on
+// api.epicgames.dev. When NEXTENDO_AMONGUS_EOS_IP is set, that host is pointed
+// at a local EOS stub instead of being blocked by ShouldBlockAmongUsRelatedHost
+// (this hook runs earlier in the chain, so the redirect wins when enabled).
+// Unset by default. NEXTENDO_AMONGUS_EOS_IP=<ip> to enable.
+static std::optional<std::string> GetAmongUsEosRedirectIp(const std::string& host) {
+    if (Common::ToLower(host) != "api.epicgames.dev") {
+        return std::nullopt;
+    }
+    const char* env = std::getenv("NEXTENDO_AMONGUS_EOS_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[Nextendo] Redirecting Among Us EOS host '{}' -> '{}'", host, env);
+    return std::string(env);
+}
+
+// [Nextendo] Clean-room Fall Guys EOS research hook. Redirect only the confirmed EOS bootstrap
+// hostname to a user-controlled compatibility server. This is intentionally separate from the
+// broad Nintendo redirect and the Outbound Photon redirect: unset by default, exact-host only,
+// and never applied to telemetry hosts. NEXTENDO_FALLGUYS_EOS_IP=<ip> to enable.
+static std::optional<std::string> GetFallGuysEosRedirectIp(const std::string& host) {
+    if (Common::ToLower(host) != "api.epicgames.dev") {
+        return std::nullopt;
+    }
+    const char* env = std::getenv("NEXTENDO_FALLGUYS_EOS_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[Nextendo] Redirecting Fall Guys EOS host '{}' -> '{}'", host, env);
+    return std::string(env);
+}
+
+// [Nextendo] Clean-room Minecraft Dungeons (Switch) research hook. Dungeons is a
+// Mojang-published Switch title, but its client was observed resolving ONLY
+// Microsoft/Mojang/Xbox hostnames up through the online sign-in screen (2026-08-31,
+// citron-nextendo Nightly eed426e61-dirty; see mc-nextendo handoff.md "Hostname /
+// Service Inventory"): launchercontent.mojang.com, vortex.data.microsoft.com
+// (telemetry), title.mgt.xboxlive.com, sisu.xboxlive.com (device sign-in) and
+// login.live.com (MSA OAuth) -- no *.nintendo.net host at all. So it is not covered
+// by GetNextendoRedirectIp. Exact-host only, restricted to the confirmed inventory;
+// newly observed hosts are added here only after the DNS log confirms them. Gated by
+// its own env var, unset by default, so it never affects any other title's run.
+// NEXTENDO_MC_DUNGEONS_IP=<ip> to enable.
+// NEXTENDO_MC_DUNGEONS_ALLOW_SIGNIN=1 additionally excepts the three
+// identity/config hosts (title.mgt.xboxlive.com, sisu.xboxlive.com, login.live.com),
+// so a controlled run can sign in against the real Microsoft/Xbox services while
+// every other confirmed Dungeons host still resolves to the local research listener.
+// That combination is how the still-unknown multiplayer backend hostname is meant to
+// be observed: the game gets past sign-in, its next DNS lookups land in the log, and
+// only then are they added to this list (and to the bsd.cpp port-remap branch).
+static bool IsMinecraftDungeonsSignInHost(const std::string& lower_host) {
+    return lower_host == "title.mgt.xboxlive.com" || lower_host == "sisu.xboxlive.com" ||
+           lower_host == "login.live.com";
+}
+
+static std::optional<std::string> GetMinecraftDungeonsRedirectIp(const std::string& host) {
+    const std::string lower_host = Common::ToLower(host);
+    const bool is_dungeons_host = lower_host == "launchercontent.mojang.com" ||
+                                  lower_host == "vortex.data.microsoft.com" ||
+                                  IsMinecraftDungeonsSignInHost(lower_host);
+    if (!is_dungeons_host) {
+        return std::nullopt;
+    }
+    const char* allow = std::getenv("NEXTENDO_MC_DUNGEONS_ALLOW_SIGNIN");
+    if (allow && *allow && std::string(allow) != "0" &&
+        IsMinecraftDungeonsSignInHost(lower_host)) {
+        LOG_INFO(Service,
+                 "[Nextendo] Letting Minecraft Dungeons sign-in host '{}' resolve normally "
+                 "(NEXTENDO_MC_DUNGEONS_ALLOW_SIGNIN)",
+                 host);
+        return std::nullopt;
+    }
+    const char* env = std::getenv("NEXTENDO_MC_DUNGEONS_IP");
+    if (!env || !*env) {
+        return std::nullopt;
+    }
+    LOG_INFO(Service, "[Nextendo] Redirecting Minecraft Dungeons host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -368,7 +575,28 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     }
 
     std::string query_host = host;
-    auto redirect = GetPhotonRedirectIp(host);
+    auto redirect = GetNplnDebugProxyIp(host);
+    if (!redirect.has_value()) {
+        redirect = GetPvzEaRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetCtrDemonwareAuthRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetAmongUsEosRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetAmongUsMatchmakerRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetFallGuysEosRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetMinecraftDungeonsRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetPhotonRedirectIp(host);
+    }
     if (!redirect.has_value()) {
         redirect = GetNextendoRedirectIp(host);
     }
@@ -376,6 +604,10 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
         query_host = *redirect;
     } else if (blocked_domains.find(host) != blocked_domains.end()) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
+        return {0, GetAddrInfoError::AGAIN};
+    } else if (ShouldBlockAmongUsRelatedHost(host)) {
+        LOG_WARNING(Network, "[Nextendo] Blocking Among Us-era host '{}' (NEXTENDO_AMONGUS_BLOCK)",
+                    host);
         return {0, GetAddrInfoError::AGAIN};
     }
 
@@ -557,6 +789,24 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     std::string query_host = host;
     auto redirect = GetNplnDebugProxyIp(host);
     if (!redirect.has_value()) {
+        redirect = GetPvzEaRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetCtrDemonwareAuthRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetAmongUsEosRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetAmongUsMatchmakerRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetFallGuysEosRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
+        redirect = GetMinecraftDungeonsRedirectIp(host);
+    }
+    if (!redirect.has_value()) {
         redirect = GetPhotonRedirectIp(host);
     }
     if (!redirect.has_value()) {
@@ -566,6 +816,10 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         query_host = *redirect;
     } else if (blocked_domains.find(host) != blocked_domains.end()) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
+        return {0, GetAddrInfoError::AGAIN};
+    } else if (ShouldBlockAmongUsRelatedHost(host)) {
+        LOG_WARNING(Network, "[Nextendo] Blocking Among Us-era host '{}' (NEXTENDO_AMONGUS_BLOCK)",
+                    host);
         return {0, GetAddrInfoError::AGAIN};
     }
 

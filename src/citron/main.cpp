@@ -189,6 +189,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "common/string_util.h"
 #include "common/xci_trimmer.h"
 #include "core/core.h"
+#include "core/nextendo_guest_call.h"
 #include "core/core_timing.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/card_image.h"
@@ -2074,6 +2075,38 @@ void GMainWindow::ConnectMenuEvents() {
             dialog.exec();
         } else if (kind == NextendoToast::Kind::ChatRequest) {
             OpenNextendoChatWindow(pending_chat_invite_room_id);
+        } else if (kind == NextendoToast::Kind::GameInvite) {
+            // [Nextendo] Outbound is the only title this currently supports (see
+            // HANDOFF.md); the invitation itself was already queued into
+            // Common::NextendoFriends by PollInvitations regardless of this click, so a
+            // running Outbound picks it up on its own next poll either way -- this click
+            // only needs to launch it for a joiner who isn't already in it. Real bug found
+            // live: BootGameFromList force-stops whatever is currently running before
+            // starting the new boot, so calling it unconditionally force-killed an
+            // already-running Outbound mid-session (a live Photon connection included) and
+            // rebooting into that torn-down state corrupted guest memory. Never boot if
+            // Outbound is the game already running.
+            constexpr u64 OutboundTitleId = 0x0100ED9024EB8000ULL;
+            if (emulation_running && system->IsPoweredOn() &&
+                play_time_manager->GetProgramId() == OutboundTitleId) {
+                // [Nextendo] Outbound is running: this click is the user ACCEPTING the
+                // invite. Fire the manufactured guest-call join now -- the user has had
+                // the chance to get in position (multiplayer menu inside a loaded save);
+                // auto-firing on delivery instead crashed the game when the invite
+                // arrived at the title/main menu (observed live, twice).
+                if (Core::NextendoGuestCall::ArmPendingInvite(*system->ApplicationProcess())) {
+                    nextendo_toast->Show(tr("Joining your friend's game..."), {}, {},
+                                         NextendoToast::Kind::GameInvite);
+                } else {
+                    nextendo_toast->Show(tr("Could not start the join -- see log for details"),
+                                         {}, {}, NextendoToast::Kind::GameInvite);
+                }
+                return;
+            }
+            const QString path = game_list->GetGamePath(OutboundTitleId);
+            if (!path.isEmpty()) {
+                BootGameFromList(path, StartGameType::Normal);
+            }
         }
     });
     connect(ui->action_Nextendo_Population, &QAction::triggered, this,
@@ -2197,6 +2230,11 @@ void GMainWindow::ConnectMenuEvents() {
             [this](const QString& /*room_id*/, u64 /*pid*/, const QString& name) {
                 nextendo_toast->Show(name, tr("joined your chat room"), {},
                                      NextendoToast::Kind::Online);
+            });
+    connect(nextendo_controller, &NextendoController::FriendInvitationReceived, this,
+            [this](u64 /*pid*/, const QString& name) {
+                nextendo_toast->Show(name, tr("invited you to join their game"), {},
+                                     NextendoToast::Kind::GameInvite);
             });
     connect(nextendo_controller, &NextendoController::ChatBanned, this, [this](const QString& reason) {
         if (nextendo_room_overlay) {

@@ -255,6 +255,16 @@ private:
                 MarkResumed([&] {
                     state->active_thread->SetStepState(Kernel::StepState::StepPending);
                     state->active_thread->Resume(Kernel::SuspendType::Debug);
+                    // [Nextendo] Real bug found live: without this call, the active thread's
+                    // own .Resume() above never actually gets the physical-core worker thread
+                    // to notice it's runnable again -- gdb's plain "step"/"stepi" (mapped to
+                    // this action) silently never advanced the guest PC, across thousands of
+                    // steps, with zero error. ResumeEmulation(except=active_thread) still
+                    // excludes every OTHER thread from being woken (preserving "Locked"
+                    // semantics -- only the active thread should run), but its
+                    // KScopedSchedulerLock-guarded wake sequence is what actually reschedules
+                    // the excluded thread's own core, which plain Resume() alone doesn't do.
+                    ResumeEmulation(state->active_thread.GetPointerUnsafe());
                 });
                 break;
             }

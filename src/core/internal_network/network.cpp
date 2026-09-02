@@ -474,6 +474,8 @@ Protocol TranslateProtocolFromNative(int protocol) {
         return Protocol::TCP;
     case IPPROTO_UDP:
         return Protocol::UDP;
+    case IPPROTO_ICMP:
+        return Protocol::ICMP;
     default:
         UNIMPLEMENTED_MSG("Unimplemented protocol={}", protocol);
         return Protocol::Unspecified;
@@ -488,8 +490,10 @@ int TranslateProtocolToNative(Protocol protocol) {
         return IPPROTO_TCP;
     case Protocol::UDP:
         return IPPROTO_UDP;
+    case Protocol::ICMP:
+        return IPPROTO_ICMP;
     default:
-        UNIMPLEMENTED_MSG("Unimplemented protocol={}", protocol);
+        UNIMPLEMENTED_MSG("Unimplemented protocol={}", static_cast<int>(protocol));
         return 0;
     }
 }
@@ -834,7 +838,18 @@ void EnableAggressiveTcpKeepAlive(SOCKET fd) {
 } // Anonymous namespace
 
 Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
-    fd = socket(TranslateDomainToNative(domain), TranslateTypeToNative(type),
+    // [Nextendo] Guest SOCK_RAW + IPPROTO_ICMP is what titles use for region-latency
+    // pings (observed: Among Us opens one per selectable region before any online
+    // request, and abandons sign-in entirely when creation fails -- 2020.9.22 and
+    // 2026.18.0 behave identically, Experiment 2026-08-31-3/4). True raw sockets
+    // need root; Linux unprivileged "ping sockets" (SOCK_DGRAM + IPPROTO_ICMP,
+    // gated by net.ipv4.ping_group_range) provide the same echo semantics with the
+    // kernel filling the IP header and checksum and filtering replies to the
+    // identifier. SendTo below binds the guest's first-seen identifier so replies
+    // match what the title expects.
+    is_ping_socket = (type == Type::RAW && protocol == Protocol::ICMP);
+    const int native_type = is_ping_socket ? SOCK_DGRAM : TranslateTypeToNative(type);
+    fd = socket(TranslateDomainToNative(domain), native_type,
                 TranslateProtocolToNative(protocol));
     if (fd == INVALID_SOCKET) {
         return GetAndLogLastError();
@@ -1048,6 +1063,28 @@ std::pair<s32, Errno> Socket::Send(std::span<const u8> message, int flags) {
 std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
                                      const SockAddrIn* addr) {
     ASSERT(flags == 0);
+
+    // [Nextendo] See Initialize: a Linux ping socket filters replies by ICMP echo
+    // identifier, and on an unbound socket the kernel replaces the sender's
+    // identifier with its own -- replies would then not match what the guest sent.
+    // Bind to the identifier from the guest's first echo request (ICMP header:
+    // type@0, code@1, checksum@2..3, identifier@4..5 big-endian, request type=8)
+    // so the kernel keeps it and replies echo it back. One identifier per socket
+    // matches observed title behavior (one ping socket per region).
+    if (is_ping_socket && !ping_id_bound && message.size() >= 6 && message[0] == 8) {
+        const u16 identifier = static_cast<u16>((message[4] << 8) | message[5]);
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = htons(identifier);
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
+        if (bind(fd, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) ==
+            SOCKET_ERROR) {
+            // Not fatal: fall back to the kernel-chosen identifier; pings may still
+            // succeed if the guest tolerates the mismatch.
+            GetAndLogLastError(CallType::Send);
+        }
+        ping_id_bound = true;
+    }
 
     const sockaddr* to = nullptr;
     const int to_len = addr ? sizeof(sockaddr) : 0;

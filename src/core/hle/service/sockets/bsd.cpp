@@ -449,6 +449,44 @@ static bool TryInjectTlsSni(std::span<const u8> input, const std::string& host_n
     return true;
 }
 
+static std::optional<std::string> ExtractTlsSni(std::span<const u8> input) {
+    if (input.size() < 43 || input[0] != 0x16 || input[5] != 0x01) {
+        return std::nullopt;
+    }
+    size_t p = 5 + 4 + 2 + 32;
+    if (p >= input.size()) return std::nullopt;
+    const size_t sid_len = input[p];
+    p += 1 + sid_len;
+    if (p + 2 > input.size()) return std::nullopt;
+    const size_t cipher_len = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
+    p += 2 + cipher_len;
+    if (p + 1 > input.size()) return std::nullopt;
+    const size_t compression_len = input[p];
+    p += 1 + compression_len;
+    if (p + 2 > input.size()) return std::nullopt;
+    const size_t extensions_len = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
+    p += 2;
+    const size_t extensions_end = p + extensions_len;
+    if (extensions_end > input.size()) return std::nullopt;
+
+    while (p + 4 <= extensions_end) {
+        const u16 type = static_cast<u16>((input[p] << 8) | input[p + 1]);
+        const size_t len = (static_cast<size_t>(input[p + 2]) << 8) | input[p + 3];
+        p += 4;
+        if (p + len > extensions_end) return std::nullopt;
+        if (type == 0x0000 && len >= 5) {
+            const size_t list_len = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
+            const size_t name_len = (static_cast<size_t>(input[p + 3]) << 8) | input[p + 4];
+            if (input[p + 2] == 0 && list_len >= 3 + name_len && 5 + name_len <= len) {
+                return std::string(reinterpret_cast<const char*>(input.data() + p + 5), name_len);
+            }
+            return std::nullopt;
+        }
+        p += len;
+    }
+    return std::nullopt;
+}
+
 // Queued from an earlier send's ICMP error, not from this receive.
 bool IsTransientDatagramError(Errno bsd_errno) {
     return bsd_errno == Errno::CONNREFUSED || bsd_errno == Errno::CONNRESET;
@@ -459,6 +497,10 @@ bool IsConnectionBased(Type type) {
     case Type::STREAM:
         return true;
     case Type::DGRAM:
+        return false;
+    case Type::RAW:
+        // [Nextendo] Only reached for SOCK_RAW + IPPROTO_ICMP (see SocketImpl's guard);
+        // ICMP echo pings are connectionless.
         return false;
     default:
         UNIMPLEMENTED_MSG("Unimplemented type={}", type);
@@ -1830,6 +1872,171 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
         }
     }
 
+    // [Nextendo] Companion to sfdnsres.cpp's exact-host Fall Guys EOS research redirect.
+    // Port 443 may already belong to a local reverse proxy, so allow an explicit development
+    // port without changing system firewall/NAT state. This can only activate for the hostname
+    // metadata retained by the opt-in DNS redirect and an original HTTPS destination.
+    if (translated_addr.portno == 443) {
+        const std::string resolved_ip = Network::IPv4AddressToString(translated_addr.ip);
+        if (GetLastHostForIp(resolved_ip) == "api.epicgames.dev") {
+            // [Nextendo] api.epicgames.dev serves two family projects: Among Us (EOS
+            // stub, NEXTENDO_AMONGUS_EOS_PORT) and Fall Guys (NEXTENDO_FALLGUYS_EOS_PORT).
+            // The Among Us env wins when both are set; during any given title's run
+            // only one is normally present.
+            const char* amongus_eos_port = std::getenv("NEXTENDO_AMONGUS_EOS_PORT");
+            const char* fallguys_eos_port = std::getenv("NEXTENDO_FALLGUYS_EOS_PORT");
+            const char* env = (amongus_eos_port && *amongus_eos_port) ? amongus_eos_port
+                                                                      : fallguys_eos_port;
+            const char* env_name = (amongus_eos_port && *amongus_eos_port)
+                                       ? "NEXTENDO_AMONGUS_EOS_PORT"
+                                       : "NEXTENDO_FALLGUYS_EOS_PORT";
+            if (env && *env) {
+                try {
+                    const int parsed = std::stoi(env);
+                    if (parsed > 0 && parsed <= 0xFFFF) {
+                        LOG_INFO(Service,
+                                 "[Nextendo] Redirecting EOS destination port 443 -> {} ({})",
+                                 parsed, env_name);
+                        translated_addr.portno = static_cast<u16>(parsed);
+                    }
+                } catch (const std::exception&) {
+                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid EOS port '{}'; "
+                                         "expected an integer from 1 to 65535",
+                                env);
+                }
+            }
+        } else if (GetLastHostForIp(resolved_ip) == "lavender-switch-auth3.prod.demonware.net" ||
+                   GetLastHostForIp(resolved_ip) == "lavender-switch-lobby.prod.demonware.net") {
+            // [Nextendo] Companion to sfdnsres.cpp's exact-host CTR:NF Demonware redirect --
+            // same reasoning as the Fall Guys EOS port override above (port 443 already
+            // belongs to something else on this host in practice). Covers both the auth3 and
+            // lobby hosts -- see that function's comment for why they share one target.
+            // NEXTENDO_CTR_AUTH_PORT=<port> to enable.
+            if (const char* env = std::getenv("NEXTENDO_CTR_AUTH_PORT"); env && *env) {
+                try {
+                    const int parsed = std::stoi(env);
+                    if (parsed > 0 && parsed <= 0xFFFF) {
+                        LOG_INFO(Service,
+                                 "[Nextendo] Redirecting CTR:NF Demonware auth destination port "
+                                 "443 -> {}",
+                                 parsed);
+                        translated_addr.portno = static_cast<u16>(parsed);
+                    }
+                } catch (const std::exception&) {
+                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid CTR:NF auth port '{}'; "
+                                         "expected an integer from 1 to 65535",
+                                env);
+                }
+            }
+        } else if (GetLastHostForIp(resolved_ip) == "matchmaker.among.us" ||
+                   GetLastHostForIp(resolved_ip) == "matchmaker-eu.among.us" ||
+                   GetLastHostForIp(resolved_ip) == "matchmaker-as.among.us") {
+            // [Nextendo] Companion to sfdnsres.cpp's exact-host Among Us matchmaker
+            // redirect (NEXTENDO_AMONGUS_IP). The matchmakers are HTTPS on 443; allow
+            // a development port for the local research stub. Unset by default.
+            // NEXTENDO_AMONGUS_PORT=<port> to enable.
+            if (const char* env = std::getenv("NEXTENDO_AMONGUS_PORT"); env && *env) {
+                try {
+                    const int parsed = std::stoi(env);
+                    if (parsed > 0 && parsed <= 0xFFFF) {
+                        LOG_INFO(Service,
+                                 "[Nextendo] Redirecting Among Us matchmaker destination port "
+                                 "443 -> {}",
+                                 parsed);
+                        translated_addr.portno = static_cast<u16>(parsed);
+                    }
+                } catch (const std::exception&) {
+                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid Among Us port '{}'; "
+                                         "expected an integer from 1 to 65535",
+                                env);
+                }
+            }
+        } else if (GetLastHostForIp(resolved_ip) == "launchercontent.mojang.com" ||
+                   GetLastHostForIp(resolved_ip) == "vortex.data.microsoft.com" ||
+                   GetLastHostForIp(resolved_ip) == "title.mgt.xboxlive.com" ||
+                   GetLastHostForIp(resolved_ip) == "sisu.xboxlive.com" ||
+                   GetLastHostForIp(resolved_ip) == "login.live.com") {
+            // [Nextendo] Companion to sfdnsres.cpp's exact-host Minecraft Dungeons
+            // redirect (NEXTENDO_MC_DUNGEONS_IP). Every confirmed Dungeons host is HTTPS
+            // on 443, which is commonly already taken on the research host; allow a
+            // development port for the local observer/mock. Only meaningful when the IP
+            // redirect is active. Honors the same NEXTENDO_MC_DUNGEONS_ALLOW_SIGNIN
+            // exception as the DNS hook, so an allowed sign-in host keeps port 443 and
+            // reaches the real Microsoft/Xbox endpoints.
+            // NEXTENDO_MC_DUNGEONS_PORT=<port> to enable.
+            const std::string dungeons_host = GetLastHostForIp(resolved_ip);
+            const bool dungeons_signin_host = dungeons_host == "title.mgt.xboxlive.com" ||
+                                              dungeons_host == "sisu.xboxlive.com" ||
+                                              dungeons_host == "login.live.com";
+            const char* allow = std::getenv("NEXTENDO_MC_DUNGEONS_ALLOW_SIGNIN");
+            const bool allow_signin =
+                dungeons_signin_host && allow && *allow && std::string(allow) != "0";
+            if (!allow_signin) {
+                if (const char* env = std::getenv("NEXTENDO_MC_DUNGEONS_PORT"); env && *env) {
+                    try {
+                        const int parsed = std::stoi(env);
+                        if (parsed > 0 && parsed <= 0xFFFF) {
+                            LOG_INFO(Service,
+                                     "[Nextendo] Redirecting Minecraft Dungeons host '{}' "
+                                     "destination port 443 -> {}",
+                                     dungeons_host, parsed);
+                            translated_addr.portno = static_cast<u16>(parsed);
+                        }
+                    } catch (const std::exception&) {
+                        LOG_WARNING(Service,
+                                    "[Nextendo] Ignoring invalid Minecraft Dungeons port '{}'; "
+                                    "expected an integer from 1 to 65535",
+                                    env);
+                    }
+                }
+            }
+        } else if (GetLastHostForIp(resolved_ip).find(".baas.nintendo.com") != std::string::npos) {
+            // [Nextendo] Companion to the generic Nintendo host redirect for BAAS jku
+            // fetches: titles that locally verify their BAAS id_token (RS256) fetch the
+            // JWK Set from <hex>.baas.nintendo.com/1.0.0/certificates. With the token
+            // signed by the profile's nextendo_baas key, a local baas-jwks instance
+            // (BAAS_SIGNING_KEY = same pem) must serve that URL. Env-gated, unset by
+            // default. NEXTENDO_BAAS_JWKS_PORT=<port> to enable (Among Us research,
+            // 2026-09-01: the EOS SDK's external-token acceptance gated on this).
+            if (const char* env = std::getenv("NEXTENDO_BAAS_JWKS_PORT"); env && *env) {
+                try {
+                    const int parsed = std::stoi(env);
+                    if (parsed > 0 && parsed <= 0xFFFF) {
+                        LOG_INFO(Service,
+                                 "[Nextendo] Redirecting BAAS JWKS destination port 443 -> {}",
+                                 parsed);
+                        translated_addr.portno = static_cast<u16>(parsed);
+                    }
+                } catch (const std::exception&) {
+                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid BAAS JWKS port '{}'", env);
+                }
+            }
+        } else if (GetLastHostForIp(resolved_ip).find("npln") != std::string::npos) {
+            // [Nextendo] Companion to sfdnsres.cpp's npln debug-proxy tap
+            // (NEXTENDO_S3_DEBUG_PROXY_IP): the local TLS-terminating research
+            // proxy does not own port 443 on this host, so allow an explicit
+            // destination port for any hostname the tap resolved. Same
+            // reasoning as the Fall Guys / CTR:NF overrides above: unset by
+            // default, only ever reaches hosts the opt-in tap redirected.
+            // NEXTENDO_S3_DEBUG_PROXY_PORT=<port> to enable.
+            if (const char* env = std::getenv("NEXTENDO_S3_DEBUG_PROXY_PORT"); env && *env) {
+                try {
+                    const int parsed = std::stoi(env);
+                    if (parsed > 0 && parsed <= 0xFFFF) {
+                        LOG_INFO(Service,
+                                 "[Nextendo] Redirecting npln debug-proxy destination port 443 -> {}",
+                                 parsed);
+                        translated_addr.portno = static_cast<u16>(parsed);
+                    }
+                } catch (const std::exception&) {
+                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid npln debug-proxy port '{}'; "
+                                         "expected an integer from 1 to 65535",
+                                env);
+                }
+            }
+        }
+    }
+
     LOG_INFO(Service, "Connect fd={} to {}:{}", fd,
              Network::IPv4AddressToRedactedString(addr_in.ip), translated_addr.portno);
 
@@ -1905,7 +2112,9 @@ std::pair<s32, Errno> BSD::FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg) {
 
     switch (cmd) {
     case FcntlCmd::GETFL:
-        ASSERT(arg == 0);
+        // ponytail: F_GETFL ignores its third arg per POSIX; Outbound/Fusion's transport passes a
+        // non-zero one during gameplay-session socket setup. Don't ASSERT (it spammed Critical and is
+        // spurious) -- just return the flags.
         return {descriptor.flags, Errno::SUCCESS};
     case FcntlCmd::SETFL: {
         const bool enable = (arg & Network::FLAG_O_NONBLOCK) != 0;
@@ -2215,6 +2424,12 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
 
     auto [ret, bsd_errno] = Translate(descriptor.socket->Recv(flags, message));
 
+    if (ret > 5 && descriptor.tls_sni ==
+                       "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net" &&
+        message[0] == 0x16 && message[5] == 0x02) {
+        descriptor.tls_server_flight_received = true;
+    }
+
     if (ret > 0 && !descriptor.is_connection_based) {
         const auto [peer, peer_err] = descriptor.socket->GetPeerName();
         if (peer_err == Network::Errno::SUCCESS) {
@@ -2433,7 +2648,38 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
             if (!host.empty() && TryInjectTlsSni(message, host, injected_buf)) {
                 LOG_INFO(Service, "[Nextendo] Injected SNI extension '{}' into TLS ClientHello for BSD socket fd={}", host, fd);
                 send_buf = injected_buf;
+            } else {
+                // Stardew/NPLN clean-room diagnostic: record only the public hostname candidate,
+                // never ClientHello bytes. A false injection result means the hello was malformed
+                // for this parser or already carried SNI; the server certificate identifies which
+                // virtual host was ultimately selected.
+                const auto client_sni = ExtractTlsSni(message);
+                descriptor.tls_sni = client_sni.value_or("");
+                LOG_INFO(
+                    Service,
+                    "[Nextendo][DIAG] ClientHello fd={} SNI injection not applied; "
+                    "client-sni='{}' last-host candidate='{}'",
+                    fd, client_sni.value_or("<absent-or-unparsed>"),
+                    host.empty() ? "<none>" : host);
             }
+        }
+    }
+
+    // [Nextendo][DIAG] Certificate-validation control experiment. The DNS side of this opt-in
+    // probe resolves only Stardew's exact tenant via normal DNS. If the guest accepts that
+    // endpoint's server flight, suppress its very next TLS record so no Finished, HTTP/2 data,
+    // token, or authenticated request can leave the emulator. Returning success keeps the
+    // observation isolated from guest retry behavior. Unset by default.
+    if (descriptor.tls_server_flight_received &&
+        descriptor.tls_sni == "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net") {
+        const char* probe = std::getenv("NEXTENDO_STARDEW_TLS_PROBE");
+        if (probe != nullptr && *probe != '\0' && std::string_view(probe) != "0") {
+            LOG_INFO(Service,
+                     "[Nextendo][DIAG] Stardew production TLS probe observed and suppressed "
+                     "post-server-flight record type=0x{:02x} len={}",
+                     message.empty() ? 0 : message[0], message.size());
+            descriptor.tls_server_flight_received = false;
+            return {static_cast<s32>(message.size()), Errno::SUCCESS};
         }
     }
 

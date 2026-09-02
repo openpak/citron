@@ -2803,6 +2803,14 @@ void NextendoAccountDialog::ShowFriendsContextMenu(const QPoint& pos) {
     const QString avatar_b64 = index.data(NextendoFriendItem::AvatarB64Role).toString();
 
     QMenu menu(this);
+    const s32 presence = index.data(NextendoFriendItem::PresenceRole).toInt();
+    if (presence == 2) { // in-game
+        QAction* join_action = menu.addAction(tr("Join Game"));
+        connect(join_action, &QAction::triggered, this, [this, pid] {
+            const QString message = controller->JoinFriendSession(pid);
+            QMessageBox::information(this, tr("Join Game"), message);
+        });
+    }
     QAction* invite_action = menu.addAction(tr("Invite to Chat Room"));
     connect(invite_action, &QAction::triggered, this,
            [this, pid, name] { emit InviteToChatRequested(pid, name); });

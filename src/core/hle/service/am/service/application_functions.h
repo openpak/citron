@@ -73,7 +73,12 @@ private:
     Result GetPreviousProgramIndex(Out<s32> out_previous_program_index);
     Result GetGpuErrorDetectedSystemEvent(OutCopyHandle<Kernel::KReadableEvent> out_event);
     Result GetFriendInvitationStorageChannelEvent(OutCopyHandle<Kernel::KReadableEvent> out_event);
-    Result TryPopFromFriendInvitationStorageChannel(Out<SharedPointer<IStorage>> out_storage);
+    // [Nextendo] Raw ctx handler (not D<>) for one reason: ctx.GetThread() is the REAL
+    // requesting guest thread. The D<>/cmif path runs on a ServerManager host thread
+    // where GetCurrentThreadPointer() returns that thread's DUMMY KThread -- the guest
+    // invite-join was armed against a thread that is never scheduled, so it never
+    // fired. See nextendo_guest_call.h.
+    void TryPopFromFriendInvitationStorageChannel(HLERequestContext& ctx);
     Result GetNotificationStorageChannelEvent(OutCopyHandle<Kernel::KReadableEvent> out_event);
     Result GetHealthWarningDisappearedSystemEvent(OutCopyHandle<Kernel::KReadableEvent> out_event);
     Result PrepareForJit();

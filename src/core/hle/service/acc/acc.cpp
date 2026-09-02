@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
 
 #include <openssl/bio.h>
@@ -244,10 +245,25 @@ std::string BuildIdToken() {
         R"("nintendo":{{"dt":"NX Prod 1","pc":"HAC","di":"{}","sn":"XAW10000000000","ist":false}},)",
         device_id);
 
+    // [Nextendo] Optional stable-identity experiment (fallguys-nextendo 2026-08-31): the
+    // historical random "sub" is accepted by NEX titles, but Fall Guys' EOS Connect
+    // external-auth exchange fails client-side regardless of the server's response, and one
+    // candidate cause is a cross-check between this token's identity and the stable account
+    // identity the title sees via IManagerForApplication::GetAccountId. When this env var is
+    // set, it pins "sub" to an explicit value so the token identity can be aligned with
+    // whatever the caller expects. Unset by default (family rule): the historical random sub
+    // keeps being served, so NEX titles are unaffected.
+    std::string sub = RandomHex(0x10);
+    if (const char* forced_sub = std::getenv("NEXTENDO_BAAS_SUB");
+        forced_sub != nullptr && *forced_sub != '\0') {
+        sub = forced_sub;
+        LOG_INFO(Service_ACC, "[Nextendo] BAAS id_token uses NEXTENDO_BAAS_SUB override");
+    }
+
     const std::string payload = fmt::format(
         R"({{"sub":"{}","aud":"{}","iss":"{}","typ":"id_token","iat":{},"exp":{},"jku":"{}",)"
         R"("jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}",{}{}"hm":true}})",
-        RandomHex(0x10), BaasAudience, BaasIssuer, now, now + 3 * 60 * 60, BaasJku,
+        sub, BaasAudience, BaasIssuer, now, now + 3 * 60 * 60, BaasJku,
         Common::UUID::MakeRandom().FormattedString(), device_id, RandomHex(0x10),
         nintendo_claim, nnex_claim);
 

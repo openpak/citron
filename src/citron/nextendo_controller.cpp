@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstdlib>
 #include <thread>
 #include <utility>
@@ -42,6 +43,13 @@ NextendoController::NextendoController(Core::System& system_, QWidget* main_wind
     friend_poll_timer.setInterval(20000);
     connect(&friend_poll_timer, &QTimer::timeout, this, &NextendoController::PollFriends);
     friend_poll_timer.start();
+
+    // [Nextendo] Faster than the friend-list poll: an invitation is time-sensitive/interactive
+    // (the sender is actively waiting on the Invite Friends screen), not a passive presence
+    // refresh -- 5s keeps it responsive without hammering the account server.
+    invitation_poll_timer.setInterval(5000);
+    connect(&invitation_poll_timer, &QTimer::timeout, this, &NextendoController::PollInvitations);
+    invitation_poll_timer.start();
 
     PollFriends();
     EnsureChatConnected(); // no-op if not already signed in
@@ -388,6 +396,31 @@ void NextendoController::NotifyFriendRequestSent(const QString& friend_code) {
     emit FriendRequestSent(friend_code);
 }
 
+QString NextendoController::JoinFriendSession(u64 pid) {
+    const auto entries = Common::NextendoFriends::Get();
+    const auto it = std::find_if(entries.begin(), entries.end(),
+                                  [pid](const auto& e) { return e.pid == pid; });
+    if (it == entries.end() || it->status != Common::NextendoFriends::PresenceOnlinePlay ||
+        it->app_field.empty()) {
+        const QString message = tr("That friend isn't in a joinable game right now.");
+        emit StatusChanged(message);
+        return message;
+    }
+
+    // Bypasses the native Invite Friends applet entirely: we already have this friend's
+    // published session blob locally (from the same presence feed the friends list itself
+    // renders), so there's no need to round-trip through SendFriendInvitation/the account
+    // server's mailbox at all -- just hand it straight to the same local queue
+    // TryPopFromFriendInvitationStorageChannel already reads from.
+    Common::NextendoFriends::SetPendingInvitations({Common::NextendoFriends::PendingInvitation{
+        it->pid, it->name, std::vector<u8>(it->app_field.begin(), it->app_field.end())}});
+
+    const QString message = tr("Ready to join %1's game -- start or resume the title now.")
+                                .arg(QString::fromStdString(it->name));
+    emit StatusChanged(message);
+    return message;
+}
+
 void NextendoController::PollFriends() {
 #ifdef ENABLE_WEB_SERVICE
     if (!Common::NextendoAccount::IsLinked()) {
@@ -469,6 +502,43 @@ void NextendoController::PollFriends() {
                     }
                 }
                 last_known_requests = std::move(current_requests);
+            },
+            Qt::QueuedConnection);
+    }}.detach();
+#endif
+}
+
+void NextendoController::PollInvitations() {
+#ifdef ENABLE_WEB_SERVICE
+    if (!Common::NextendoAccount::IsLinked()) {
+        LOG_INFO(Frontend, "[Nextendo] PollInvitations: skipped, not linked");
+        return;
+    }
+    LOG_INFO(Frontend, "[Nextendo] PollInvitations: tick");
+
+    QPointer<NextendoController> self(this);
+    std::thread{[this, self] {
+        auto fetched = WebService::NextendoApi::PollInvitations();
+        if (fetched.empty() || !self) {
+            return;
+        }
+
+        QMetaObject::invokeMethod(
+            this,
+            [self, list = std::move(fetched)] {
+                if (!self) {
+                    return;
+                }
+                std::vector<Common::NextendoFriends::PendingInvitation> cache;
+                cache.reserve(list.size());
+                for (const auto& inv : list) {
+                    cache.push_back({inv.from_pid, inv.from_name, inv.app_param});
+                }
+                Common::NextendoFriends::SetPendingInvitations(std::move(cache));
+                for (const auto& inv : list) {
+                    emit self->FriendInvitationReceived(inv.from_pid,
+                                                        QString::fromStdString(inv.from_name));
+                }
             },
             Qt::QueuedConnection);
     }}.detach();
