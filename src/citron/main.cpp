@@ -189,6 +189,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "common/string_util.h"
 #include "common/xci_trimmer.h"
 #include "core/core.h"
+#include "core/legacy_guest_call.h"
 #include "core/core_timing.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/card_image.h"
@@ -2074,6 +2075,38 @@ void GMainWindow::ConnectMenuEvents() {
             dialog.exec();
         } else if (kind == OpenPakToast::Kind::ChatRequest) {
             OpenOpenPakChatWindow(pending_chat_invite_room_id);
+        } else if (kind == OpenPakToast::Kind::GameInvite) {
+            // [OpenPak] Outbound is the only title this currently supports (see
+            // HANDOFF.md); the invitation itself was already queued into
+            // Common::OpenPakFriends by PollInvitations regardless of this click, so a
+            // running Outbound picks it up on its own next poll either way -- this click
+            // only needs to launch it for a joiner who isn't already in it. Real bug found
+            // live: BootGameFromList force-stops whatever is currently running before
+            // starting the new boot, so calling it unconditionally force-killed an
+            // already-running Outbound mid-session (a live Photon connection included) and
+            // rebooting into that torn-down state corrupted guest memory. Never boot if
+            // Outbound is the game already running.
+            constexpr u64 OutboundTitleId = 0x0100ED9024EB8000ULL;
+            if (emulation_running && system->IsPoweredOn() &&
+                play_time_manager->GetProgramId() == OutboundTitleId) {
+                // [OpenPak] Outbound is running: this click is the user ACCEPTING the
+                // invite. Fire the manufactured guest-call join now -- the user has had
+                // the chance to get in position (multiplayer menu inside a loaded save);
+                // auto-firing on delivery instead crashed the game when the invite
+                // arrived at the title/main menu (observed live, twice).
+                if (Core::OpenPakGuestCall::ArmPendingInvite(*system->ApplicationProcess())) {
+                    legacy_toast->Show(tr("Joining your friend's game..."), {}, {},
+                                         OpenPakToast::Kind::GameInvite);
+                } else {
+                    legacy_toast->Show(tr("Could not start the join -- see log for details"),
+                                         {}, {}, OpenPakToast::Kind::GameInvite);
+                }
+                return;
+            }
+            const QString path = game_list->GetGamePath(OutboundTitleId);
+            if (!path.isEmpty()) {
+                BootGameFromList(path, StartGameType::Normal);
+            }
         }
     });
     connect(ui->action_OpenPak_Population, &QAction::triggered, this,
@@ -2197,6 +2230,11 @@ void GMainWindow::ConnectMenuEvents() {
             [this](const QString& /*room_id*/, u64 /*pid*/, const QString& name) {
                 legacy_toast->Show(name, tr("joined your chat room"), {},
                                      OpenPakToast::Kind::Online);
+            });
+    connect(legacy_controller, &OpenPakController::FriendInvitationReceived, this,
+            [this](u64 /*pid*/, const QString& name) {
+                legacy_toast->Show(name, tr("invited you to join their game"), {},
+                                     OpenPakToast::Kind::GameInvite);
             });
     connect(legacy_controller, &OpenPakController::ChatBanned, this, [this](const QString& reason) {
         if (legacy_room_overlay) {

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdlib>
+#include <set>
 
 #include "common/scope_exit.h"
 #include "core/arm/debug.h"
@@ -43,6 +45,23 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
         LOG_INFO(Kernel_SVC,
                  "[OpenPak][DIAG] CreateThread entry_point=0x{:08X} caller backtrace:{}",
                  entry_point, trace_str);
+
+        // [OpenPak][DIAG] One-shot absolute-base resolution for guest modules seen in a
+        // backtrace (fallguys-legacy 2026-08-31): the runtime base turns module-relative
+        // offsets into absolute addresses for live analysis without a debugger. EOSSDK is
+        // nn::ro-loaded at runtime, so its base is not knowable statically. Fires at most
+        // once per module name, and only when OPENPAK_LEGACY_LOG_EOSSDK_BASE is set (default-off,
+        // family rule).
+        if (std::getenv("OPENPAK_LEGACY_LOG_EOSSDK_BASE") != nullptr) {
+            static std::set<std::string> reported_modules;
+            for (const auto& entry : backtrace) {
+                if (entry.module.find("EOSSDK") != std::string::npos &&
+                    reported_modules.insert(entry.module).second) {
+                    LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] Module '{}' runtime base = 0x{:X}",
+                             entry.module, entry.original_address - entry.offset);
+                }
+            }
+        }
     }
 
     // Adjust core id, if it's the default magic.
