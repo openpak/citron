@@ -145,12 +145,12 @@ u64 RefreshBase(Kernel::KProcess& process) {
     g_state.instance.store(0, std::memory_order_relaxed);
     if (base == 0) {
         LOG_WARNING(Core_ARM,
-                    "[Nextendo][GUESTCALL] base calibration failed around entry {:#x} -- game "
+                    "[OpenPak][GUESTCALL] base calibration failed around entry {:#x} -- game "
                     "version may have changed",
                     entry);
     } else {
         LOG_INFO(Core_ARM,
-                 "[Nextendo][GUESTCALL] module base calibrated: {:#x} (entry {:#x}, delta {:+#x})",
+                 "[OpenPak][GUESTCALL] module base calibrated: {:#x} (entry {:#x}, delta {:+#x})",
                  base, entry, static_cast<s64>(base) - static_cast<s64>(entry));
     }
     return base;
@@ -196,7 +196,7 @@ void ObserveInstanceCapture(u64 vaddr, Kernel::KProcess& process, u64 x0) {
         }
         u64 prev = g_state.instance.exchange(x0, std::memory_order_relaxed);
         if (prev != x0) {
-            LOG_INFO(Core_ARM, "[Nextendo][GUESTCALL] NetworkManager instance captured: {:#x}",
+            LOG_INFO(Core_ARM, "[OpenPak][GUESTCALL] NetworkManager instance captured: {:#x}",
                      x0);
             // Complete a pending arm (an invite that arrived before the instance existed).
             Stage expected = Stage::Idle;
@@ -205,7 +205,7 @@ void ObserveInstanceCapture(u64 vaddr, Kernel::KProcess& process, u64 x0) {
                 g_state.code = std::move(g_state.pending_code);
                 g_state.pending_code.clear();
                 LOG_INFO(Core_ARM,
-                         "[Nextendo][GUESTCALL] pending join of '{}' armed after instance capture",
+                         "[OpenPak][GUESTCALL] pending join of '{}' armed after instance capture",
                          g_state.code);
             }
         }
@@ -222,7 +222,7 @@ void RecordInvite(Kernel::KThread& thread, Kernel::KProcess& process,
     }
     if (room_code.empty() || room_code.size() > 8 ||
         !std::all_of(room_code.begin(), room_code.end(), IsRoomCodeChar)) {
-        LOG_WARNING(Core_ARM, "[Nextendo][GUESTCALL] invalid room code '{}' -- not recording",
+        LOG_WARNING(Core_ARM, "[OpenPak][GUESTCALL] invalid room code '{}' -- not recording",
                     room_code);
         return;
     }
@@ -233,7 +233,7 @@ void RecordInvite(Kernel::KThread& thread, Kernel::KProcess& process,
         g_state.recorded_steady = std::chrono::steady_clock::now();
     }
     LOG_INFO(Core_ARM,
-             "[Nextendo][GUESTCALL] invite recorded: room '{}' -- waiting for the user to "
+             "[OpenPak][GUESTCALL] invite recorded: room '{}' -- waiting for the user to "
              "accept (toast click) from the multiplayer menu",
              room_code);
 }
@@ -251,7 +251,7 @@ bool ArmPendingInvite(Kernel::KProcess& process) {
         std::scoped_lock lk{g_state.mutex};
         const auto age = std::chrono::steady_clock::now() - g_state.recorded_steady;
         if (g_state.code.empty() || age > std::chrono::minutes(5)) {
-            LOG_WARNING(Core_ARM, "[Nextendo][GUESTCALL] no fresh recorded invitation to accept");
+            LOG_WARNING(Core_ARM, "[OpenPak][GUESTCALL] no fresh recorded invitation to accept");
             return false;
         }
         room_code = g_state.code;
@@ -272,13 +272,13 @@ bool ArmPendingInvite(Kernel::KProcess& process) {
     // (CalibrateBase already matched both prologues, so this is belt-and-braces.)
     const auto check = [&](u64 rva, u32 expected, const char* name) {
         if (!memory.IsValidVirtualAddressRange(base + rva, sizeof(u32))) {
-            LOG_WARNING(Core_ARM, "[Nextendo][GUESTCALL] {} RVA {:#x} unmapped", name, rva);
+            LOG_WARNING(Core_ARM, "[OpenPak][GUESTCALL] {} RVA {:#x} unmapped", name, rva);
             return false;
         }
         const u32 word = memory.Read32(base + rva);
         if (word != expected) {
             LOG_WARNING(Core_ARM,
-                        "[Nextendo][GUESTCALL] {} RVA {:#x} signature mismatch: {:#010x} != "
+                        "[OpenPak][GUESTCALL] {} RVA {:#x} signature mismatch: {:#010x} != "
                         "{:#010x} -- update RVAs for this game version",
                         name, rva, word, expected);
             return false;
@@ -301,7 +301,7 @@ bool ArmPendingInvite(Kernel::KProcess& process) {
     }
     if (string_klass == 0) {
         LOG_WARNING(Core_ARM,
-                    "[Nextendo][GUESTCALL] could not resolve System.String klass -- not arming");
+                    "[OpenPak][GUESTCALL] could not resolve System.String klass -- not arming");
         return false;
     }
 
@@ -311,7 +311,7 @@ bool ArmPendingInvite(Kernel::KProcess& process) {
         // instead of losing the invitation.
         g_state.pending_code = std::string(room_code);
         LOG_WARNING(Core_ARM,
-                    "[Nextendo][GUESTCALL] NetworkManager.Instance not captured yet -- join of "
+                    "[OpenPak][GUESTCALL] NetworkManager.Instance not captured yet -- join of "
                     "'{}' pending until capture",
                     room_code);
         return false;
@@ -326,14 +326,14 @@ bool ArmPendingInvite(Kernel::KProcess& process) {
         // state machine back and arm it, instead of refusing every future join until a citron
         // restart (observed: repeated "join not armed: injection already running").
         LOG_WARNING(Core_ARM,
-                    "[Nextendo][GUESTCALL] previous injection stuck at stage {} -- force-resetting to "
+                    "[OpenPak][GUESTCALL] previous injection stuck at stage {} -- force-resetting to "
                     "arm join of '{}'",
                     static_cast<int>(expected), room_code);
         g_state.stage.store(Stage::Armed, std::memory_order_relaxed);
     }
     g_state.code = std::string(room_code);
     LOG_INFO(Core_ARM,
-             "[Nextendo][GUESTCALL] armed: joining room '{}' on thread {} (instance={:#x}, "
+             "[OpenPak][GUESTCALL] armed: joining room '{}' on thread {} (instance={:#x}, "
              "base={:#x})",
              room_code, thread->GetThreadId(), g_state.instance.load(std::memory_order_relaxed),
              base);
@@ -351,7 +351,7 @@ void OnBeforeRun(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& p
             static thread_local u64 ticks = 0;
             if ((++ticks & 0x3FF) == 0) {
                 LOG_WARNING(Core_ARM,
-                            "[Nextendo][GUESTCALL] armed but scheduled thread {} (id={}) != "
+                            "[OpenPak][GUESTCALL] armed but scheduled thread {} (id={}) != "
                             "target {}",
                             fmt::ptr(&thread), thread.GetThreadId(),
                             fmt::ptr(g_state.target_thread.load(std::memory_order_relaxed)));
@@ -369,7 +369,7 @@ void OnBeforeRun(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& p
     arm.GetContext(g_state.saved);
     const u64 saved_sp = g_state.saved.sp;
     if (saved_sp < 0x40000) {
-        LOG_WARNING(Core_ARM, "[Nextendo][GUESTCALL] implausible SP {:#x} -- aborting", saved_sp);
+        LOG_WARNING(Core_ARM, "[OpenPak][GUESTCALL] implausible SP {:#x} -- aborting", saved_sp);
         g_state.stage.store(Stage::Idle, std::memory_order_relaxed);
         return;
     }
@@ -382,7 +382,7 @@ void OnBeforeRun(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& p
     g_state.string_addr = g_state.sp_inject + 0x800;
     if (!memory.IsValidVirtualAddressRange(g_state.sp_inject, 0x2000)) {
         LOG_WARNING(Core_ARM,
-                    "[Nextendo][GUESTCALL] stack window [{:#x}, {:#x}) not fully mapped -- "
+                    "[OpenPak][GUESTCALL] stack window [{:#x}, {:#x}) not fully mapped -- "
                     "aborting",
                     g_state.sp_inject, saved_sp);
         g_state.stage.store(Stage::Idle, std::memory_order_relaxed);
@@ -396,7 +396,7 @@ void OnBeforeRun(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& p
         string_klass = memory.Read64(slot + 0x90);
     }
     if (string_klass == 0) {
-        LOG_WARNING(Core_ARM, "[Nextendo][GUESTCALL] string klass vanished -- aborting");
+        LOG_WARNING(Core_ARM, "[OpenPak][GUESTCALL] string klass vanished -- aborting");
         g_state.stage.store(Stage::Idle, std::memory_order_relaxed);
         return;
     }
@@ -416,7 +416,7 @@ void OnBeforeRun(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& p
     arm.SetContext(ctx);
     g_state.stage.store(Stage::Join, std::memory_order_relaxed);
     LOG_INFO(Core_ARM,
-             "[Nextendo][GUESTCALL] firing Join('{}'): this={:#x} code_str={:#x} pc={:#x} "
+             "[OpenPak][GUESTCALL] firing Join('{}'): this={:#x} code_str={:#x} pc={:#x} "
              "sp={:#x} (saved sp={:#x})",
              g_state.code, ctx.r[0], ctx.r[1], ctx.pc, ctx.sp, saved_sp);
 }
@@ -434,7 +434,7 @@ bool OnFault(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& proce
         // thread isn't left suspended in a half-injected state, and let the normal
         // abort handling proceed from there.
         LOG_CRITICAL(Core_ARM,
-                     "[Nextendo][GUESTCALL] real data abort inside injected call (stage={}) -- "
+                     "[OpenPak][GUESTCALL] real data abort inside injected call (stage={}) -- "
                      "restoring context",
                      stage == Stage::Join ? "Join" : "StartCoroutine");
         arm.SetContext(g_state.saved);
@@ -453,7 +453,7 @@ bool OnFault(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& proce
         const u64 state_machine = ctx.r[0];
         if (ctx.pc > 0x1000 || state_machine == 0) {
             LOG_CRITICAL(Core_ARM,
-                         "[Nextendo][GUESTCALL] unexpected state after Join: pc={:#x} x0={:#x} "
+                         "[OpenPak][GUESTCALL] unexpected state after Join: pc={:#x} x0={:#x} "
                          "-- restoring",
                          ctx.pc, state_machine);
             arm.SetContext(g_state.saved);
@@ -461,7 +461,7 @@ bool OnFault(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& proce
             return true;
         }
         LOG_INFO(Core_ARM,
-                 "[Nextendo][GUESTCALL] Join returned state machine {:#x} -- starting coroutine",
+                 "[OpenPak][GUESTCALL] Join returned state machine {:#x} -- starting coroutine",
                  state_machine);
         ctx.r[0] = g_state.instance.load(std::memory_order_relaxed);
         ctx.r[1] = state_machine;
@@ -482,7 +482,7 @@ bool OnFault(Kernel::KThread& thread, ArmInterface& arm, Kernel::KProcess& proce
     g_state.stage.store(Stage::Idle, std::memory_order_relaxed);
     g_state.target_thread.store(nullptr, std::memory_order_release);
     LOG_INFO(Core_ARM,
-             "[Nextendo][GUESTCALL] StartCoroutine returned -- injection complete, guest "
+             "[OpenPak][GUESTCALL] StartCoroutine returned -- injection complete, guest "
              "context restored (room '{}')",
              g_state.code);
     return true;

@@ -607,7 +607,7 @@ bool PeekPeerHungUp(SOCKET native_fd, bool& has_pending_data) {
         return false;
     }
     if (peek_result == 0) {
-        LOG_INFO(Network, "[Nextendo][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) returned 0 "
+        LOG_INFO(Network, "[OpenPak][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) returned 0 "
                            "(orderly FIN), reporting hung up", native_fd);
         return true;
     }
@@ -618,12 +618,12 @@ bool PeekPeerHungUp(SOCKET native_fd, bool& has_pending_data) {
     case WSAECONNABORTED:
     case WSAENETRESET:
     case WSAESHUTDOWN:
-        LOG_INFO(Network, "[Nextendo][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) failed with "
+        LOG_INFO(Network, "[OpenPak][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) failed with "
                            "{}, reporting hung up", native_fd, err);
         return true;
     default:
         if (err != WSAEWOULDBLOCK) {
-            LOG_INFO(Network, "[Nextendo][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) failed "
+            LOG_INFO(Network, "[OpenPak][DIAG] PeekPeerHungUp fd={} -- recv(MSG_PEEK) failed "
                                "with unexpected {}, NOT reporting hung up", native_fd, err);
         }
         return false;
@@ -939,12 +939,12 @@ Errno Socket::Connect(SockAddrIn addr_in) {
     }
     if (pending_err != Errno::SUCCESS) {
         LOG_ERROR(Network,
-                  "[Nextendo] Connect blocked-wait finished with error, errno={}",
+                  "[OpenPak] Connect blocked-wait finished with error, errno={}",
                   static_cast<int>(pending_err));
         return pending_err;
     }
 
-    LOG_INFO(Network, "[Nextendo] grpc connect completed synchronously (blocked for host "
+    LOG_INFO(Network, "[OpenPak] grpc connect completed synchronously (blocked for host "
                       "completion) -> SUCCESS");
     return Errno::SUCCESS;
 }

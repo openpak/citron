@@ -42,7 +42,7 @@ namespace Core::HID {
 class HIDCore;
 }
 
-class NextendoAccountDialog : public QDialog {
+class OpenPakAccountDialog : public QDialog {
     Q_OBJECT
 
 public:
@@ -52,9 +52,9 @@ public:
     static constexpr int kHistoryPage = 3;
     static constexpr int kCloudSavesPage = 4;
 
-    explicit NextendoAccountDialog(NextendoController* controller, Core::System& system,
+    explicit OpenPakAccountDialog(NextendoController* controller, Core::System& system,
                                    QWidget* parent = nullptr, int initial_page = kHomePage);
-    ~NextendoAccountDialog() override;
+    ~OpenPakAccountDialog() override;
 
 signals:
     // Routed up to GMainWindow, which owns the one persistent chat window --

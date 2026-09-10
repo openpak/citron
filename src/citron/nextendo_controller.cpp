@@ -11,6 +11,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QInputDialog>
+#include <QLineEdit>
 #include <QJsonObject>
 #include <QPointer>
 #include <QProcess>
@@ -20,7 +22,7 @@
 
 #include "common/fs/path_util.h"
 #include "common/logging.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/nextendo_friends.h"
 #include "core/core.h"
 #include "core/hle/service/friend/friend.h"
@@ -34,7 +36,7 @@
 #include "citron/nextendo_save_sync.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 NextendoController::NextendoController(Core::System& system_, QWidget* main_window_,
@@ -57,8 +59,8 @@ NextendoController::NextendoController(Core::System& system_, QWidget* main_wind
     // Covers the "already linked, emulator just relaunched" case -- ProfileManager's own
     // constructor tries this too, but only if it happens to run after this account was
     // linked, which isn't guaranteed to be true this session, and it never syncs the avatar.
-    if (Common::NextendoAccount::IsLinked()) {
-        ApplyProfileName(Common::NextendoAccount::GetUsername());
+    if (Common::OpenPakAccount::IsLinked()) {
+        ApplyProfileName(Common::OpenPakAccount::GetUsername());
         SyncProfileAvatar();
     }
 }
@@ -66,16 +68,16 @@ NextendoController::NextendoController(Core::System& system_, QWidget* main_wind
 NextendoController::~NextendoController() = default;
 
 bool NextendoController::IsLinked() const {
-    return Common::NextendoAccount::IsLinked();
+    return Common::OpenPakAccount::IsLinked();
 }
 
 // Prototype chat server, not the official Nextendo fleet -- this only exists on the
 // developer's own test VPS while the feature is being proven out and pitched. No
-// NEXTENDO_API-style restriction is needed here (unlike the account API, this carries
+// OPENPAK_API-style restriction is needed here (unlike the account API, this carries
 // no account token, only a bare PID + display name), but an override is still honoured
 // so this can point elsewhere without a rebuild.
 void NextendoController::EnsureChatConnected() {
-    if (!Common::NextendoAccount::IsLinked()) {
+    if (!Common::OpenPakAccount::IsLinked()) {
         return;
     }
     if (chat_client && chat_client->IsConnected()) {
@@ -109,19 +111,21 @@ void NextendoController::EnsureChatConnected() {
         connect(chat_client, &NextendoChatClient::Connected, this, [this] {
             chat_client->SendJson(QJsonObject{
                 {QStringLiteral("type"), QStringLiteral("identify")},
-                {QStringLiteral("pid"), static_cast<qint64>(Common::NextendoAccount::GetPid())},
+                {QStringLiteral("pid"), static_cast<qint64>(Common::OpenPakAccount::GetPid())},
                 {QStringLiteral("name"),
-                 QString::fromStdString(Common::NextendoAccount::GetUsername())},
+                 QString::fromStdString(Common::OpenPakAccount::GetUsername())},
             });
         });
     }
 
-    QString host = QStringLiteral("144.202.45.50");
-    quint16 port = 8600;
-    if (const char* env = std::getenv("NEXTENDO_CHAT_HOST"); env && *env) {
-        host = QString::fromUtf8(env);
+    // OpenPak runs no chat server. The client stays for whoever points it at one.
+    const char* host_env = std::getenv("OPENPAK_CHAT_HOST");
+    if (!host_env || !*host_env) {
+        return;
     }
-    if (const char* env = std::getenv("NEXTENDO_CHAT_PORT"); env && *env) {
+    QString host = QString::fromUtf8(host_env);
+    quint16 port = 8600;
+    if (const char* env = std::getenv("OPENPAK_CHAT_PORT"); env && *env) {
         port = static_cast<quint16>(std::atoi(env));
     }
     chat_client->Connect(host, port);
@@ -197,35 +201,25 @@ std::string NextendoController::GetLocalAppId() const {
 
 void NextendoController::SignIn() {
 #ifdef ENABLE_WEB_SERVICE
-    emit StatusChanged(tr("Finish signing in in your browser, then come back here."));
+    // Email and password, asked here on the UI thread; the sign-in itself runs off it. The
+    // password goes to openpak.org over public TLS and nowhere else: what comes back is a
+    // website token and the Switch identity the games see.
+    bool ok = false;
+    const QString email = QInputDialog::getText(main_window, tr("Sign in to OpenPak"),
+                                                tr("Email"), QLineEdit::Normal, QString(), &ok);
+    if (!ok || email.trimmed().isEmpty()) {
+        return;
+    }
+    const QString password = QInputDialog::getText(main_window, tr("Sign in to OpenPak"),
+                                                   tr("Password"), QLineEdit::Password, QString(), &ok);
+    if (!ok || password.isEmpty()) {
+        return;
+    }
+    emit StatusChanged(tr("Signing in to OpenPak..."));
 
     QPointer<NextendoController> self(this);
-    std::thread{[this, self] {
-        const auto open_url = [this, self](const std::string& url) {
-            if (!self) {
-                return;
-            }
-            QMetaObject::invokeMethod(
-                this,
-                [this, url] {
-#ifdef __linux__
-                    // xdg-desktop-portal can report success without a browser ever appearing.
-                    qint64 pid = -1;
-                    const bool ok = QProcess::startDetached(
-                        QStringLiteral("xdg-open"), {QString::fromStdString(url)}, QString(), &pid);
-                    LOG_INFO(Frontend, "NextendoController::SignIn: xdg-open -> ok={} pid={}", ok,
-                             pid);
-#else
-                    const bool ok = QDesktopServices::openUrl(QUrl(QString::fromStdString(url)));
-                    LOG_INFO(Frontend, "NextendoController::SignIn: QDesktopServices::openUrl -> {}",
-                             ok);
-#endif
-                    emit SignInUrlReady(QString::fromStdString(url));
-                },
-                Qt::QueuedConnection);
-        };
-
-        auto login_result = WebService::NextendoApi::SignInWithBrowser(open_url);
+    std::thread{[this, self, email = email.trimmed().toStdString(), password = password.toStdString()] {
+        auto login_result = WebService::OpenPakApi::SignIn(email, password);
 
         if (!self) {
             return;
@@ -242,8 +236,8 @@ void NextendoController::SignIn() {
                     return;
                 }
 
-                Common::NextendoAccount::Save(result.pid, result.username, result.friend_code,
-                                              result.token);
+                Common::OpenPakAccount::Save(result.pid, result.username, result.friend_code,
+                                             result.token, result.bearer);
                 ApplyProfileName(result.username);
                 SyncProfileAvatar();
                 Common::NextendoFriends::SetLocalStatus(Common::NextendoFriends::PresenceOnline);
@@ -261,7 +255,7 @@ void NextendoController::SignIn() {
 }
 
 void NextendoController::SignOut() {
-    Common::NextendoAccount::Clear();
+    Common::OpenPakAccount::Clear();
     Common::NextendoFriends::Set({});
     last_known_status.clear();
     offline_streak.clear();
@@ -337,12 +331,12 @@ void NextendoController::ApplyProfileName(const std::string& name) {
 
     profile_manager.SetProfileBase(uuid, profile);
     profile_manager.WriteUserSaveFile();
-    LOG_INFO(Frontend, "[Nextendo] Renamed the active profile to the account nickname");
+    LOG_INFO(Frontend, "[OpenPak] Renamed the active profile to the account nickname");
 }
 
 void NextendoController::SyncProfileAvatar() {
 #ifdef ENABLE_WEB_SERVICE
-    if (!Common::NextendoAccount::IsLinked()) {
+    if (!Common::OpenPakAccount::IsLinked()) {
         return;
     }
     auto& profile_manager = system.GetProfileManager();
@@ -350,9 +344,9 @@ void NextendoController::SyncProfileAvatar() {
     if (uuid.IsInvalid()) {
         return;
     }
-    const u64 pid = Common::NextendoAccount::GetPid();
+    const u64 pid = Common::OpenPakAccount::GetPid();
     std::thread{[this, uuid, pid, guard = QPointer<NextendoController>(this)] {
-        const std::string b64 = WebService::NextendoApi::GetAvatarByPid(pid);
+        const std::string b64 = WebService::OpenPakApi::GetAvatarByPid(pid);
         if (b64.empty()) {
             return;
         }
@@ -384,7 +378,7 @@ void NextendoController::WriteProfileAvatar(const Common::UUID& uuid, const std:
 
     QDir{}.mkpath(QFileInfo(image_path).absolutePath());
     if (image.save(image_path, "JPEG")) {
-        LOG_INFO(Frontend, "[Nextendo] Synced the active profile's avatar from the account");
+        LOG_INFO(Frontend, "[OpenPak] Synced the active profile's avatar from the account");
     }
 }
 
@@ -423,13 +417,13 @@ QString NextendoController::JoinFriendSession(u64 pid) {
 
 void NextendoController::PollFriends() {
 #ifdef ENABLE_WEB_SERVICE
-    if (!Common::NextendoAccount::IsLinked()) {
+    if (!Common::OpenPakAccount::IsLinked()) {
         return;
     }
 
     QPointer<NextendoController> self(this);
     std::thread{[this, self] {
-        auto fetched = WebService::NextendoApi::GetFriends();
+        auto fetched = WebService::OpenPakApi::GetFriends();
         if (!fetched.ok) {
             return;
         }
@@ -510,15 +504,15 @@ void NextendoController::PollFriends() {
 
 void NextendoController::PollInvitations() {
 #ifdef ENABLE_WEB_SERVICE
-    if (!Common::NextendoAccount::IsLinked()) {
-        LOG_INFO(Frontend, "[Nextendo] PollInvitations: skipped, not linked");
+    if (!Common::OpenPakAccount::IsLinked()) {
+        LOG_INFO(Frontend, "[OpenPak] PollInvitations: skipped, not linked");
         return;
     }
-    LOG_INFO(Frontend, "[Nextendo] PollInvitations: tick");
+    LOG_INFO(Frontend, "[OpenPak] PollInvitations: tick");
 
     QPointer<NextendoController> self(this);
     std::thread{[this, self] {
-        auto fetched = WebService::NextendoApi::PollInvitations();
+        auto fetched = WebService::OpenPakApi::PollInvitations();
         if (fetched.empty() || !self) {
             return;
         }

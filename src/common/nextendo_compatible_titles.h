@@ -13,7 +13,7 @@
 //
 // Lives in common/, not citron/: it's read from both the Qt frontend (game-list "needs
 // update" badge) and core/hle/service/acc (the actual online PID gate) -- same reason
-// Common::NextendoAccount lives here instead of in either layer alone.
+// Common::OpenPakAccount lives here instead of in either layer alone.
 namespace Nextendo::CompatibleTitles {
 
 inline const std::unordered_map<u64, std::string>& Table() {

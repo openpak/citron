@@ -101,8 +101,8 @@ add_library(common STATIC
     scm_rev.h
     scope_exit.h
     scratch_buffer.h
-    nextendo_account.cpp
-    nextendo_account.h
+    openpak_account.cpp
+    openpak_account.h
     nextendo_avatar.cpp
     nextendo_avatar.h
     nextendo_compatible_titles.h

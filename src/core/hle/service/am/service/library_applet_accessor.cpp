@@ -117,7 +117,7 @@ Result ILibraryAppletAccessor::PushInData(SharedPointer<IStorage> storage) {
                 Common::NextendoFriends::SetOutgoingInvitationParameter(
                     std::vector<u8>(data.begin() + static_cast<std::ptrdiff_t>(i),
                                     data.begin() + static_cast<std::ptrdiff_t>(i + 11)));
-                LOG_INFO(Service_AM, "[Nextendo] Captured Outbound invitation parameter");
+                LOG_INFO(Service_AM, "[OpenPak] Captured Outbound invitation parameter");
                 break;
             }
         }

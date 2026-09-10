@@ -95,7 +95,7 @@ public:
                     std::string last_host = Service::Sockets::GetLastHostForIp(ip_str);
                     if (!last_host.empty()) {
                         effective_host = last_host;
-                        LOG_INFO(Service_SSL, "[Nextendo] Recovered host '{}' for IP {}",
+                        LOG_INFO(Service_SSL, "[OpenPak] Recovered host '{}' for IP {}",
                                  effective_host, ip_str);
                     }
                 }
@@ -109,7 +109,7 @@ public:
         // [Nextendo] Always bypass, matching the OpenSSL backend; a title requesting real
         // verification would otherwise fail the self-signed cert against the Windows trust store.
         skip_cert_verification = true;
-        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, bypassing cert verification for Nextendo",
+        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, bypassing cert verification for OpenPak",
                   verify_option);
         return ResultSuccess;
     }

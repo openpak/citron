@@ -9,10 +9,10 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/string_util.h"
 
-namespace Common::NextendoAccount {
+namespace Common::OpenPakAccount {
 
 namespace {
 
@@ -23,10 +23,11 @@ u64 g_pid = 0;
 std::string g_username;
 std::string g_friend_code;
 std::string g_token;
+std::string g_bearer;
 u64 g_generation = 0;
 
 std::filesystem::path FilePath() {
-    return FS::GetCitronPath(FS::CitronPath::ConfigDir) / "nextendo_account.txt";
+    return FS::GetCitronPath(FS::CitronPath::ConfigDir) / "openpak_account.txt";
 }
 
 // Caller holds g_mutex.
@@ -60,6 +61,8 @@ void EnsureLoaded() {
             g_friend_code = value;
         } else if (key == "token") {
             g_token = value;
+        } else if (key == "bearer") {
+            g_bearer = value;
         }
     }
 }
@@ -68,8 +71,8 @@ void EnsureLoaded() {
 void WriteFile() {
     void(FS::CreateParentDirs(FilePath()));
     const std::string contents =
-        fmt::format("pid={}\nusername={}\nfriend_code={}\ntoken={}\n", g_pid, g_username,
-                    g_friend_code, g_token);
+        fmt::format("pid={}\nusername={}\nfriend_code={}\ntoken={}\nbearer={}\n", g_pid,
+                    g_username, g_friend_code, g_token, g_bearer);
     void(FS::WriteStringToFile(FilePath(), FS::FileType::TextFile, contents));
 }
 
@@ -105,6 +108,12 @@ std::string GetToken() {
     return g_token;
 }
 
+std::string GetBearer() {
+    std::lock_guard lock{g_mutex};
+    EnsureLoaded();
+    return g_bearer;
+}
+
 u64 GetGeneration() {
     std::lock_guard lock{g_mutex};
     EnsureLoaded();
@@ -112,13 +121,14 @@ u64 GetGeneration() {
 }
 
 void Save(u64 pid, std::string_view username, std::string_view friend_code,
-          std::string_view token) {
+          std::string_view token, std::string_view bearer) {
     std::lock_guard lock{g_mutex};
     g_loaded = true;
     g_pid = pid;
     g_username = username;
     g_friend_code = friend_code;
     g_token = token;
+    g_bearer = bearer;
     ++g_generation;
     WriteFile();
 }
@@ -130,6 +140,7 @@ void Clear() {
     g_username.clear();
     g_friend_code.clear();
     g_token.clear();
+    g_bearer.clear();
     ++g_generation;
     void(FS::RemoveFile(FilePath()));
 }
@@ -138,7 +149,7 @@ void WriteGuestBridge(const std::filesystem::path& sdmc_root) {
     std::lock_guard lock{g_mutex};
     EnsureLoaded();
 
-    const auto bridge_path = sdmc_root / "config" / "nextendo" / "session.txt";
+    const auto bridge_path = sdmc_root / "config" / "openpak" / "session.txt";
     if (g_pid == 0) {
         void(FS::RemoveFile(bridge_path)); // not linked -- clear any stale bridge
         return;
@@ -150,4 +161,4 @@ void WriteGuestBridge(const std::filesystem::path& sdmc_root) {
     void(FS::WriteStringToFile(bridge_path, FS::FileType::TextFile, contents));
 }
 
-} // namespace Common::NextendoAccount
+} // namespace Common::OpenPakAccount

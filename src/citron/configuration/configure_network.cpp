@@ -23,11 +23,11 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent)
     original_lobby_api_url = Settings::values.lobby_api_url.GetValue();
 
     connect(ui->restore_default_lobby_api, &QPushButton::clicked, this, &ConfigureNetwork::OnRestoreDefaultLobbyApi);
-    connect(ui->unhide_nextendo_server_ip, &QPushButton::toggled, this, &ConfigureNetwork::OnToggleUnhideServerIp);
-    connect(ui->unhide_nextendo_nat_ip, &QPushButton::toggled, this, &ConfigureNetwork::OnToggleUnhideNatIp);
-    connect(ui->restore_default_nextendo_server_ip, &QPushButton::clicked, this,
+    connect(ui->unhide_openpak_server_ip, &QPushButton::toggled, this, &ConfigureNetwork::OnToggleUnhideServerIp);
+    connect(ui->unhide_openpak_nat_ip, &QPushButton::toggled, this, &ConfigureNetwork::OnToggleUnhideNatIp);
+    connect(ui->restore_default_openpak_server_ip, &QPushButton::clicked, this,
             &ConfigureNetwork::OnRestoreDefaultNextendoServerIp);
-    connect(ui->restore_default_nextendo_nat_ip, &QPushButton::clicked, this,
+    connect(ui->restore_default_openpak_nat_ip, &QPushButton::clicked, this,
             &ConfigureNetwork::OnRestoreDefaultNextendoNatIp);
 }
 
@@ -38,8 +38,8 @@ void ConfigureNetwork::ApplyConfiguration() {
     Settings::values.airplane_mode = ui->airplane_mode->isChecked();
     Settings::values.network_interface = ui->network_interface->currentText().toStdString();
     Settings::values.lobby_api_url = ui->lobby_api_url->text().toStdString();
-    Settings::values.nextendo_server_ip = ui->nextendo_server_ip->text().toStdString();
-    Settings::values.nextendo_nat_ip = ui->nextendo_nat_ip->text().toStdString();
+    Settings::values.openpak_server_ip = ui->openpak_server_ip->text().toStdString();
+    Settings::values.openpak_nat_ip = ui->openpak_nat_ip->text().toStdString();
 }
 
 void ConfigureNetwork::changeEvent(QEvent* event) {
@@ -63,42 +63,42 @@ void ConfigureNetwork::SetConfiguration() {
     ui->network_interface->setCurrentText(QString::fromStdString(network_interface));
 
     ui->lobby_api_url->setText(QString::fromStdString(Settings::values.lobby_api_url.GetValue()));
-    ui->nextendo_server_ip->setText(QString::fromStdString(Settings::values.nextendo_server_ip.GetValue()));
-    ui->nextendo_nat_ip->setText(QString::fromStdString(Settings::values.nextendo_nat_ip.GetValue()));
+    ui->openpak_server_ip->setText(QString::fromStdString(Settings::values.openpak_server_ip.GetValue()));
+    ui->openpak_nat_ip->setText(QString::fromStdString(Settings::values.openpak_nat_ip.GetValue()));
 
     const bool networking_enabled = runtime_lock && !ui->airplane_mode->isChecked();
     ui->network_interface->setEnabled(networking_enabled);
     ui->lobby_api_url->setEnabled(networking_enabled);
     ui->restore_default_lobby_api->setEnabled(networking_enabled);
-    ui->nextendo_server_ip->setEnabled(networking_enabled);
-    ui->nextendo_nat_ip->setEnabled(networking_enabled);
-    ui->unhide_nextendo_server_ip->setEnabled(networking_enabled);
-    ui->unhide_nextendo_nat_ip->setEnabled(networking_enabled);
-    ui->restore_default_nextendo_server_ip->setEnabled(networking_enabled);
-    ui->restore_default_nextendo_nat_ip->setEnabled(networking_enabled);
+    ui->openpak_server_ip->setEnabled(networking_enabled);
+    ui->openpak_nat_ip->setEnabled(networking_enabled);
+    ui->unhide_openpak_server_ip->setEnabled(networking_enabled);
+    ui->unhide_openpak_nat_ip->setEnabled(networking_enabled);
+    ui->restore_default_openpak_server_ip->setEnabled(networking_enabled);
+    ui->restore_default_openpak_nat_ip->setEnabled(networking_enabled);
 
     connect(ui->airplane_mode, &QCheckBox::toggled, this, [this, runtime_lock](bool checked) {
         const bool enabled = !checked && runtime_lock;
         ui->network_interface->setEnabled(enabled);
         ui->lobby_api_url->setEnabled(enabled);
         ui->restore_default_lobby_api->setEnabled(enabled);
-        ui->nextendo_server_ip->setEnabled(enabled);
-        ui->nextendo_nat_ip->setEnabled(enabled);
-        ui->unhide_nextendo_server_ip->setEnabled(enabled);
-        ui->unhide_nextendo_nat_ip->setEnabled(enabled);
-        ui->restore_default_nextendo_server_ip->setEnabled(enabled);
-        ui->restore_default_nextendo_nat_ip->setEnabled(enabled);
+        ui->openpak_server_ip->setEnabled(enabled);
+        ui->openpak_nat_ip->setEnabled(enabled);
+        ui->unhide_openpak_server_ip->setEnabled(enabled);
+        ui->unhide_openpak_nat_ip->setEnabled(enabled);
+        ui->restore_default_openpak_server_ip->setEnabled(enabled);
+        ui->restore_default_openpak_nat_ip->setEnabled(enabled);
     });
 }
 
 void ConfigureNetwork::OnToggleUnhideServerIp(bool checked) {
-    ui->nextendo_server_ip->setEchoMode(checked ? QLineEdit::Normal : QLineEdit::Password);
-    ui->unhide_nextendo_server_ip->setText(checked ? tr("Hide") : tr("Unhide"));
+    ui->openpak_server_ip->setEchoMode(checked ? QLineEdit::Normal : QLineEdit::Password);
+    ui->unhide_openpak_server_ip->setText(checked ? tr("Hide") : tr("Unhide"));
 }
 
 void ConfigureNetwork::OnToggleUnhideNatIp(bool checked) {
-    ui->nextendo_nat_ip->setEchoMode(checked ? QLineEdit::Normal : QLineEdit::Password);
-    ui->unhide_nextendo_nat_ip->setText(checked ? tr("Hide") : tr("Unhide"));
+    ui->openpak_nat_ip->setEchoMode(checked ? QLineEdit::Normal : QLineEdit::Password);
+    ui->unhide_openpak_nat_ip->setText(checked ? tr("Hide") : tr("Unhide"));
 }
 
 void ConfigureNetwork::OnRestoreDefaultLobbyApi() {
@@ -106,11 +106,11 @@ void ConfigureNetwork::OnRestoreDefaultLobbyApi() {
 }
 
 void ConfigureNetwork::OnRestoreDefaultNextendoServerIp() {
-    ui->nextendo_server_ip->setText(
-        QString::fromStdString(Settings::values.nextendo_server_ip.GetDefault()));
+    ui->openpak_server_ip->setText(
+        QString::fromStdString(Settings::values.openpak_server_ip.GetDefault()));
 }
 
 void ConfigureNetwork::OnRestoreDefaultNextendoNatIp() {
-    ui->nextendo_nat_ip->setText(
-        QString::fromStdString(Settings::values.nextendo_nat_ip.GetDefault()));
+    ui->openpak_nat_ip->setText(
+        QString::fromStdString(Settings::values.openpak_nat_ip.GetDefault()));
 }

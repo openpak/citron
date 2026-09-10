@@ -1153,7 +1153,7 @@ private:
         LOG_INFO(Service_SSL, "called");
         u32 num_entries;
         Result res = cert_store.GetCertificateBufSize(out_size, &num_entries, certificate_ids);
-        LOG_INFO(Service_SSL, "[Nextendo][DIAG] GetCertificateBufSize -> size={} num_entries={} requested_ids={}",
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificateBufSize -> size={} num_entries={} requested_ids={}",
                  *out_size, num_entries, certificate_ids.size());
         R_RETURN(res);
     }
@@ -1162,7 +1162,7 @@ private:
                            InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
         LOG_INFO(Service_SSL, "called");
         Result res = cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids);
-        LOG_INFO(Service_SSL, "[Nextendo][DIAG] GetCertificates -> num_entries={} requested_ids={}",
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificates -> num_entries={} requested_ids={}",
                  *out_num_entries, certificate_ids.size());
         R_RETURN(res);
     }
@@ -1352,7 +1352,7 @@ private:
         LOG_INFO(Service_SSL, "called");
         u32 num_entries;
         Result res = cert_store.GetCertificateBufSize(out_size, &num_entries, certificate_ids);
-        LOG_INFO(Service_SSL, "[Nextendo][DIAG] GetCertificateBufSize -> size={} num_entries={} requested_ids={}",
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificateBufSize -> size={} num_entries={} requested_ids={}",
                  *out_size, num_entries, certificate_ids.size());
         R_RETURN(res);
     }
@@ -1361,7 +1361,7 @@ private:
                            InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
         LOG_INFO(Service_SSL, "called");
         Result res = cert_store.GetCertificates(out_num_entries, out_buffer, certificate_ids);
-        LOG_INFO(Service_SSL, "[Nextendo][DIAG] GetCertificates -> num_entries={} requested_ids={}",
+        LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificates -> num_entries={} requested_ids={}",
                  *out_num_entries, certificate_ids.size());
         R_RETURN(res);
     }

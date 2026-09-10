@@ -6,8 +6,8 @@ add_library(web_service STATIC
     announce_room_json.h
     mk8d_country_flags.cpp
     mk8d_country_flags.h
-    nextendo_api.cpp
-    nextendo_api.h
+    openpak_api.cpp
+    openpak_api.h
     population_scraper_client.cpp
     population_scraper_client.h
     precompiled_headers.h

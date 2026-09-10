@@ -174,7 +174,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/nextendo_save_sync.h"
 #include "citron/nextendo_toast.h"
 #include "citron/play_time_manager.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/nextendo_friends.h"
 #include "citron/startup_checks.h"
 #include "citron/uisettings.h"
@@ -183,7 +183,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "common/settings.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/mk8d_country_flags.h"
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #include "web_service/ssbu_mod_installer.h"
 #endif
 #include "common/string_util.h"
@@ -519,7 +519,7 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
         };
         for (const u64 title_id : kByamlTitles) {
             if (!NextendoByamlSkipped(title_id)) {
-                LOG_INFO(Frontend, "Nextendo BCAT: checking schedule freshness for {:016X}",
+                LOG_INFO(Frontend, "OpenPak BCAT: checking schedule freshness for {:016X}",
                          title_id);
                 SilentlyDownloadNextendoByaml(title_id);
             }
@@ -1356,9 +1356,9 @@ void GMainWindow::InitializeWidgets() {
 
     nextendo_room_overlay = new NextendoRoomOverlay(this, nextendo_controller);
     connect(nextendo_room_overlay, &NextendoRoomOverlay::InvitePickerRequested, this, [this] {
-        NextendoAccountDialog dialog(nextendo_controller, *system, this,
-                                     NextendoAccountDialog::kFriendsPage);
-        connect(&dialog, &NextendoAccountDialog::InviteToChatRequested, this,
+        OpenPakAccountDialog dialog(nextendo_controller, *system, this,
+                                     OpenPakAccountDialog::kFriendsPage);
+        connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
                 [this](u64 pid, const QString& name) { OpenNextendoChatWindow({}, pid, name); });
         dialog.exec();
     });
@@ -1668,7 +1668,7 @@ void GMainWindow::InitializeHotkeys() {
     LinkActionShortcut(ui->action_Show_Filter_Bar, QStringLiteral("Toggle Filter Bar"));
     LinkActionShortcut(ui->action_Toggle_Grid_View, QStringLiteral("Toggle Grid View"));
     LinkActionShortcut(ui->action_Show_Status_Bar, QStringLiteral("Toggle Status Bar"));
-    LinkActionShortcut(ui->action_Nextendo_Open_Account, QStringLiteral("Toggle Nextendo Account"));
+    LinkActionShortcut(ui->action_Nextendo_Open_Account, QStringLiteral("Toggle OpenPak account"));
     LinkActionShortcut(ui->action_Show_Performance_Overlay,
                        QStringLiteral("Toggle Performance Overlay"));
     LinkActionShortcut(ui->action_Show_Vram_Overlay, QStringLiteral("Toggle VRAM Overlay"));
@@ -1865,7 +1865,7 @@ void GMainWindow::OnAppFocusStateChanged(Qt::ApplicationState state) {
 void GMainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::BootGame, this, &GMainWindow::BootGameFromList);
     connect(game_list, &GameList::GameChosen, this, &GMainWindow::OnGameListLoadFile);
-    connect(game_list, &GameList::OpenNextendoAccountRequested, this,
+    connect(game_list, &GameList::OpenOpenPakAccountRequested, this,
             [this] { ui->action_Nextendo_Open_Account->trigger(); });
     connect(game_list, &GameList::OpenDirectory, this, &GMainWindow::OnGameListOpenDirectory);
     connect(game_list, &GameList::OpenFolderRequested, this, &GMainWindow::OnGameListOpenFolder);
@@ -2012,7 +2012,7 @@ void GMainWindow::ConnectMenuEvents() {
     nextendo_presence_timer.setInterval(5000);
     connect(&nextendo_presence_timer, &QTimer::timeout, this, [this] {
 #ifdef ENABLE_WEB_SERVICE
-        if (!Common::NextendoAccount::IsLinked()) {
+        if (!Common::OpenPakAccount::IsLinked()) {
             return;
         }
         const std::string app_id =
@@ -2034,19 +2034,19 @@ void GMainWindow::ConnectMenuEvents() {
 
         nextendo_last_pushed_app_id = app_id;
         std::thread{[status, app_field, app_id, app_name] {
-            WebService::NextendoApi::PushPresence(status, app_field, app_id, app_name);
+            WebService::OpenPakApi::PushPresence(status, app_field, app_id, app_name);
         }}.detach();
 #endif
     });
     nextendo_presence_timer.start();
 
     // NexTendo
-    ui->action_Nextendo_Sign_In->setEnabled(!Common::NextendoAccount::IsLinked());
-    ui->action_Nextendo_Sign_Out->setEnabled(Common::NextendoAccount::IsLinked());
-    ui->action_Nextendo_Enable_Redirection->setChecked(Settings::values.enable_nextendo.GetValue());
+    ui->action_Nextendo_Sign_In->setEnabled(!Common::OpenPakAccount::IsLinked());
+    ui->action_Nextendo_Sign_Out->setEnabled(Common::OpenPakAccount::IsLinked());
+    ui->action_Nextendo_Enable_Redirection->setChecked(Settings::values.enable_openpak.GetValue());
 
     connect(ui->action_Nextendo_Open_Account, &QAction::triggered, this, [this] {
-        if (!Common::NextendoAccount::IsLinked()) {
+        if (!Common::OpenPakAccount::IsLinked()) {
             nextendo_controller->SignIn();
             return;
         }
@@ -2056,21 +2056,21 @@ void GMainWindow::ConnectMenuEvents() {
             nextendo_account_dialog_instance->close();
             return;
         }
-        NextendoAccountDialog dialog(nextendo_controller, *system, this);
+        OpenPakAccountDialog dialog(nextendo_controller, *system, this);
         nextendo_account_dialog_instance = &dialog;
-        connect(&dialog, &NextendoAccountDialog::InviteToChatRequested, this,
+        connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
                 [this](u64 pid, const QString& name) { OpenNextendoChatWindow({}, pid, name); });
         dialog.exec();
         nextendo_account_dialog_instance = nullptr;
     });
     connect(nextendo_toast, &NextendoToast::clicked, this, [this](NextendoToast::Kind kind) {
-        if (!Common::NextendoAccount::IsLinked()) {
+        if (!Common::OpenPakAccount::IsLinked()) {
             return;
         }
         if (kind == NextendoToast::Kind::Request) {
-            NextendoAccountDialog dialog(nextendo_controller, *system, this,
-                                         NextendoAccountDialog::kFriendsPage);
-            connect(&dialog, &NextendoAccountDialog::InviteToChatRequested, this,
+            OpenPakAccountDialog dialog(nextendo_controller, *system, this,
+                                         OpenPakAccountDialog::kFriendsPage);
+            connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
                     [this](u64 pid, const QString& name) { OpenNextendoChatWindow({}, pid, name); });
             dialog.exec();
         } else if (kind == NextendoToast::Kind::ChatRequest) {
@@ -2115,9 +2115,9 @@ void GMainWindow::ConnectMenuEvents() {
     // instead of the designer file to keep this easy to pull out later.
     auto* action_chat_rooms = ui->menu_NexTendo->addAction(tr("Chat Rooms (Prototype)"));
     connect(action_chat_rooms, &QAction::triggered, this, [this] {
-        if (!Common::NextendoAccount::IsLinked()) {
+        if (!Common::OpenPakAccount::IsLinked()) {
             QMessageBox::information(this, tr("Chat Rooms"),
-                                     tr("Sign in to Nextendo Network first."));
+                                     tr("Sign in to OpenPak first."));
             return;
         }
         OpenNextendoChatWindow();
@@ -2127,7 +2127,7 @@ void GMainWindow::ConnectMenuEvents() {
     connect(ui->action_Nextendo_Sign_Out, &QAction::triggered, nextendo_controller,
             &NextendoController::SignOut);
     connect(ui->action_Nextendo_Enable_Redirection, &QAction::toggled, this, [](bool checked) {
-        Settings::values.enable_nextendo.SetValue(checked);
+        Settings::values.enable_openpak.SetValue(checked);
     });
     connect(nextendo_controller, &NextendoController::AccountLinked, this, [this] {
         ui->action_Nextendo_Sign_In->setEnabled(false);
@@ -2143,7 +2143,7 @@ void GMainWindow::ConnectMenuEvents() {
     connect(nextendo_controller, &NextendoController::SignInUrlReady, this, [this](QString url) {
         if (!nextendo_signin_dialog) {
             nextendo_signin_dialog = new QDialog(this);
-            nextendo_signin_dialog->setWindowTitle(tr("Sign in to Nextendo"));
+            nextendo_signin_dialog->setWindowTitle(tr("Sign in to OpenPak"));
             auto* layout = new QVBoxLayout(nextendo_signin_dialog);
             auto* label = new QLabel(tr("Finish signing in in your browser, then come back here.\n"
                                         "If nothing opened, copy this link into any browser:"));
@@ -2680,9 +2680,9 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     // PatchType::Mod; cheats live in a separate PatchManager::GetCheats() list entirely and
     // were never checked, so a cheat could still be active while this dialog reported "clean".
     const bool nextendo_production_active =
-        Settings::values.enable_nextendo.GetValue() &&
-        Settings::values.nextendo_server_ip.GetValue() ==
-            Settings::values.nextendo_server_ip.GetDefault();
+        Settings::values.enable_openpak.GetValue() &&
+        Settings::values.openpak_server_ip.GetValue() ==
+            Settings::values.openpak_server_ip.GetDefault();
     if (title_id == 0x0100C2500FC20000ULL && nextendo_production_active) {
         const FileSys::PatchManager pm{title_id, system->GetFileSystemController(),
                                        system->GetContentProvider()};
@@ -2699,7 +2699,7 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
         }
         if (!active_mods.isEmpty()) {
             LOG_CRITICAL(Frontend,
-                         "[Nextendo] Refusing to boot Splatoon 3: {} mod(s)/cheat(s) enabled",
+                         "[OpenPak] Refusing to boot Splatoon 3: {} mod(s)/cheat(s) enabled",
                          active_mods.size());
             QMessageBox::critical(
                 this, tr("Splatoon 3: mods must be disabled"),
@@ -2712,7 +2712,7 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     }
 
     OfferNextendoByamlDownload(title_id);
-    if (Settings::values.nextendo_cloud_sync_enabled.GetValue()) {
+    if (Settings::values.openpak_cloud_sync_enabled.GetValue()) {
         Nextendo::SaveSync::Pull(*system, title_id);
     }
 
@@ -2981,7 +2981,7 @@ void GMainWindow::OnEmulationStopped() {
 #ifdef ENABLE_WEB_SERVICE
     // Only safe past this point: emu_thread has fully exited (no more concurrent guest access to
     // the VFS) and InitializeContentSystem() just rebuilt a fresh save-data factory.
-    if (Settings::values.nextendo_cloud_sync_enabled.GetValue()) {
+    if (Settings::values.openpak_cloud_sync_enabled.GetValue()) {
         auto save_zip = Nextendo::SaveSync::CaptureForPush(*system, current_title_id);
         if (!save_zip.empty()) {
             std::thread{[title_id = current_title_id, zip = std::move(save_zip)]() mutable {
@@ -7555,18 +7555,18 @@ void GMainWindow::OnToggleGridView() {
 
 void GMainWindow::SyncNextendoHistory() {
 #ifdef ENABLE_WEB_SERVICE
-    const bool linked = Common::NextendoAccount::IsLinked();
+    const bool linked = Common::OpenPakAccount::IsLinked();
     const u64 program_id = play_time_manager->GetProgramId();
     const u64 seconds = play_time_manager->GetPlayTime(program_id);
 
-    LOG_INFO(Frontend, "Nextendo history: linked={} title={:016X} seconds={}", linked, program_id,
+    LOG_INFO(Frontend, "OpenPak history: linked={} title={:016X} seconds={}", linked, program_id,
              seconds);
 
     if (!linked || program_id == 0 || seconds == 0) {
         return;
     }
 
-    WebService::NextendoApi::HistoryEntry entry;
+    WebService::OpenPakApi::HistoryEntry entry;
     entry.title_id = fmt::format("{:016X}", program_id);
     entry.name = current_game_name;
     entry.seconds = seconds;
@@ -7577,7 +7577,7 @@ void GMainWindow::SyncNextendoHistory() {
     entry.icon_base64 = current_game_icon_base64;
 
     // Detached: shutdown must not block on the network.
-    std::thread{[entry] { WebService::NextendoApi::SyncHistory({entry}); }}.detach();
+    std::thread{[entry] { WebService::OpenPakApi::SyncHistory({entry}); }}.detach();
 #endif
 }
 
@@ -7727,12 +7727,12 @@ bool GMainWindow::NextendoByamlDownload(u64 title_id) {
     // stuck serving a stale rotation schedule if the server's conditional-GET handling doesn't
     // track content changes precisely. Ryujinx-Nextendo hits the same server and takes the same
     // always-fetch-and-hash approach for exactly this reason.
-    const auto zip_bytes = WebService::NextendoApi::DownloadBcatSeed(fetch_title_id_hex);
+    const auto zip_bytes = WebService::OpenPakApi::DownloadBcatSeed(fetch_title_id_hex);
     if (zip_bytes.empty()) {
         return false;
     }
 
-    const auto server_hash = WebService::NextendoApi::HashBcatSeedHex(zip_bytes);
+    const auto server_hash = WebService::OpenPakApi::HashBcatSeedHex(zip_bytes);
     if (server_hash == NextendoByamlReadHash(title_id_hex) && NextendoByamlInstalled(title_id)) {
         // Already have the current rotation schedule; nothing to redo.
         return true;
@@ -7783,9 +7783,9 @@ void GMainWindow::RunNextendoByamlDownloadWithProgress(u64 title_id) {
     progress.close();
 
     if (future.result()) {
-        QMessageBox::information(this, tr("Nextendo Network"), tr("Online schedule installed."));
+        QMessageBox::information(this, tr("OpenPak"), tr("Online schedule installed."));
     } else {
-        QMessageBox::warning(this, tr("Nextendo Network"),
+        QMessageBox::warning(this, tr("OpenPak"),
                              tr("Failed to download the online schedule. You can try again later "
                                 "via right-click on the game."));
     }
@@ -8151,9 +8151,9 @@ void GMainWindow::SilentlyDownloadNextendoByaml(u64 title_id) {
     std::thread{[this, title_id] {
         const bool ok = NextendoByamlDownload(title_id);
         if (ok) {
-            LOG_INFO(Frontend, "Nextendo BCAT: auto-download succeeded for {:016X}", title_id);
+            LOG_INFO(Frontend, "OpenPak BCAT: auto-download succeeded for {:016X}", title_id);
         } else {
-            LOG_ERROR(Frontend, "Nextendo BCAT: auto-download failed for {:016X}", title_id);
+            LOG_ERROR(Frontend, "OpenPak BCAT: auto-download failed for {:016X}", title_id);
         }
     }}.detach();
 #endif
@@ -8167,11 +8167,11 @@ void GMainWindow::OfferNextendoByamlDownload(u64 title_id) {
     }
 
     QMessageBox ask(this);
-    ask.setWindowTitle(tr("Nextendo Network"));
-    ask.setText(tr("This game needs the online schedule (Nextendo Network)."));
+    ask.setWindowTitle(tr("OpenPak"));
+    ask.setText(tr("This game needs the online schedule (OpenPak)."));
     ask.setInformativeText(
         tr("This file (stage/mode/festival schedules) is required to play online and is NOT "
-           "included with the emulator. It can be downloaded from Nextendo Network servers and "
+           "included with the emulator. It can be downloaded from OpenPak servers and "
            "installed automatically.\n\nWithout it, the game stays stuck \"offline\". "
            "(Re-downloadable later via right-click on the game.)"));
     QPushButton* yes_button = ask.addButton(tr("Yes, download"), QMessageBox::AcceptRole);

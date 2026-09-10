@@ -5,7 +5,7 @@
 
 #include "common/hex_util.h"
 #include "common/nextendo_friends.h"
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #include "core/core_timing.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
@@ -110,14 +110,14 @@ Result ILibraryAppletSelfAccessor::PushOutData(SharedPointer<IStorage> storage) 
     LOG_INFO(Service_AM, "called");
     if (m_applet->applet_id == AppletId::MyPage) {
         const auto data = storage->GetData();
-        LOG_INFO(Service_AM, "[Nextendo] MyPage completion size={} value={}", data.size(),
+        LOG_INFO(Service_AM, "[OpenPak] MyPage completion size={} value={}", data.size(),
                  Common::HexToString(data));
         if (data.size() == sizeof(u32) && std::all_of(data.begin(), data.end(), [](u8 b) { return b == 0; })) {
             const auto friends = Common::NextendoFriends::Get();
             auto app_param = Common::NextendoFriends::TakeOutgoingInvitationParameter();
             if (friends.size() == 1 && !app_param.empty()) {
-                const auto error = WebService::NextendoApi::SendInvitation({friends[0].pid}, app_param);
-                LOG_INFO(Service_AM, "[Nextendo] MyPage invitation delivery -> {}",
+                const auto error = WebService::OpenPakApi::SendInvitation({friends[0].pid}, app_param);
+                LOG_INFO(Service_AM, "[OpenPak] MyPage invitation delivery -> {}",
                          error.empty() ? "ok" : error);
             }
         }

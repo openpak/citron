@@ -17,8 +17,8 @@ class QTimer;
 // "Ping" indicator). Both are fire-and-forget; results come back via signals.
 //
 // The NAT probe speaks the same nncs (Nintendo NAT-Check) UDP protocol the console itself uses,
-// against the same nncs1/nncs2 responders games get DNS-redirected to (nextendo_server_ip /
-// nextendo_nat_ip) -- rather than a UPnP IGD query, which only ever reports something for players
+// against the same nncs1/nncs2 responders games get DNS-redirected to (openpak_server_ip /
+// openpak_nat_ip) -- rather than a UPnP IGD query, which only ever reports something for players
 // whose router has UPnP enabled and says nothing about whether the NAT actually lets P2P through.
 class NextendoNetworkProbe : public QObject {
     Q_OBJECT

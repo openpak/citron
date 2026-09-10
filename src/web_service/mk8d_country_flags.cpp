@@ -46,7 +46,7 @@ CountryFetchResult FetchCountryFlagPatch(const std::string& country_code) {
     ApplyCaCertPath(client);
 
     const std::string path = "/alyeri/nextendo-mk8d-country-flags/main/Consoles/Atmosphere/" +
-                             country_code + "/atmosphere/exefs_patches/Nextendo%20Country%20" +
+                             country_code + "/atmosphere/exefs_patches/OpenPak%20Country%20" +
                              country_code + "/" + MK8D_BUILD_ID + ".ips";
 
     const auto res = client.Get(path, httplib::Headers{{"User-Agent", "citron"}});

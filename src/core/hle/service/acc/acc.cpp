@@ -19,7 +19,7 @@
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/nextendo_avatar.h"
 #include "common/nextendo_compatible_titles.h"
 #include "common/settings.h"
@@ -55,12 +55,12 @@ namespace Service::Account {
 namespace {
 
 // The BAAS id_token read through LoadIdTokenCache. NEX parses it before logging in, so it must be
-// a real RS256 JWT. Key comes from NEXTENDO_BAAS_SIGNING_KEY or nextendo_baas.pem, else generated.
+// a real RS256 JWT. Key comes from OPENPAK_BAAS_SIGNING_KEY or openpak_baas.pem, else generated.
 constexpr const char* BaasIssuer = "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
 constexpr const char* BaasJku =
     "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates";
 constexpr const char* BaasAudience = "ed9e2f05d286f7b8";
-constexpr const char* BaasKeyId = "nextendo-baas-key-1";
+constexpr const char* BaasKeyId = "openpak-citron-key-1";
 
 std::string Base64UrlEncode(std::span<const u8> data) {
     static constexpr std::string_view alphabet =
@@ -107,10 +107,10 @@ EVP_PKEY* GetBaasSigningKey() {
     static EVP_PKEY* key = []() -> EVP_PKEY* {
         std::string pem;
 
-        if (const char* env = std::getenv("NEXTENDO_BAAS_SIGNING_KEY"); env && *env) {
+        if (const char* env = std::getenv("OPENPAK_BAAS_SIGNING_KEY"); env && *env) {
             pem = env;
         } else if (const auto file = Common::FS::ReadStringFromFile(
-                       std::filesystem::path{"nextendo_baas.pem"}, Common::FS::FileType::TextFile);
+                       std::filesystem::path{"openpak_baas.pem"}, Common::FS::FileType::TextFile);
                    !file.empty()) {
             pem = file;
         }
@@ -121,18 +121,18 @@ EVP_PKEY* GetBaasSigningKey() {
                 EVP_PKEY* loaded = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
                 BIO_free(bio);
                 if (loaded) {
-                    LOG_INFO(Service_ACC, "[Nextendo] Using the supplied BAAS signing key");
+                    LOG_INFO(Service_ACC, "[OpenPak] Using the supplied BAAS signing key");
                     return loaded;
                 }
                 LOG_WARNING(Service_ACC,
-                            "[Nextendo] BAAS signing key could not be parsed; generating one");
+                            "[OpenPak] BAAS signing key could not be parsed; generating one");
             }
         }
 
         // No key supplied: reuse a persisted auto-generated one so the identity (and its
         // public JWK) stays stable across launches instead of a fresh key every process start.
         const auto auto_key_path =
-            Common::FS::GetCitronPath(Common::FS::CitronPath::KeysDir) / "nextendo_baas_auto.pem";
+            Common::FS::GetCitronPath(Common::FS::CitronPath::KeysDir) / "openpak_baas_auto.pem";
         if (const auto existing =
                 Common::FS::ReadStringFromFile(auto_key_path, Common::FS::FileType::TextFile);
             existing.find("BEGIN") != std::string::npos) {
@@ -141,7 +141,7 @@ EVP_PKEY* GetBaasSigningKey() {
                 EVP_PKEY* loaded = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
                 BIO_free(bio);
                 if (loaded) {
-                    LOG_DEBUG(Service_ACC, "[Nextendo] Using the persisted auto-generated BAAS signing key");
+                    LOG_DEBUG(Service_ACC, "[OpenPak] Using the persisted auto-generated BAAS signing key");
                     return loaded;
                 }
             }
@@ -149,7 +149,7 @@ EVP_PKEY* GetBaasSigningKey() {
 
         EVP_PKEY* generated = EVP_RSA_gen(2048);
         if (!generated) {
-            LOG_ERROR(Service_ACC, "[Nextendo] Failed to generate a BAAS signing key");
+            LOG_ERROR(Service_ACC, "[OpenPak] Failed to generate a BAAS signing key");
             return generated;
         }
 
@@ -164,7 +164,7 @@ EVP_PKEY* GetBaasSigningKey() {
                     std::string_view{data, static_cast<size_t>(len)});
                 if (written > 0) {
                     LOG_DEBUG(Service_ACC,
-                             "[Nextendo] Generated and persisted a new BAAS signing key at {}",
+                             "[OpenPak] Generated and persisted a new BAAS signing key at {}",
                              auto_key_path.string());
                 }
             }
@@ -206,7 +206,7 @@ std::string SignRs256(std::string_view signing_input) {
     }
 
     if (signature.empty()) {
-        LOG_ERROR(Service_ACC, "[Nextendo] Failed to sign the BAAS id_token");
+        LOG_ERROR(Service_ACC, "[OpenPak] Failed to sign the BAAS id_token");
     }
 
     EVP_MD_CTX_free(ctx);
@@ -225,8 +225,8 @@ std::string BuildIdToken() {
     // [Nextendo] Ride the signed nx2 token in the "nnex" claim so the auth server can
     // cryptographically bind this NEX login to the account (anti-impersonation).
     std::string nnex_claim;
-    if (Common::NextendoAccount::IsLinked()) {
-        const std::string tok = Common::NextendoAccount::GetToken();
+    if (Common::OpenPakAccount::IsLinked()) {
+        const std::string tok = Common::OpenPakAccount::GetToken();
         if (!tok.empty()) {
             nnex_claim = fmt::format(R"("nnex":"{}",)", tok);
         }
@@ -254,10 +254,10 @@ std::string BuildIdToken() {
     // whatever the caller expects. Unset by default (family rule): the historical random sub
     // keeps being served, so NEX titles are unaffected.
     std::string sub = RandomHex(0x10);
-    if (const char* forced_sub = std::getenv("NEXTENDO_BAAS_SUB");
+    if (const char* forced_sub = std::getenv("OPENPAK_BAAS_SUB");
         forced_sub != nullptr && *forced_sub != '\0') {
         sub = forced_sub;
-        LOG_INFO(Service_ACC, "[Nextendo] BAAS id_token uses NEXTENDO_BAAS_SUB override");
+        LOG_INFO(Service_ACC, "[OpenPak] BAAS id_token uses OPENPAK_BAAS_SUB override");
     }
 
     const std::string payload = fmt::format(
@@ -285,14 +285,14 @@ std::vector<u8> GetIdTokenBytes() {
     // a time-based expiry -- otherwise a token minted before the user finishes linking (e.g.
     // this cache gets populated once at boot while still unlinked) keeps being served for up
     // to 2 hours after a successful link, silently missing the "nnex" claim the whole time.
-    const u64 generation = Common::NextendoAccount::GetGeneration();
+    const u64 generation = Common::OpenPakAccount::GetGeneration();
     const auto now = std::chrono::steady_clock::now();
     if (cached.empty() || now >= expiry || generation != cached_generation) {
         const std::string token = BuildIdToken();
         cached.assign(token.begin(), token.end());
         expiry = now + std::chrono::hours{2};
         cached_generation = generation;
-        LOG_INFO(Service_ACC, "[Nextendo] Issued a signed BAAS id_token ({} bytes)", cached.size());
+        LOG_INFO(Service_ACC, "[OpenPak] Issued a signed BAAS id_token ({} bytes)", cached.size());
     }
 
     return cached;
@@ -313,7 +313,7 @@ static void SeedImageFromNextendoIfMissing(const Common::UUID& uuid) {
     if (Common::FS::Exists(path)) {
         return;
     }
-    if (!Common::NextendoAccount::IsLinked()) {
+    if (!Common::OpenPakAccount::IsLinked()) {
         return;
     }
     const auto jpeg = Common::NextendoAvatar::GetSelfJPEG();
@@ -421,7 +421,7 @@ private:
     }
 
     void GetNintendoAccountUserResourceCache(HLERequestContext& ctx) {
-        LOG_DEBUG(Service_ACC, "[Nextendo] GetNintendoAccountUserResourceCache called");
+        LOG_DEBUG(Service_ACC, "[OpenPak] GetNintendoAccountUserResourceCache called");
 
         const u64 pid = account_id.Hash();
         std::vector<u8> nas_user_base(0x68, 0);
@@ -910,7 +910,7 @@ public:
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
         const std::vector<u8> token_bytes = GetIdTokenBytes();
-        LOG_INFO(Service_ACC, "[Nextendo] Providing BAAS ID token in async interface ({} bytes)",
+        LOG_INFO(Service_ACC, "[OpenPak] Providing BAAS ID token in async interface ({} bytes)",
                  token_bytes.size());
 
         ctx.WriteBuffer(token_bytes);
@@ -1077,7 +1077,7 @@ private:
     }
 
     void GetNetworkServiceLicenseKind(HLERequestContext& ctx) {
-        LOG_INFO(Service_ACC, "[Nextendo] GetNetworkServiceLicenseKind called -> returning Subscribed (2)");
+        LOG_INFO(Service_ACC, "[OpenPak] GetNetworkServiceLicenseKind called -> returning Subscribed (2)");
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
         rb.Push<u32>(2);
@@ -1115,10 +1115,10 @@ public:
 private:
     u64 GetEffectivePid() const {
         const u64 raw_pid = []() -> u64 {
-            if (const u64 linked = Common::NextendoAccount::GetPid(); linked != 0) {
+            if (const u64 linked = Common::OpenPakAccount::GetPid(); linked != 0) {
                 return linked;
             }
-            std::string pid_setting = Settings::values.nextendo_pid.GetValue();
+            std::string pid_setting = Settings::values.openpak_pid.GetValue();
             if (!pid_setting.empty()) {
                 try {
                     return std::stoull(pid_setting);
@@ -1153,7 +1153,7 @@ private:
                 metadata.first != nullptr ? metadata.first->GetVersionString() : std::string{};
             if (!Nextendo::CompatibleTitles::IsVersionOk(program_id, installed_version)) {
                 LOG_WARNING(Service_ACC,
-                            "[Nextendo] Refusing online PID: installed version doesn't match "
+                            "[OpenPak] Refusing online PID: installed version doesn't match "
                             "what this title requires for online play");
                 return 0xcafe;
             }
@@ -1171,7 +1171,7 @@ private:
     void GetAccountId(HLERequestContext& ctx) {
         u64 account_id = GetEffectivePid();
         // The PID is accepted as a bare identity by the online service, so never log its value.
-        LOG_DEBUG(Service_ACC, "[Nextendo] Returning the linked account's Network ID");
+        LOG_DEBUG(Service_ACC, "[OpenPak] Returning the linked account's Network ID");
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
@@ -1194,7 +1194,7 @@ private:
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
         const std::vector<u8> token_bytes = GetIdTokenBytes();
-        LOG_INFO(Service_ACC, "[Nextendo] Providing BAAS ID token ({} bytes)", token_bytes.size());
+        LOG_INFO(Service_ACC, "[OpenPak] Providing BAAS ID token ({} bytes)", token_bytes.size());
 
         ctx.WriteBuffer(token_bytes);
 
@@ -1206,7 +1206,7 @@ private:
 
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {
         u64 account_id = GetEffectivePid();
-        LOG_DEBUG(Service_ACC, "[Nextendo] GetNintendoAccountUserResourceCacheForApplication called");
+        LOG_DEBUG(Service_ACC, "[OpenPak] GetNintendoAccountUserResourceCacheForApplication called");
 
         std::vector<u8> nas_user_base_for_application(0x68, 0);
         std::memcpy(nas_user_base_for_application.data(), &account_id, sizeof(account_id));
@@ -1232,7 +1232,7 @@ private:
     }
 
     void LoadNetworkServiceLicenseKindAsync(HLERequestContext& ctx) {
-        LOG_INFO(Service_ACC, "[Nextendo] LoadNetworkServiceLicenseKindAsync called");
+        LOG_INFO(Service_ACC, "[OpenPak] LoadNetworkServiceLicenseKindAsync called");
 
         auto async_context = std::make_shared<IAsyncNetworkServiceLicenseKindContext>(system);
 

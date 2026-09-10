@@ -7,7 +7,7 @@
 #include <thread>
 #include <utility>
 
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/nextendo_friends.h"
 
 namespace Common::NextendoFriends {
@@ -37,7 +37,7 @@ std::vector<Entry> Get() {
 
 std::vector<Entry> GetWarm(int timeout_ms) {
     auto entries = Get(); // Same background refresh Get() always relies on -- just wait for it.
-    if (!entries.empty() || !Common::NextendoAccount::IsLinked()) {
+    if (!entries.empty() || !Common::OpenPakAccount::IsLinked()) {
         return entries;
     }
 

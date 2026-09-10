@@ -10,7 +10,7 @@
 #include <QTimer>
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace Nextendo::NzpOnlineCount {
@@ -25,7 +25,7 @@ public:
 
     void Poll() {
 #ifdef ENABLE_WEB_SERVICE
-        std::thread{[] { g_count.store(WebService::NextendoApi::GetNzpOnlineCount()); }}.detach();
+        std::thread{[] { g_count.store(WebService::OpenPakApi::GetNzpOnlineCount()); }}.detach();
 #endif
     }
 };

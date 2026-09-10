@@ -577,7 +577,7 @@ void IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
     }
 
     LOG_INFO(Service_AM,
-             "[Nextendo] TryPopFromFriendInvitationStorageChannel: from_pid={} "
+             "[OpenPak] TryPopFromFriendInvitationStorageChannel: from_pid={} "
              "from_name='{}' app_param_size={}",
              invitation->from_pid, invitation->from_name, invitation->app_param.size());
 
@@ -600,7 +600,7 @@ void IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
     if (app_param.size() >= 6 && app_param.size() == 5 + app_param[4]) {
         const char* code_bytes = reinterpret_cast<const char*>(app_param.data()) + 5;
         const std::string_view room_code(code_bytes, app_param[4]);
-        LOG_INFO(Service_AM, "[Nextendo] invitation room code: '{}'", room_code);
+        LOG_INFO(Service_AM, "[OpenPak] invitation room code: '{}'", room_code);
         // [Nextendo] RECORD only: the injection must fire when the USER accepts the
         // invite (toast click) from the multiplayer menu -- auto-firing on delivery
         // joins from whatever screen the joiner is on and crashes on the main menu
@@ -609,7 +609,7 @@ void IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
                                               room_code);
     } else {
         LOG_INFO(Service_AM,
-                 "[Nextendo] invitation app_param does not match the u32_le(1) || u8(len) || "
+                 "[OpenPak] invitation app_param does not match the u32_le(1) || u8(len) || "
                  "ascii format (size={}) -- no join armed",
                  app_param.size());
     }

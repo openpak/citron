@@ -45,7 +45,7 @@ Result SignalEvent(Core::System& system, Handle event_handle) {
         // readable-event object address is exactly what WaitSynchronization's ONE-SHOT probe
         // diagnostic (svc_synchronization.cpp) also prints, so the two can be matched directly.
         LOG_INFO(Kernel_SVC,
-                 "[Nextendo][DIAG] SignalEvent write_handle=0x{:08X} readable_event_obj={}",
+                 "[OpenPak][DIAG] SignalEvent write_handle=0x{:08X} readable_event_obj={}",
                  event_handle, static_cast<const void*>(std::addressof(event->GetReadableEvent())));
     }
 

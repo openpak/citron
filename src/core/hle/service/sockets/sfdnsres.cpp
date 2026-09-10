@@ -84,19 +84,19 @@ static std::string GetConfiguredIp(const std::string& setting, const char* env_v
 
 // [Nextendo] La redirection est-elle active ?
 //
-// Le reglage « enable_nextendo » n'existe QUE dans la facade Qt (src/citron/main.cpp) : la facade
+// Le reglage « enable_openpak » n'existe QUE dans la facade Qt (src/citron/main.cpp) : la facade
 // SDL (citron_cmd) ne le cable nulle part et le reecrit a sa valeur par defaut, false, au
 // demarrage. Mesure du 2026-08-25 : lance par citron-cmd, Splatoon 3 a resolu
 // « t-dce9377b-lp1.lp1.t.npln.srv.nintendo.net » vers 34.49.112.177 — le VRAI serveur de Nintendo —
-// alors que le fichier de configuration portait bien enable_nextendo=true.
+// alors que le fichier de configuration portait bien enable_openpak=true.
 //
 // On accepte donc aussi une activation par l'environnement, exactement comme GetConfiguredIp le
 // fait deja pour les deux adresses. Une valeur vide, « 0 », « false » ou « no » ne l'active pas.
 static bool RedirectionNextendoActive() {
-    if (Settings::values.enable_nextendo.GetValue()) {
+    if (Settings::values.enable_openpak.GetValue()) {
         return true;
     }
-    const char* env = std::getenv("NEXTENDO_ENABLE");
+    const char* env = std::getenv("OPENPAK_ENABLE");
     if (env == nullptr || *env == '\0') {
         return false;
     }
@@ -115,18 +115,22 @@ static std::optional<std::string> GetNextendoRedirectIp(const std::string& host)
     if (host == "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net") {
         const char* probe = std::getenv("NEXTENDO_STARDEW_TLS_PROBE");
         if (probe != nullptr && *probe != '\0' && std::string_view(probe) != "0") {
-            LOG_INFO(Service, "[Nextendo][DIAG] Stardew TLS probe using normal DNS for '{}'", host);
+            LOG_INFO(Service, "[OpenPak][DIAG] Stardew TLS probe using normal DNS for '{}'", host);
             return std::nullopt;
         }
     }
 
     const std::string server_ip =
-        GetConfiguredIp(Settings::values.nextendo_server_ip.GetValue(), "NEXTENDO_SERVER_IP");
-    const std::string nat_ip =
-        GetConfiguredIp(Settings::values.nextendo_nat_ip.GetValue(), "NEXTENDO_NAT_IP");
-
+        GetConfiguredIp(Settings::values.openpak_server_ip.GetValue(), "OPENPAK_SERVER_IP");
+    // OpenPak does not serve the NAT check; a console that cannot check its NAT falls back
+    // sensibly, so the host stays on real DNS unless an address is configured for it.
     if (host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net")) {
-        LOG_INFO(Service, "[Nextendo] Redirecting NAT check host '{}' -> '{}'", host, nat_ip);
+        const std::string nat_ip =
+            GetConfiguredIp(Settings::values.openpak_nat_ip.GetValue(), "OPENPAK_NAT_IP");
+        if (nat_ip == "127.0.0.1") {
+            return std::nullopt;
+        }
+        LOG_INFO(Service, "[OpenPak] Redirecting NAT check host '{}' -> '{}'", host, nat_ip);
         return nat_ip;
     }
 
@@ -134,7 +138,7 @@ static std::optional<std::string> GetNextendoRedirectIp(const std::string& host)
         host == "nintendo.com" || host.ends_with(".nintendo.com") ||
         host == "nintendowifi.net" || host.ends_with(".nintendowifi.net") ||
         host == "nintendo.co.jp" || host.ends_with(".nintendo.co.jp")) {
-        LOG_INFO(Service, "[Nextendo] Redirecting Nintendo host '{}' -> '{}'", host, server_ip);
+        LOG_INFO(Service, "[OpenPak] Redirecting Nintendo host '{}' -> '{}'", host, server_ip);
         return server_ip;
     }
 
@@ -142,7 +146,7 @@ static std::optional<std::string> GetNextendoRedirectIp(const std::string& host)
 }
 
 // [Nextendo] Debug-only tap: redirects an "npln" host straight to a local TLS-terminating
-// proxy instead of production, for protocol inspection. Independent of enable_nextendo (this
+// proxy instead of production, for protocol inspection. Independent of enable_openpak (this
 // isn't a Nextendo-server redirect, just a temporary debugging aid) -- unset by default, so it
 // never affects a normal run. NEXTENDO_S3_DEBUG_PROXY_IP=<ip> to enable.
 static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
@@ -153,25 +157,25 @@ static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting npln host '{}' -> debug proxy '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting npln host '{}' -> debug proxy '{}'", host, env);
     return std::string(env);
 }
 
 // [Nextendo] Redirects Outbound's Photon traffic (ns.photonengine.io and friends) to our own
 // self-hosted Photon-protocol-compatible server instead of Photon Cloud -- see HANDOFF.md's
 // "Self-hosted Photon server" section in outbound-nextendo for why. Independent of
-// enable_nextendo, same reasoning as GetNplnDebugProxyIp above: a separate redirect target,
+// enable_openpak, same reasoning as GetNplnDebugProxyIp above: a separate redirect target,
 // unset by default so it never affects a normal (non-Outbound) run.
-// NEXTENDO_PHOTON_IP=<ip> to enable.
+// OPENPAK_PHOTON_IP=<ip> to enable.
 static std::optional<std::string> GetPhotonRedirectIp(const std::string& host) {
     if (Common::ToLower(host).find("photonengine.io") == std::string::npos) {
         return std::nullopt;
     }
-    const char* env = std::getenv("NEXTENDO_PHOTON_IP");
+    const char* env = std::getenv("OPENPAK_PHOTON_IP");
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting Photon host '{}' -> '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting Photon host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -199,7 +203,7 @@ static std::optional<std::string> GetPvzEaRedirectIp(const std::string& host) {
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting PvZ EA host '{}' -> '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting PvZ EA host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -223,7 +227,7 @@ static std::optional<std::string> GetCtrDemonwareAuthRedirectIp(const std::strin
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting CTR:NF Demonware host '{}' -> '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting CTR:NF Demonware host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -244,7 +248,7 @@ static std::optional<std::string> GetAmongUsMatchmakerRedirectIp(const std::stri
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting Among Us matchmaker host '{}' -> '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting Among Us matchmaker host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -303,7 +307,7 @@ static std::optional<std::string> GetAmongUsEosRedirectIp(const std::string& hos
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting Among Us EOS host '{}' -> '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting Among Us EOS host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -319,7 +323,7 @@ static std::optional<std::string> GetFallGuysEosRedirectIp(const std::string& ho
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting Fall Guys EOS host '{}' -> '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting Fall Guys EOS host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -358,7 +362,7 @@ static std::optional<std::string> GetMinecraftDungeonsRedirectIp(const std::stri
     if (allow && *allow && std::string(allow) != "0" &&
         IsMinecraftDungeonsSignInHost(lower_host)) {
         LOG_INFO(Service,
-                 "[Nextendo] Letting Minecraft Dungeons sign-in host '{}' resolve normally "
+                 "[OpenPak] Letting Minecraft Dungeons sign-in host '{}' resolve normally "
                  "(NEXTENDO_MC_DUNGEONS_ALLOW_SIGNIN)",
                  host);
         return std::nullopt;
@@ -367,7 +371,7 @@ static std::optional<std::string> GetMinecraftDungeonsRedirectIp(const std::stri
     if (!env || !*env) {
         return std::nullopt;
     }
-    LOG_INFO(Service, "[Nextendo] Redirecting Minecraft Dungeons host '{}' -> '{}'", host, env);
+    LOG_INFO(Service, "[OpenPak] Redirecting Minecraft Dungeons host '{}' -> '{}'", host, env);
     return std::string(env);
 }
 
@@ -398,21 +402,21 @@ static void MaybeDelayNplnInit(const std::string& host) {
         }
 
         LOG_INFO(Service,
-                 "[Nextendo] Holding the first npln host resolution until the JIT/shader-compile "
+                 "[OpenPak] Holding the first npln host resolution until the JIT/shader-compile "
                  "burst settles before gRPC's connection setup starts ({} ms) (see "
                  "MaybeDelayNplnInit)",
                  max_wait_ms);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(max_wait_ms));
 
-        LOG_INFO(Service, "[Nextendo] npln hold finished after {} ms", max_wait_ms);
+        LOG_INFO(Service, "[OpenPak] npln hold finished after {} ms", max_wait_ms);
 
         // [Nextendo][DIAG] Arm a short window during which any finite, non-trivial
         // WaitSynchronization timeout gets logged -- see nextendo_deadline_watch.h. This is
         // trying to directly OBSERVE the game's gRPC call deadline (if it's implemented as a
         // timed kernel wait) rather than continuing to guess at it via static binary analysis.
         Kernel::Svc::ArmNextendoDeadlineWatch(90000);
-        LOG_INFO(Service, "[Nextendo][DIAG] Deadline watch armed for 90000 ms");
+        LOG_INFO(Service, "[OpenPak][DIAG] Deadline watch armed for 90000 ms");
     });
 }
 
@@ -558,7 +562,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
 
-    LOG_INFO(Service, "[Nextendo] DNS resolve (GetHostByName) requested: host={}", host);
+    LOG_INFO(Service, "[OpenPak] DNS resolve (GetHostByName) requested: host={}", host);
 
     // [Nextendo] See MaybeDelayNplnInit's declaration comment.
     MaybeDelayNplnInit(host);
@@ -606,7 +610,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
     } else if (ShouldBlockAmongUsRelatedHost(host)) {
-        LOG_WARNING(Network, "[Nextendo] Blocking Among Us-era host '{}' (NEXTENDO_AMONGUS_BLOCK)",
+        LOG_WARNING(Network, "[OpenPak] Blocking Among Us-era host '{}' (NEXTENDO_AMONGUS_BLOCK)",
                     host);
         return {0, GetAddrInfoError::AGAIN};
     }
@@ -736,7 +740,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
 
-    LOG_INFO(Service, "[Nextendo] DNS resolve (GetAddrInfo) requested: host={}", host);
+    LOG_INFO(Service, "[OpenPak] DNS resolve (GetAddrInfo) requested: host={}", host);
 
     // [Nextendo] See MaybeDelayNplnInit's declaration comment.
     MaybeDelayNplnInit(host);
@@ -754,7 +758,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     // :authority header from a corrupted canonical name, not any citron-side socket/scheduling
     // issue (both were separately investigated at length and ruled out).
     if (Network::IPv4Address literal_ip; Network::TryParseIPv4Literal(host, literal_ip)) {
-        LOG_DEBUG(Service, "[Nextendo] Host '{}' is already a literal address: returned as-is",
+        LOG_DEBUG(Service, "[OpenPak] Host '{}' is already a literal address: returned as-is",
                   host);
         Network::AddrInfo entry{};
         entry.family = Network::Domain::INET;
@@ -818,7 +822,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
         return {0, GetAddrInfoError::AGAIN};
     } else if (ShouldBlockAmongUsRelatedHost(host)) {
-        LOG_WARNING(Network, "[Nextendo] Blocking Among Us-era host '{}' (NEXTENDO_AMONGUS_BLOCK)",
+        LOG_WARNING(Network, "[OpenPak] Blocking Among Us-era host '{}' (NEXTENDO_AMONGUS_BLOCK)",
                     host);
         return {0, GetAddrInfoError::AGAIN};
     }

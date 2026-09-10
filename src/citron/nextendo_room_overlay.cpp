@@ -26,7 +26,7 @@
 #include "citron/nextendo_controller.h"
 #include "citron/nextendo_room_overlay.h"
 #include "citron/uisettings.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 
 NextendoRoomOverlay::NextendoRoomOverlay(QWidget* parent, NextendoController* controller_)
     : QWidget(parent), controller(controller_) {
@@ -111,8 +111,8 @@ NextendoRoomOverlay::NextendoRoomOverlay(QWidget* parent, NextendoController* co
     chat_room_widget = new NextendoChatRoom(this);
     chat_room_widget->SetShowOptions(false);
     chat_room_widget->SetChatClient(controller->GetChatClient());
-    chat_room_widget->SetLocalIdentity(Common::NextendoAccount::GetPid(),
-                                       QString::fromStdString(Common::NextendoAccount::GetUsername()));
+    chat_room_widget->SetLocalIdentity(Common::OpenPakAccount::GetPid(),
+                                       QString::fromStdString(Common::OpenPakAccount::GetUsername()));
     size_grip = new QSizeGrip(this);
     size_grip->setFixedSize(16, 16);
 
@@ -181,7 +181,7 @@ void NextendoRoomOverlay::CreateRoom() {
         client->SendJson(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("create_room")},
             {QStringLiteral("room_name"),
-             tr("%1's Room").arg(QString::fromStdString(Common::NextendoAccount::GetUsername()))},
+             tr("%1's Room").arg(QString::fromStdString(Common::OpenPakAccount::GetUsername()))},
         });
     } else {
         connect(client, &NextendoChatClient::Connected, this, [this] { CreateRoom(); },

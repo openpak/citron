@@ -134,12 +134,12 @@ public:
                 s_mailbox_initialized = true;
                 const bool valid = m_memory.IsValidVirtualAddressRange(MailboxVA, 8);
                 LOG_INFO(Core_ARM,
-                         "[Nextendo][DIAG] mailbox init: vaddr={:#x} range_valid={} "
+                         "[OpenPak][DIAG] mailbox init: vaddr={:#x} range_valid={} "
                          "value_before={:#x}",
                          vaddr, valid, valid ? m_memory.Read64(MailboxVA) : 0);
                 if (valid) {
                     m_memory.Write64(MailboxVA, 0);
-                    LOG_INFO(Core_ARM, "[Nextendo][DIAG] mailbox init: value_after={:#x}",
+                    LOG_INFO(Core_ARM, "[OpenPak][DIAG] mailbox init: value_after={:#x}",
                              m_memory.Read64(MailboxVA));
                 }
             }
@@ -147,7 +147,7 @@ public:
             static bool s_sanity_logged = false;
             if (!s_sanity_logged && vaddr == 0x83F3AA90) {
                 s_sanity_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] SANITY: CheckForInvite/Update reached "
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] SANITY: CheckForInvite/Update reached "
                                     "(hook mechanism works)");
             }
             // Capture NetworkSystemSwitch's `this` (x0 at Update()'s entry, an instance
@@ -173,7 +173,7 @@ public:
                     if (m_memory.IsValidVirtualAddressRange(MailboxVA, 8)) {
                         m_memory.Write64(MailboxVA, x0);
                     }
-                    LOG_INFO(Core_ARM, "[Nextendo][DIAG] NetworkManager instance captured: {:#x}",
+                    LOG_INFO(Core_ARM, "[OpenPak][DIAG] NetworkManager instance captured: {:#x}",
                              x0);
                 }
             }
@@ -183,7 +183,7 @@ public:
                 s_join_movenext_logged = true;
                 const u64 x0 = m_parent.m_jit->GetRegister(0);
                 LOG_INFO(Core_ARM,
-                         "[Nextendo][DIAG] Join.MoveNext reached via redirect! this={:#x}", x0);
+                         "[OpenPak][DIAG] Join.MoveNext reached via redirect! this={:#x}", x0);
             }
             // Real fix for the friend-invite join: NetworkSystemSwitch.JoinSession is a
             // confirmed no-op on this platform (never reads its own argument, never connects),
@@ -201,51 +201,51 @@ public:
             static bool s_guardA_logged = false;
             if (!s_guardA_logged && vaddr == 0x83F3AB64) {
                 s_guardA_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] guardA (initial precondition) w0={:#x}",
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] guardA (initial precondition) w0={:#x}",
                          m_parent.m_jit->GetRegister(0));
             }
             static bool s_guardB_logged = false;
             if (!s_guardB_logged && vaddr == 0x83F3AB9C) {
                 s_guardB_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] guardB (pop succeeded?) w0={:#x}",
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] guardB (pop succeeded?) w0={:#x}",
                          m_parent.m_jit->GetRegister(0));
             }
             static bool s_guardC_logged = false;
             if (!s_guardC_logged && vaddr == 0x83F3ABEC) {
                 s_guardC_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] guardC (dictionary lookup) w0={:#x}",
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] guardC (dictionary lookup) w0={:#x}",
                          m_parent.m_jit->GetRegister(0));
             }
             static bool s_bail1_logged = false;
             if (!s_bail1_logged && vaddr == 0x83F3AD90) {
                 s_bail1_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] BAIL at 0x3f3ad90 (early return)");
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] BAIL at 0x3f3ad90 (early return)");
             }
             static bool s_bail2_logged = false;
             if (!s_bail2_logged && vaddr == 0x83F3ADA8) {
                 s_bail2_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] BAIL at 0x3f3ada8 (guardC failure path)");
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] BAIL at 0x3f3ada8 (guardC failure path)");
             }
             // [Nextendo][DIAG] granular checkpoints inside/around the redirect+trampoline, to
             // see exactly how far execution gets if Join.MoveNext never fires.
             static bool s_redirect_reached_logged = false;
             if (!s_redirect_reached_logged && vaddr == CheckForInviteRedirectVA) {
                 s_redirect_reached_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] CheckForInvite redirect point reached "
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] CheckForInvite redirect point reached "
                                     "(x20 raw pop buffer={:#x})",
                          m_parent.m_jit->GetRegister(20));
             }
             static bool s_mailbox_checked_logged = false;
             if (!s_mailbox_checked_logged && vaddr == TrampolineVA + 0x2C) {
                 s_mailbox_checked_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] trampoline: mailbox value = {:#x}",
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] trampoline: mailbox value = {:#x}",
                          m_parent.m_jit->GetRegister(0));
             }
             static bool s_pre_join_call_logged = false;
             if (!s_pre_join_call_logged && vaddr == TrampolineVA + 0x90) {
                 s_pre_join_call_logged = true;
                 LOG_INFO(Core_ARM,
-                         "[Nextendo][DIAG] trampoline: about to call Join(), x0(this)={:#x} "
+                         "[OpenPak][DIAG] trampoline: about to call Join(), x0(this)={:#x} "
                          "x1(code str)={:#x}",
                          m_parent.m_jit->GetRegister(0), m_parent.m_jit->GetRegister(1));
             }
@@ -354,7 +354,7 @@ public:
             // pollute the fault counters/backtrace; PhysicalCore::OnFault handles it.
             if (pc == 0 && Core::NextendoGuestCall::SentinelPending()) {
                 LOG_INFO(Core_ARM,
-                         "[Nextendo][GUESTCALL] sentinel return reached (pc=0) -- chaining/"
+                         "[OpenPak][GUESTCALL] sentinel return reached (pc=0) -- chaining/"
                          "restoring");
                 ReturnException(pc, PrefetchAbort);
                 return;
@@ -404,7 +404,7 @@ public:
             const u64 cached_invite = m_memory.Read64(s_network_system_switch_instance + 0x28);
             if (cached_invite != 0) {
                 s_cached_invite_seen_logged = true;
-                LOG_INFO(Core_ARM, "[Nextendo][DIAG] _cachedInvite became non-null: {:#x}",
+                LOG_INFO(Core_ARM, "[OpenPak][DIAG] _cachedInvite became non-null: {:#x}",
                          cached_invite);
             }
         }

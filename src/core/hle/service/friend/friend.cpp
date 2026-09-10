@@ -12,7 +12,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/errors.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/nextendo_friends.h"
 #include "common/nextendo_nat.h"
 #include "core/hle/service/friend/friend.h"
@@ -20,7 +20,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/server_manager.h"
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 
 // [UNITY-FIX] undef Win32 macros shadowing ServiceContext methods.
 #undef CreateEvent
@@ -162,13 +162,13 @@ static_assert(sizeof(ProfileImpl) == 0x40, "ProfileImpl has the wrong size");
 #pragma pack(pop)
 
 // [Nextendo] Resolves a pid to a display name for GetProfileList/GetProfileExtraList: the local
-// account itself (via NextendoAccount, not covered by the friends cache) or an actual Nextendo
+// account itself (via OpenPakAccount, not covered by the friends cache) or an actual Nextendo
 // friend. Strangers (e.g. a balloon owner you're not friends with) aren't resolvable here --
 // titles that also carry a plain name string on the wire (Odyssey's DataStoreSearchBalloonResult.
 // ownerName) fall back to that; this only covers the profile-lookup path.
 bool ResolveProfileName(u64 pid, std::string& out_name) {
-    if (Common::NextendoAccount::IsLinked() && Common::NextendoAccount::GetPid() == pid) {
-        out_name = Common::NextendoAccount::GetUsername();
+    if (Common::OpenPakAccount::IsLinked() && Common::OpenPakAccount::GetPid() == pid) {
+        out_name = Common::OpenPakAccount::GetUsername();
         return true;
     }
     const auto entries = Common::NextendoFriends::Get();
@@ -393,7 +393,7 @@ public:
             count = static_cast<u32>(ids.size());
         }
 
-        LOG_INFO(Service_Friend, "[Nextendo] GetFriendListIds -> {}", count);
+        LOG_INFO(Service_Friend, "[OpenPak] GetFriendListIds -> {}", count);
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
         rb.Push<u32>(count);
@@ -754,7 +754,7 @@ void IFriendService::GetFriendList(HLERequestContext& ctx) {
         count = static_cast<u32>(list.size());
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendList offset={} uuid=0x{} pid={} -> {}",
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendList offset={} uuid=0x{} pid={} -> {}",
              friend_offset, uuid.RawString(), pid, count);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -808,16 +808,16 @@ void IFriendService::UpdateUserPresence(HLERequestContext& ctx) {
         if (FixupInGameFlag(app_field)) {
             status = std::max<s32>(status, Common::NextendoFriends::PresenceOnlinePlay);
             LOG_INFO(Service_Friend,
-                     "[Nextendo] Corrected InGame=0->1 in presence blob for a resolved private "
+                     "[OpenPak] Corrected InGame=0->1 in presence blob for a resolved private "
                      "battle host (natf/natm confirmed via NAT-check)");
         } else if (IsArmsSessionActive(app_field)) {
             status = std::max<s32>(status, Common::NextendoFriends::PresenceOnlinePlay);
             LOG_INFO(Service_Friend,
-                     "[Nextendo] ARMS JoinMode indicates an active session; bumping status to "
+                     "[OpenPak] ARMS JoinMode indicates an active session; bumping status to "
                      "OnlinePlay (raw status floors at Online otherwise)");
         }
         Common::NextendoFriends::SetLocalPresence(status, app_field);
-        LOG_INFO(Service_Friend, "[Nextendo] UpdateUserPresence status={} -> {} app_field={}",
+        LOG_INFO(Service_Friend, "[OpenPak] UpdateUserPresence status={} -> {} app_field={}",
                  presence.status, status,
                  Common::HexToString(
                      std::span{reinterpret_cast<const u8*>(app_field.data()), app_field.size()},
@@ -842,7 +842,7 @@ void IFriendService::GetPlayHistoryRegistrationKey(HLERequestContext& ctx) {
 
 void IFriendService::GetFriendCount(HLERequestContext& ctx) {
     const auto count = static_cast<u32>(Common::NextendoFriends::Get().size());
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendCount -> {}", count);
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendCount -> {}", count);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push(count);
@@ -919,7 +919,7 @@ void IFriendService::UpdateFriendInfo(HLERequestContext& ctx) {
         ctx.WriteBuffer(info);
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] UpdateFriendInfo uuid=0x{} requested={} -> {} resolved",
+    LOG_INFO(Service_Friend, "[OpenPak] UpdateFriendInfo uuid=0x{} requested={} -> {} resolved",
              uuid.RawString(), requested_ids.size(), out_count);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
@@ -957,7 +957,7 @@ void IFriendService::GetFriendProfileImage(HLERequestContext& ctx) {
         size = static_cast<u32>(it->image.size());
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendProfileImage uuid=0x{} -> {} bytes",
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendProfileImage uuid=0x{} -> {} bytes",
              uuid.RawString(), size);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -982,7 +982,7 @@ void IFriendService::GetFriendProfileImageWithImageSize(HLERequestContext& ctx) 
         size = static_cast<u32>(it->image.size());
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendProfileImageWithImageSize uuid=0x{} -> {} bytes",
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendProfileImageWithImageSize uuid=0x{} -> {} bytes",
              uuid.RawString(), size);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -1044,7 +1044,7 @@ void RespondProfileList(HLERequestContext& ctx, const char* name) {
         ctx.WriteBuffer(profiles);
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] {} requested={} -> {} resolved", name,
+    LOG_INFO(Service_Friend, "[OpenPak] {} requested={} -> {} resolved", name,
              requested_ids.size(), profiles.size());
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -1135,7 +1135,7 @@ void IFriendService::GetFriendDetailedInfo(HLERequestContext& ctx) {
         ctx.WriteBuffer(info);
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendDetailedInfo requested={} -> {} resolved",
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendDetailedInfo requested={} -> {} resolved",
              requested_ids.size(), out_count);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
@@ -1164,7 +1164,7 @@ void IFriendService::GetFriendListForViewer(HLERequestContext& ctx) {
     // everything implementation is confusing whatever pagination state the viewer tracks.
     IPC::RequestParser probe_rp{ctx};
     const auto probe_offset = probe_rp.Pop<s32>();
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendListForViewer probe_offset={}", probe_offset);
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendListForViewer probe_offset={}", probe_offset);
 
     u32 count = 0;
     if (ctx.CanWriteBuffer()) {
@@ -1193,7 +1193,7 @@ void IFriendService::GetFriendListForViewer(HLERequestContext& ctx) {
             ids_dump += fmt::format("{} ", entries[i].pid);
         }
     }
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendListForViewer -> {} first5=[{}]", count,
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendListForViewer -> {} first5=[{}]", count,
              ids_dump);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -1242,7 +1242,7 @@ void IFriendService::UpdateFriendInfoForViewer(HLERequestContext& ctx) {
     }
 
     LOG_INFO(Service_Friend,
-             "[Nextendo] UpdateFriendInfoForViewer raw_write_size={} (sizeof(FriendImpl)={}, "
+             "[OpenPak] UpdateFriendInfoForViewer raw_write_size={} (sizeof(FriendImpl)={}, "
              "{:.2f} entries worth)",
              raw_write_size, sizeof(FriendImpl),
              static_cast<double>(raw_write_size) / sizeof(FriendImpl));
@@ -1255,7 +1255,7 @@ void IFriendService::UpdateFriendInfoForViewer(HLERequestContext& ctx) {
         req_dump += fmt::format("{} ", requested_ids[i]);
     }
     LOG_INFO(Service_Friend,
-             "[Nextendo] UpdateFriendInfoForViewer requested={} first5=[{}] matched={}/{} "
+             "[OpenPak] UpdateFriendInfoForViewer requested={} first5=[{}] matched={}/{} "
              "cache_size={}",
              requested_ids.size(), req_dump, matched_count, out_count, entries.size());
     IPC::ResponseBuilder rb{ctx, 2};
@@ -1294,7 +1294,7 @@ void IFriendService::GetFriendDetailedInfoV2(HLERequestContext& ctx) {
         ctx.WriteBuffer(info);
     }
 
-    LOG_INFO(Service_Friend, "[Nextendo] GetFriendDetailedInfoV2 requested={} -> {} resolved",
+    LOG_INFO(Service_Friend, "[OpenPak] GetFriendDetailedInfoV2 requested={} -> {} resolved",
              requested_ids.size(), out_count);
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
@@ -1351,7 +1351,7 @@ void IFriendService::GetFriendDetailedInfoV3(HLERequestContext& ctx) {
     }
 
     LOG_INFO(Service_Friend,
-             "[Nextendo] GetFriendDetailedInfoV3 uuid=0x{} -> {} bytes, stride={}, count={}",
+             "[OpenPak] GetFriendDetailedInfoV3 uuid=0x{} -> {} bytes, stride={}, count={}",
              uuid.RawString(), buffer_size, entry_stride, count);
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
@@ -1797,9 +1797,9 @@ void SendFriendInvitationImpl(HLERequestContext& ctx, const char* name) {
         }
     }
 
-    const auto error = WebService::NextendoApi::SendInvitation(target_pids, app_param);
+    const auto error = WebService::OpenPakApi::SendInvitation(target_pids, app_param);
     LOG_INFO(Service_Friend,
-             "[Nextendo] {} target_pids={} app_param_size={} -> {}", name, target_pids.size(),
+             "[OpenPak] {} target_pids={} app_param_size={} -> {}", name, target_pids.size(),
              app_param.size(), error.empty() ? "ok" : error);
 
     IPC::ResponseBuilder rb{ctx, 2};

@@ -380,7 +380,7 @@ void LogPhotonPacket(const char* direction, s32 fd, const Network::SockAddrIn& p
     }
     const std::string ip = Network::IPv4AddressToString(peer.ip);
     const std::string host = Service::Sockets::GetLastHostForIp(ip);
-    LOG_INFO(Service, "[Nextendo][PHOTON] {} fd={} host={} peer={}:{} len={} {}", direction,
+    LOG_INFO(Service, "[OpenPak][PHOTON] {} fd={} host={} peer={}:{} len={} {}", direction,
              fd, host.empty() ? "<server-hop>" : host,
              Network::IPv4AddressToRedactedString(peer.ip), peer.portno, data.size(),
              DescribePhotonPacket(data));
@@ -920,7 +920,7 @@ void BSD::Poll(HLERequestContext& ctx) {
                                                            std::chrono::milliseconds(timeout)};
                 deferred_poll_snapshots[&ctx] = DeferredPollState{read_buffer, deadline};
             }
-            LOG_DEBUG(Service, "[Nextendo] Poll deferred (nfds={} timeout={}), eventfd in set",
+            LOG_DEBUG(Service, "[OpenPak] Poll deferred (nfds={} timeout={}), eventfd in set",
                       nfds, timeout);
             ctx.SetIsDeferred();
             return;
@@ -1107,7 +1107,7 @@ void BSD::Shutdown(HLERequestContext& ctx) {
         for (const auto& entry : backtrace) {
             trace_str += fmt::format("\n    {}+0x{:x} ({})", entry.module, entry.offset, entry.name);
         }
-        LOG_INFO(Service, "[Nextendo][DIAG] Shutdown fd={} how={} guest backtrace:{}", fd, how,
+        LOG_INFO(Service, "[OpenPak][DIAG] Shutdown fd={} how={} guest backtrace:{}", fd, how,
                  trace_str);
     }
 
@@ -1244,7 +1244,7 @@ void BSD::Read(HLERequestContext& ctx) {
             std::vector<u8> message(sizeof(u64));
             std::memcpy(message.data(), &total, sizeof(total));
             ctx.WriteBuffer(message);
-            LOG_DEBUG(Service, "[Nextendo] eventfd fd={} Read coalesced {} pending write(s) into {}",
+            LOG_DEBUG(Service, "[OpenPak] eventfd fd={} Read coalesced {} pending write(s) into {}",
                      fd, drained, total);
             rb.Push(ResultSuccess);
             rb.Push<s32>(sizeof(u64));
@@ -1368,7 +1368,7 @@ void BSD::EventFd(HLERequestContext& ctx) {
             std::span<const u8>{reinterpret_cast<const u8*>(&seed), sizeof(seed)}, 0);
     }
 
-    LOG_INFO(Service, "[Nextendo] New eventfd fd={} initval={}", fd, initval);
+    LOG_INFO(Service, "[OpenPak] New eventfd fd={} initval={}", fd, initval);
 
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
@@ -1607,7 +1607,7 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
         const auto& d = file_descriptors[fds[i].fd];
         if (d && d->sni_injected) {
             LOG_INFO(Service,
-                     "[Nextendo][DIAG] Poll fd={} requested_events={:#x} revents={:#x} timeout={}",
+                     "[OpenPak][DIAG] Poll fd={} requested_events={:#x} revents={:#x} timeout={}",
                      fds[i].fd, static_cast<u16>(fds[i].events), static_cast<u16>(fds[i].revents),
                      timeout);
         }
@@ -1807,7 +1807,7 @@ Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
         auto [parked, queued] = TakeParkedUdpSocket(addr_in.portno);
         if (parked) {
             LOG_INFO(Service,
-                     "[Nextendo] Reusing parked UDP socket for port {} ({} buffered datagram(s))",
+                     "[OpenPak] Reusing parked UDP socket for port {} ({} buffered datagram(s))",
                      addr_in.portno, queued.size());
             // Close the displaced socket, or every adopt leaks a host descriptor.
             if (descriptor.socket) {
@@ -1864,7 +1864,7 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
     if (addr_in.ip == zero_addr && translated_addr.portno != 0) {
         if (const auto recovered = GetLastIpForPort(translated_addr.portno)) {
             LOG_INFO(Service,
-                     "[Nextendo] Connect fd={} address was lost (zeroed), recovered {} for "
+                     "[OpenPak] Connect fd={} address was lost (zeroed), recovered {} for "
                      "port {} from an earlier redirected resolution",
                      fd, Network::IPv4AddressToRedactedString(*recovered),
                      translated_addr.portno);
@@ -1895,12 +1895,12 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
                     const int parsed = std::stoi(env);
                     if (parsed > 0 && parsed <= 0xFFFF) {
                         LOG_INFO(Service,
-                                 "[Nextendo] Redirecting EOS destination port 443 -> {} ({})",
+                                 "[OpenPak] Redirecting EOS destination port 443 -> {} ({})",
                                  parsed, env_name);
                         translated_addr.portno = static_cast<u16>(parsed);
                     }
                 } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid EOS port '{}'; "
+                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid EOS port '{}'; "
                                          "expected an integer from 1 to 65535",
                                 env);
                 }
@@ -1917,13 +1917,13 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
                     const int parsed = std::stoi(env);
                     if (parsed > 0 && parsed <= 0xFFFF) {
                         LOG_INFO(Service,
-                                 "[Nextendo] Redirecting CTR:NF Demonware auth destination port "
+                                 "[OpenPak] Redirecting CTR:NF Demonware auth destination port "
                                  "443 -> {}",
                                  parsed);
                         translated_addr.portno = static_cast<u16>(parsed);
                     }
                 } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid CTR:NF auth port '{}'; "
+                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid CTR:NF auth port '{}'; "
                                          "expected an integer from 1 to 65535",
                                 env);
                 }
@@ -1940,13 +1940,13 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
                     const int parsed = std::stoi(env);
                     if (parsed > 0 && parsed <= 0xFFFF) {
                         LOG_INFO(Service,
-                                 "[Nextendo] Redirecting Among Us matchmaker destination port "
+                                 "[OpenPak] Redirecting Among Us matchmaker destination port "
                                  "443 -> {}",
                                  parsed);
                         translated_addr.portno = static_cast<u16>(parsed);
                     }
                 } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid Among Us port '{}'; "
+                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid Among Us port '{}'; "
                                          "expected an integer from 1 to 65535",
                                 env);
                 }
@@ -1977,14 +1977,14 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
                         const int parsed = std::stoi(env);
                         if (parsed > 0 && parsed <= 0xFFFF) {
                             LOG_INFO(Service,
-                                     "[Nextendo] Redirecting Minecraft Dungeons host '{}' "
+                                     "[OpenPak] Redirecting Minecraft Dungeons host '{}' "
                                      "destination port 443 -> {}",
                                      dungeons_host, parsed);
                             translated_addr.portno = static_cast<u16>(parsed);
                         }
                     } catch (const std::exception&) {
                         LOG_WARNING(Service,
-                                    "[Nextendo] Ignoring invalid Minecraft Dungeons port '{}'; "
+                                    "[OpenPak] Ignoring invalid Minecraft Dungeons port '{}'; "
                                     "expected an integer from 1 to 65535",
                                     env);
                     }
@@ -2003,12 +2003,12 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
                     const int parsed = std::stoi(env);
                     if (parsed > 0 && parsed <= 0xFFFF) {
                         LOG_INFO(Service,
-                                 "[Nextendo] Redirecting BAAS JWKS destination port 443 -> {}",
+                                 "[OpenPak] Redirecting BAAS JWKS destination port 443 -> {}",
                                  parsed);
                         translated_addr.portno = static_cast<u16>(parsed);
                     }
                 } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid BAAS JWKS port '{}'", env);
+                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid BAAS JWKS port '{}'", env);
                 }
             }
         } else if (GetLastHostForIp(resolved_ip).find("npln") != std::string::npos) {
@@ -2024,12 +2024,12 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
                     const int parsed = std::stoi(env);
                     if (parsed > 0 && parsed <= 0xFFFF) {
                         LOG_INFO(Service,
-                                 "[Nextendo] Redirecting npln debug-proxy destination port 443 -> {}",
+                                 "[OpenPak] Redirecting npln debug-proxy destination port 443 -> {}",
                                  parsed);
                         translated_addr.portno = static_cast<u16>(parsed);
                     }
                 } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[Nextendo] Ignoring invalid npln debug-proxy port '{}'; "
+                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid npln debug-proxy port '{}'; "
                                          "expected an integer from 1 to 65535",
                                 env);
                 }
@@ -2388,7 +2388,7 @@ Errno BSD::ShutdownImpl(s32 fd, s32 how) {
                                      std::chrono::steady_clock::now() - *t0)
                                      .count();
         LOG_INFO(Service,
-                 "[Nextendo][DIAG] Shutdown fd={} how={} -- {}ms since Connect() succeeded on "
+                 "[OpenPak][DIAG] Shutdown fd={} how={} -- {}ms since Connect() succeeded on "
                  "this fd",
                  fd, how, elapsed_ms);
     }
@@ -2439,7 +2439,7 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
     }
 
     if (descriptor.sni_injected) {
-        LOG_INFO(Service, "[Nextendo][DIAG] Recv fd={} requested={} ret={} errno={}", fd,
+        LOG_INFO(Service, "[OpenPak][DIAG] Recv fd={} requested={} ret={} errno={}", fd,
                  message.size(), ret, static_cast<int>(bsd_errno));
     }
 
@@ -2500,7 +2500,7 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
             std::tie(ret, bsd_errno) = Translate(descriptor.socket->Recv(flags, message));
         }
         LOG_INFO(Service,
-                 "[Nextendo][DIAG] Recv fd={} grace-wait took {}ms poll_ret={} -> ret={} errno={}",
+                 "[OpenPak][DIAG] Recv fd={} grace-wait took {}ms poll_ret={} -> ret={} errno={}",
                  fd, wait_ms, poll_ret, ret, static_cast<int>(bsd_errno));
     }
 
@@ -2646,7 +2646,7 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
             std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
             std::string host = Service::Sockets::GetLastHostForIp(ip_str);
             if (!host.empty() && TryInjectTlsSni(message, host, injected_buf)) {
-                LOG_INFO(Service, "[Nextendo] Injected SNI extension '{}' into TLS ClientHello for BSD socket fd={}", host, fd);
+                LOG_INFO(Service, "[OpenPak] Injected SNI extension '{}' into TLS ClientHello for BSD socket fd={}", host, fd);
                 send_buf = injected_buf;
             } else {
                 // Stardew/NPLN clean-room diagnostic: record only the public hostname candidate,
@@ -2657,7 +2657,7 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
                 descriptor.tls_sni = client_sni.value_or("");
                 LOG_INFO(
                     Service,
-                    "[Nextendo][DIAG] ClientHello fd={} SNI injection not applied; "
+                    "[OpenPak][DIAG] ClientHello fd={} SNI injection not applied; "
                     "client-sni='{}' last-host candidate='{}'",
                     fd, client_sni.value_or("<absent-or-unparsed>"),
                     host.empty() ? "<none>" : host);
@@ -2675,7 +2675,7 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
         const char* probe = std::getenv("NEXTENDO_STARDEW_TLS_PROBE");
         if (probe != nullptr && *probe != '\0' && std::string_view(probe) != "0") {
             LOG_INFO(Service,
-                     "[Nextendo][DIAG] Stardew production TLS probe observed and suppressed "
+                     "[OpenPak][DIAG] Stardew production TLS probe observed and suppressed "
                      "post-server-flight record type=0x{:02x} len={}",
                      message.empty() ? 0 : message[0], message.size());
             descriptor.tls_server_flight_received = false;
@@ -2697,7 +2697,7 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
         descriptor.awaiting_reply = true;
     }
     if (descriptor.sni_injected) {
-        LOG_INFO(Service, "[Nextendo][DIAG] Send fd={} len={} sent={} errno={} first_byte=0x{:02x}",
+        LOG_INFO(Service, "[OpenPak][DIAG] Send fd={} len={} sent={} errno={} first_byte=0x{:02x}",
                  fd, send_buf.size(), sent_bytes, static_cast<int>(Translate(err)),
                  send_buf.empty() ? 0 : send_buf[0]);
     }
@@ -2773,7 +2773,7 @@ Errno BSD::CloseImpl(s32 fd) {
     // Connected means one peer, so closing it is a real teardown, not the probe/play port swap.
     if (is_udp && bound_port > 0 && !was_connected) {
         if (ParkUdpSocket(socket_to_close, bound_port)) {
-            LOG_INFO(Service, "[Nextendo] Parking UDP socket fd={} bound to port {}", fd,
+            LOG_INFO(Service, "[OpenPak] Parking UDP socket fd={} bound to port {}", fd,
                      bound_port);
             return Errno::SUCCESS;
         }
@@ -2783,7 +2783,7 @@ Errno BSD::CloseImpl(s32 fd) {
     // were actually connected to a peer -- an unconnected/never-dialed socket has no peer that
     // could still have a reply in flight, so there's nothing to protect by delaying its close.
     if (!is_udp && was_connected) {
-        LOG_DEBUG(Service, "[Nextendo] Deferring real close of TCP socket fd={} by {}ms", fd,
+        LOG_DEBUG(Service, "[OpenPak] Deferring real close of TCP socket fd={} by {}ms", fd,
                   TCP_CLOSE_GRACE.count());
         DeferredCloseTcpSocket(std::move(socket_to_close));
         return Errno::SUCCESS;
@@ -3201,10 +3201,10 @@ void LogTlsRecordDiag(const char* what, std::span<const u8> data) {
         }
     }();
     if (content_type == 0x16 && data.size() > 5) {
-        LOG_INFO(Service, "[Nextendo][DIAG] {} TLS type={}(0x{:02x}) hs=0x{:02x} record_len={} buf_len={}",
+        LOG_INFO(Service, "[OpenPak][DIAG] {} TLS type={}(0x{:02x}) hs=0x{:02x} record_len={} buf_len={}",
                  what, type_name, content_type, data[5], record_len, data.size());
     } else {
-        LOG_INFO(Service, "[Nextendo][DIAG] {} TLS type={}(0x{:02x}) record_len={} buf_len={}", what,
+        LOG_INFO(Service, "[OpenPak][DIAG] {} TLS type={}(0x{:02x}) record_len={} buf_len={}", what,
                  type_name, content_type, record_len, data.size());
     }
 }
@@ -3383,7 +3383,7 @@ void BSD::SendMMsg(HLERequestContext& ctx) {
         LogTlsRecordDiag("SendMMsg", concatenated);
         if (Kernel::Svc::IsNextendoDeadlineWatchActive()) {
             const auto* cur = Kernel::GetCurrentThreadPointer(system.Kernel());
-            LOG_INFO(Service, "[Nextendo][SCHED-WATCH] SendMMsg on thread id={} prio={}",
+            LOG_INFO(Service, "[OpenPak][SCHED-WATCH] SendMMsg on thread id={} prio={}",
                      cur ? cur->GetThreadId() : 0, cur ? cur->GetPriority() : -1);
         }
         auto [sent, send_errno] = SendImpl(fd, flags | msg.flags, concatenated);
@@ -3468,7 +3468,7 @@ void BSD::RecvMMsg(HLERequestContext& ctx) {
         std::vector<u8> received(capacity);
         if (Kernel::Svc::IsNextendoDeadlineWatchActive()) {
             const auto* cur = Kernel::GetCurrentThreadPointer(system.Kernel());
-            LOG_INFO(Service, "[Nextendo][SCHED-WATCH] RecvMMsg (pre-recv) on thread id={} prio={}",
+            LOG_INFO(Service, "[OpenPak][SCHED-WATCH] RecvMMsg (pre-recv) on thread id={} prio={}",
                      cur ? cur->GetThreadId() : 0, cur ? cur->GetPriority() : -1);
         }
         auto [ret, recv_errno] = RecvImpl(fd, flags | msg.flags, received);

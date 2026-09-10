@@ -27,7 +27,7 @@ Result WaitProcessWideKeyAtomic(Core::System& system, u64 address, u64 cv_key, u
     std::chrono::steady_clock::time_point diag_cv_start{};
     if (diag_cv) {
         diag_cv_start = std::chrono::steady_clock::now();
-        LOG_INFO(Kernel_SVC, "[Nextendo][DIAG] WaitProcessWideKeyAtomic starting, cv_key={:X}, "
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] WaitProcessWideKeyAtomic starting, cv_key={:X}, "
                              "timeout_ns={}",
                  cv_key, timeout_ns);
     }
@@ -62,7 +62,7 @@ Result WaitProcessWideKeyAtomic(Core::System& system, u64 address, u64 cv_key, u
                                      std::chrono::steady_clock::now() - diag_cv_start)
                                      .count();
         LOG_INFO(Kernel_SVC,
-                 "[Nextendo][DIAG] WaitProcessWideKeyAtomic resolved after {}ms wall-clock, "
+                 "[OpenPak][DIAG] WaitProcessWideKeyAtomic resolved after {}ms wall-clock, "
                  "cv_key={:X}, result=0x{:X}",
                  elapsed_ms, cv_key, result.raw);
     }
@@ -75,7 +75,7 @@ void SignalProcessWideKey(Core::System& system, u64 cv_key, s32 count) {
     LOG_TRACE(Kernel_SVC, "called, cv_key=0x{:X}, count=0x{:08X}", cv_key, count);
 
     if (IsNextendoDeadlineWatchActive()) {
-        LOG_INFO(Kernel_SVC, "[Nextendo][DIAG] SignalProcessWideKey cv_key={:X}, count={}", cv_key,
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] SignalProcessWideKey cv_key={:X}, count={}", cv_key,
                  count);
     }
 

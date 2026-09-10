@@ -24,7 +24,7 @@
 #include "common/nextendo_compatible_titles.h"
 #include "citron/nextendo_online_counts.h"
 #include "citron/util/image_cache.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 
 GameDetailsPanel::GameDetailsPanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("GameDetailsPanel"));
@@ -446,7 +446,7 @@ m_title_label->setMinimumHeight(static_cast<int>(doc.size().height()) + 4);
 m_id_label->setText(
     QStringLiteral("0x%1").arg(m_current_program_id, 16, 16, QLatin1Char('0')).toUpper());
 
-const bool show_online = Common::NextendoAccount::IsLinked() &&
+const bool show_online = Common::OpenPakAccount::IsLinked() &&
                          Nextendo::CompatibleTitles::Table().contains(m_current_program_id);
 if (show_online) {
     const int players = Nextendo::OnlineCounts::For(m_current_program_id);

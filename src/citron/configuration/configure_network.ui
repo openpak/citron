@@ -68,25 +68,25 @@
      <item>
       <widget class="QGroupBox" name="groupBox_nextendo">
        <property name="title">
-        <string>Nextendo</string>
+        <string>OpenPak</string>
        </property>
        <layout class="QGridLayout" name="gridLayout_nextendo">
         <item row="0" column="0">
-         <widget class="QLabel" name="label_nextendo_server_ip">
+         <widget class="QLabel" name="label_openpak_server_ip">
           <property name="text">
            <string>Server IP</string>
           </property>
          </widget>
         </item>
         <item row="0" column="1">
-         <widget class="QLineEdit" name="nextendo_server_ip">
+         <widget class="QLineEdit" name="openpak_server_ip">
           <property name="echoMode">
            <enum>QLineEdit::Password</enum>
           </property>
          </widget>
         </item>
         <item row="0" column="2">
-         <widget class="QPushButton" name="unhide_nextendo_server_ip">
+         <widget class="QPushButton" name="unhide_openpak_server_ip">
           <property name="text">
            <string>Unhide</string>
           </property>
@@ -96,28 +96,28 @@
          </widget>
         </item>
         <item row="1" column="1">
-         <widget class="QPushButton" name="restore_default_nextendo_server_ip">
+         <widget class="QPushButton" name="restore_default_openpak_server_ip">
           <property name="text">
            <string>Restore Default</string>
           </property>
          </widget>
         </item>
         <item row="2" column="0">
-         <widget class="QLabel" name="label_nextendo_nat_ip">
+         <widget class="QLabel" name="label_openpak_nat_ip">
           <property name="text">
            <string>NAT IP</string>
           </property>
          </widget>
         </item>
         <item row="2" column="1">
-         <widget class="QLineEdit" name="nextendo_nat_ip">
+         <widget class="QLineEdit" name="openpak_nat_ip">
           <property name="echoMode">
            <enum>QLineEdit::Password</enum>
           </property>
          </widget>
         </item>
         <item row="2" column="2">
-         <widget class="QPushButton" name="unhide_nextendo_nat_ip">
+         <widget class="QPushButton" name="unhide_openpak_nat_ip">
           <property name="text">
            <string>Unhide</string>
           </property>
@@ -127,7 +127,7 @@
          </widget>
         </item>
         <item row="3" column="1">
-         <widget class="QPushButton" name="restore_default_nextendo_nat_ip">
+         <widget class="QPushButton" name="restore_default_openpak_nat_ip">
           <property name="text">
            <string>Restore Default</string>
           </property>

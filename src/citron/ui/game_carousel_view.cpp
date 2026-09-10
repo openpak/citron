@@ -29,7 +29,7 @@
 #include "citron/nextendo_ldn_counts.h"
 #include "citron/nextendo_online_counts.h"
 #include "citron/util/image_cache.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 
 namespace {
 constexpr int kBackdropPickerRowH = 40;
@@ -814,7 +814,7 @@ QColor CinematicCarousel::AccentColor() const {
 
 void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id,
                                          const QString& installed_version) const {
-    const bool show_nextendo = Common::NextendoAccount::IsLinked() &&
+    const bool show_nextendo = Common::OpenPakAccount::IsLinked() &&
                                Nextendo::CompatibleTitles::Table().contains(program_id);
     const std::optional<Nextendo::LdnCounts::Stats> ldn = Nextendo::LdnCounts::For(program_id);
     if (!show_nextendo && !ldn) {

@@ -54,7 +54,7 @@
 #include <QVBoxLayout>
 
 #include "common/fs/path_util.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/nextendo_outgoing_requests.h"
 #include "common/settings.h"
 #include "citron/nextendo_account_dialog.h"
@@ -71,7 +71,7 @@
 #include "hid_core/hid_core.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace {
@@ -722,12 +722,12 @@ private:
 };
 
 
-NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
+OpenPakAccountDialog::OpenPakAccountDialog(NextendoController* controller_,
                                              Core::System& system_, QWidget* parent,
                                              int initial_page_)
     : QDialog(parent), controller(controller_), system(system_), hid_core(system_.HIDCore()),
       initial_page(initial_page_) {
-    setWindowTitle(tr("Nextendo Account"));
+    setWindowTitle(tr("OpenPak account"));
     setFixedSize(999, 598);
 
     // Otherwise the same physical controller drives both this dialog's navigation and a
@@ -764,7 +764,7 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     edit_name_button->setAutoRaise(true);
     edit_name_button->setFocusPolicy(Qt::NoFocus);
     connect(edit_name_button, &QToolButton::clicked, this,
-           &NextendoAccountDialog::OnEditUsername);
+           &OpenPakAccountDialog::OnEditUsername);
 
     auto* header_name_row = new QHBoxLayout;
     header_name_row->setSpacing(4);
@@ -803,9 +803,9 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     background_button->setStyleSheet(QStringLiteral("QToolButton { color: white; }"));
     auto* background_menu = new QMenu(background_button);
     background_menu->addAction(tr("Choose Background Image..."), this,
-                               &NextendoAccountDialog::OnChangeBackground);
+                               &OpenPakAccountDialog::OnChangeBackground);
     background_menu->addAction(tr("Remove Background"), this,
-                               &NextendoAccountDialog::OnRemoveBackground);
+                               &OpenPakAccountDialog::OnRemoveBackground);
     background_button->setMenu(background_menu);
 
     auto* header_top_row = new QHBoxLayout;
@@ -829,7 +829,7 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     auto* status_card_layout = new QVBoxLayout(status_card);
     status_card_layout->setContentsMargins(18, 16, 18, 16);
     status_card_layout->setSpacing(10);
-    auto* status_title = MakeCardTitle(tr("Nextendo Status"));
+    auto* status_title = MakeCardTitle(tr("OpenPak Status"));
     status_title->setAlignment(Qt::AlignCenter);
     status_card_layout->addWidget(status_title);
 
@@ -837,13 +837,13 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     dash_online_dot = online_icon;
     dash_online_text = new QLabel;
     dash_online_text->setAlignment(Qt::AlignCenter);
-    const bool nextendo_enabled = Settings::values.enable_nextendo.GetValue();
+    const bool nextendo_enabled = Settings::values.enable_openpak.GetValue();
     online_icon->SetOnline(nextendo_enabled);
     if (nextendo_enabled) {
         dash_online_text->setText(tr("Online"));
         dash_online_text->setStyleSheet(QStringLiteral("color: #3fdb76; font-weight: 600;"));
     } else {
-        dash_online_text->setText(tr("Offline: Please enable \"Nextendo Redirection\""));
+        dash_online_text->setText(tr("Offline: Please enable \"OpenPak Redirection\""));
         dash_online_text->setStyleSheet(QStringLiteral("color: #ff5b56; font-weight: 600;"));
         dash_online_text->setWordWrap(true);
     }
@@ -1133,11 +1133,11 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     friends_view->setModel(friends_model);
     friend_delegate = new NextendoFriendDelegate(friends_view, this);
     friends_view->setItemDelegate(friend_delegate);
-    connect(friends_view, &QListView::clicked, this, &NextendoAccountDialog::OnFriendsViewClicked);
+    connect(friends_view, &QListView::clicked, this, &OpenPakAccountDialog::OnFriendsViewClicked);
     friends_view->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(friends_view, &QListView::customContextMenuRequested, this,
-           &NextendoAccountDialog::ShowFriendsContextMenu);
-    connect(friend_search, &QLineEdit::textChanged, this, &NextendoAccountDialog::ApplyFriendFilter);
+           &OpenPakAccountDialog::ShowFriendsContextMenu);
+    connect(friend_search, &QLineEdit::textChanged, this, &OpenPakAccountDialog::ApplyFriendFilter);
 
     friends_stack = new QStackedWidget;
     friends_stack->addWidget(friends_view);
@@ -1158,7 +1158,7 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     requests_view->setModel(requests_model);
     request_delegate = new NextendoFriendDelegate(requests_view, this);
     requests_view->setItemDelegate(request_delegate);
-    connect(requests_view, &QListView::clicked, this, &NextendoAccountDialog::OnFriendsViewClicked);
+    connect(requests_view, &QListView::clicked, this, &OpenPakAccountDialog::OnFriendsViewClicked);
     requests_stack = new QStackedWidget;
     requests_stack->addWidget(requests_view);
     requests_stack->addWidget(MakeEmptyLabel(tr("No incoming friend requests.")));
@@ -1174,7 +1174,7 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     outgoing_request_delegate = new NextendoFriendDelegate(outgoing_requests_view, this);
     outgoing_requests_view->setItemDelegate(outgoing_request_delegate);
     connect(outgoing_requests_view, &QListView::clicked, this,
-            &NextendoAccountDialog::OnFriendsViewClicked);
+            &OpenPakAccountDialog::OnFriendsViewClicked);
 
     outgoing_requests_section = new QWidget;
     auto* outgoing_section_layout = new QVBoxLayout(outgoing_requests_section);
@@ -1206,7 +1206,7 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     history_model = new QStandardItemModel(this);
     history_view->setModel(history_model);
     history_view->setItemDelegate(new NextendoHistoryDelegate(history_view, this));
-    connect(history_view, &QListView::clicked, this, &NextendoAccountDialog::OnHistoryViewClicked);
+    connect(history_view, &QListView::clicked, this, &OpenPakAccountDialog::OnHistoryViewClicked);
     history_stack = new QStackedWidget;
     history_stack->addWidget(history_view);
     history_stack->addWidget(MakeEmptyLabel(tr("No games played yet.")));
@@ -1259,10 +1259,10 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     // Governs only the automatic pull-on-boot/push-on-stop sync -- not the manual Download
     // Save button above, which is already an explicit action each time it's clicked.
     cloud_save_auto_sync_checkbox = new QCheckBox(tr("Automatically sync cloud saves"));
-    cloud_save_auto_sync_checkbox->setChecked(Settings::values.nextendo_cloud_sync_enabled.GetValue());
+    cloud_save_auto_sync_checkbox->setChecked(Settings::values.openpak_cloud_sync_enabled.GetValue());
     cloud_save_auto_sync_checkbox->setCursor(Qt::PointingHandCursor);
     connect(cloud_save_auto_sync_checkbox, &QCheckBox::toggled, this,
-            [](bool checked) { Settings::values.nextendo_cloud_sync_enabled.SetValue(checked); });
+            [](bool checked) { Settings::values.openpak_cloud_sync_enabled.SetValue(checked); });
 
     auto* cloud_save_card = new QFrame;
     cloud_save_card->setStyleSheet(DashCardStyle());
@@ -1297,7 +1297,7 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     lobby_view->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(lobby_view, &QListView::customContextMenuRequested, this,
            [this](const QPoint& pos) { ShowPlayersContextMenu(lobby_view, pos); });
-    connect(lobby_view, &QListView::clicked, this, &NextendoAccountDialog::OnPlayersViewClicked);
+    connect(lobby_view, &QListView::clicked, this, &OpenPakAccountDialog::OnPlayersViewClicked);
 
     lobby_stack = new QStackedWidget;
     lobby_stack->addWidget(lobby_view);
@@ -1320,7 +1320,7 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     connect(recent_players_view, &QListView::customContextMenuRequested, this,
            [this](const QPoint& pos) { ShowPlayersContextMenu(recent_players_view, pos); });
     connect(recent_players_view, &QListView::clicked, this,
-           &NextendoAccountDialog::OnPlayersViewClicked);
+           &OpenPakAccountDialog::OnPlayersViewClicked);
 
     recent_players_stack = new QStackedWidget;
     recent_players_stack->addWidget(recent_players_view);
@@ -1474,11 +1474,11 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
                 });
             });
 
-    connect(add_button, &QPushButton::clicked, this, &NextendoAccountDialog::OnAdd);
-    connect(friend_code_input, &QLineEdit::returnPressed, this, &NextendoAccountDialog::OnAdd);
+    connect(add_button, &QPushButton::clicked, this, &OpenPakAccountDialog::OnAdd);
+    connect(friend_code_input, &QLineEdit::returnPressed, this, &OpenPakAccountDialog::OnAdd);
 
-    header_name->setText(QString::fromStdString(Common::NextendoAccount::GetUsername()));
-    header_code->setText(QString::fromStdString(Common::NextendoAccount::GetFriendCode()));
+    header_name->setText(QString::fromStdString(Common::OpenPakAccount::GetUsername()));
+    header_code->setText(QString::fromStdString(Common::OpenPakAccount::GetFriendCode()));
 
     LoadSavedBackground();
     GoToPage(initial_page);
@@ -1496,10 +1496,10 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
             });
 
     refresh_timer.setInterval(15000);
-    connect(&refresh_timer, &QTimer::timeout, this, &NextendoAccountDialog::RefreshFriends);
-    connect(&refresh_timer, &QTimer::timeout, this, &NextendoAccountDialog::RefreshHistory);
-    connect(&refresh_timer, &QTimer::timeout, this, &NextendoAccountDialog::RefreshCloudSaveTab);
-    connect(&refresh_timer, &QTimer::timeout, this, &NextendoAccountDialog::RefreshPlayers);
+    connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshFriends);
+    connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshHistory);
+    connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshCloudSaveTab);
+    connect(&refresh_timer, &QTimer::timeout, this, &OpenPakAccountDialog::RefreshPlayers);
     refresh_timer.start();
 
     connect(pages_stack, &QStackedWidget::currentChanged, this, [this](int index) {
@@ -1509,8 +1509,8 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
     });
 
 #ifdef ENABLE_WEB_SERVICE
-    std::thread{[this, guard = QPointer<NextendoAccountDialog>(this)] {
-        auto profile = WebService::NextendoApi::GetProfile();
+    std::thread{[this, guard = QPointer<OpenPakAccountDialog>(this)] {
+        auto profile = WebService::OpenPakApi::GetProfile();
         if (!profile.ok || profile.image_base64.empty() || !guard) {
             return;
         }
@@ -1531,11 +1531,11 @@ NextendoAccountDialog::NextendoAccountDialog(NextendoController* controller_,
 #endif
 }
 
-NextendoAccountDialog::~NextendoAccountDialog() {
+OpenPakAccountDialog::~OpenPakAccountDialog() {
     hid_core.SetGuestInputSuspended(false);
 }
 
-bool NextendoAccountDialog::eventFilter(QObject* watched, QEvent* event) {
+bool OpenPakAccountDialog::eventFilter(QObject* watched, QEvent* event) {
     const bool is_activate_key =
         event->type() == QEvent::KeyPress &&
         (static_cast<QKeyEvent*>(event)->key() == Qt::Key_Space ||
@@ -1556,7 +1556,7 @@ bool NextendoAccountDialog::eventFilter(QObject* watched, QEvent* event) {
     return QDialog::eventFilter(watched, event);
 }
 
-void NextendoAccountDialog::keyPressEvent(QKeyEvent* event) {
+void OpenPakAccountDialog::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_PageDown) {
         GoToPage(current_page + 1);
         return;
@@ -1568,12 +1568,12 @@ void NextendoAccountDialog::keyPressEvent(QKeyEvent* event) {
     QDialog::keyPressEvent(event);
 }
 
-void NextendoAccountDialog::resizeEvent(QResizeEvent* event) {
+void OpenPakAccountDialog::resizeEvent(QResizeEvent* event) {
     QDialog::resizeEvent(event);
     UpdateHeroSizing();
 }
 
-void NextendoAccountDialog::showEvent(QShowEvent* event) {
+void OpenPakAccountDialog::showEvent(QShowEvent* event) {
     QDialog::showEvent(event);
     if (QApplication::focusWidget() && isAncestorOf(QApplication::focusWidget())) {
         return;
@@ -1585,7 +1585,7 @@ void NextendoAccountDialog::showEvent(QShowEvent* event) {
     }
 }
 
-void NextendoAccountDialog::UpdateHeroSizing() {
+void OpenPakAccountDialog::UpdateHeroSizing() {
     if (!header_card || !header_avatar) {
         return;
     }
@@ -1604,7 +1604,7 @@ void NextendoAccountDialog::UpdateHeroSizing() {
     header_code->setFont(code_font);
 }
 
-void NextendoAccountDialog::GoToPage(int index) {
+void OpenPakAccountDialog::GoToPage(int index) {
     if (!pages_stack) {
         return;
     }
@@ -1628,15 +1628,15 @@ void NextendoAccountDialog::GoToPage(int index) {
     }
 }
 
-void NextendoAccountDialog::WireControllerNav() {
+void OpenPakAccountDialog::WireControllerNav() {
     connect(controller_navigation, &ControllerNavigation::leftShoulderPressed, this,
             [this] { GoToPage(current_page - 1); });
     connect(controller_navigation, &ControllerNavigation::rightShoulderPressed, this,
             [this] { GoToPage(current_page + 1); });
     connect(controller_navigation, &ControllerNavigation::navigated, this,
-            &NextendoAccountDialog::OnDirectionalNav);
+            &OpenPakAccountDialog::OnDirectionalNav);
     connect(controller_navigation, &ControllerNavigation::activated, this,
-            &NextendoAccountDialog::OnControllerActivate, Qt::QueuedConnection);
+            &OpenPakAccountDialog::OnControllerActivate, Qt::QueuedConnection);
     connect(controller_navigation, &ControllerNavigation::backPressed, this, [this] {
         if (active_popup) {
             active_popup->deleteLater();
@@ -1647,7 +1647,7 @@ void NextendoAccountDialog::WireControllerNav() {
     });
 }
 
-void NextendoAccountDialog::UpdatePageNav() {
+void OpenPakAccountDialog::UpdatePageNav() {
     if (!nav_left_arrow || !nav_right_arrow || !pages_stack) {
         return;
     }
@@ -1658,7 +1658,7 @@ void NextendoAccountDialog::UpdatePageNav() {
                               current_page < last ? page_titles[current_page + 1] : QString{});
 }
 
-void NextendoAccountDialog::OnDirectionalNav(int dx, int dy) {
+void OpenPakAccountDialog::OnDirectionalNav(int dx, int dy) {
     QWidget* focused = QApplication::focusWidget();
     if (focused && !isAncestorOf(focused)) {
         focused = nullptr;
@@ -1709,7 +1709,7 @@ void NextendoAccountDialog::OnDirectionalNav(int dx, int dy) {
     }
 }
 
-void NextendoAccountDialog::OnControllerActivate() {
+void OpenPakAccountDialog::OnControllerActivate() {
     QWidget* focused = QApplication::focusWidget();
     if (!focused || !isAncestorOf(focused)) {
         return;
@@ -1735,7 +1735,7 @@ void NextendoAccountDialog::OnControllerActivate() {
     QApplication::sendEvent(focused, &key);
 }
 
-bool NextendoAccountDialog::ConfirmAction(const QString& title, const QString& message,
+bool OpenPakAccountDialog::ConfirmAction(const QString& title, const QString& message,
                                           const QString& yes_text, const QString& no_text,
                                           const std::string& icon_base64) {
     auto* scrim = new QWidget(this);
@@ -1866,7 +1866,7 @@ bool NextendoAccountDialog::ConfirmAction(const QString& title, const QString& m
     return result;
 }
 
-void NextendoAccountDialog::ActivateCurrentRow(QListView* view) {
+void OpenPakAccountDialog::ActivateCurrentRow(QListView* view) {
     if (view != friends_view && view != requests_view && view != outgoing_requests_view) {
         return;
     }
@@ -1899,19 +1899,19 @@ void NextendoAccountDialog::ActivateCurrentRow(QListView* view) {
                           tr("Yes"), tr("No"), avatar_b64)) {
             return;
         }
-        RunAsync([pid] { return WebService::NextendoApi::AcceptFriend(pid); });
+        RunAsync([pid] { return WebService::OpenPakApi::AcceptFriend(pid); });
     } else {
         const QString name = index.data(NextendoFriendItem::NameRole).toString();
         if (!ConfirmAction(tr("Remove Friend"), tr("Remove %1 from your friends list?").arg(name),
                           tr("Yes"), tr("No"), avatar_b64)) {
             return;
         }
-        RunAsync([pid] { return WebService::NextendoApi::RemoveFriend(pid); });
+        RunAsync([pid] { return WebService::OpenPakApi::RemoveFriend(pid); });
     }
 #endif
 }
 
-void NextendoAccountDialog::ActivateHistoryRow(const QModelIndex& index) {
+void OpenPakAccountDialog::ActivateHistoryRow(const QModelIndex& index) {
     if (!index.isValid() || !controller) {
         return;
     }
@@ -1930,11 +1930,11 @@ void NextendoAccountDialog::ActivateHistoryRow(const QModelIndex& index) {
     accept();
 }
 
-void NextendoAccountDialog::OnHistoryViewClicked(const QModelIndex& index) {
+void OpenPakAccountDialog::OnHistoryViewClicked(const QModelIndex& index) {
     ActivateHistoryRow(index);
 }
 
-void NextendoAccountDialog::OnChangeAvatar() {
+void OpenPakAccountDialog::OnChangeAvatar() {
 #ifdef ENABLE_WEB_SERVICE
     const QString path = QFileDialog::getOpenFileName(this, tr("Choose a profile picture"),
                                                        QString{}, tr("Images (*.png *.jpg *.jpeg)"));
@@ -1962,8 +1962,8 @@ void NextendoAccountDialog::OnChangeAvatar() {
     UpdateHeroSizing();
     status->setText(tr("Uploading profile picture..."));
 
-    std::thread{[this, image_base64, guard = QPointer<NextendoAccountDialog>(this)] {
-        const std::string error = WebService::NextendoApi::PushProfilePicture(image_base64);
+    std::thread{[this, image_base64, guard = QPointer<OpenPakAccountDialog>(this)] {
+        const std::string error = WebService::OpenPakApi::PushProfilePicture(image_base64);
         if (!guard) {
             return;
         }
@@ -1983,7 +1983,7 @@ void NextendoAccountDialog::OnChangeAvatar() {
 #endif
 }
 
-void NextendoAccountDialog::OnChangeBackground() {
+void OpenPakAccountDialog::OnChangeBackground() {
     const QString path = QFileDialog::getOpenFileName(this, tr("Choose a background image"),
                                                        QString{}, tr("Images (*.png *.jpg *.jpeg)"));
     if (path.isEmpty()) {
@@ -2009,18 +2009,18 @@ void NextendoAccountDialog::OnChangeBackground() {
     status->setText(tr("Background updated."));
 }
 
-void NextendoAccountDialog::OnRemoveBackground() {
+void OpenPakAccountDialog::OnRemoveBackground() {
     std::error_code ec;
     std::filesystem::remove(BackgroundImagePath(), ec);
     ApplyBackground({});
     status->setText(tr("Background removed."));
 }
 
-void NextendoAccountDialog::ApplyBackground(const QPixmap& pixmap) {
+void OpenPakAccountDialog::ApplyBackground(const QPixmap& pixmap) {
     static_cast<HeaderCard*>(header_card)->SetBackgroundImage(pixmap);
 }
 
-void NextendoAccountDialog::LoadSavedBackground() {
+void OpenPakAccountDialog::LoadSavedBackground() {
     const auto path = BackgroundImagePath();
     if (!std::filesystem::exists(path)) {
         return;
@@ -2031,7 +2031,7 @@ void NextendoAccountDialog::LoadSavedBackground() {
     }
 }
 
-void NextendoAccountDialog::OnEditUsername() {
+void OpenPakAccountDialog::OnEditUsername() {
 #ifdef ENABLE_WEB_SERVICE
     static const QRegularExpression valid_name(QStringLiteral("^[A-Za-z0-9_-]{3,16}$"));
 
@@ -2052,8 +2052,8 @@ void NextendoAccountDialog::OnEditUsername() {
     status->setText(tr("Updating username..."));
     const std::string new_name = name.toStdString();
 
-    std::thread{[this, new_name, guard = QPointer<NextendoAccountDialog>(this)] {
-        const std::string error = WebService::NextendoApi::SetUsername(new_name);
+    std::thread{[this, new_name, guard = QPointer<OpenPakAccountDialog>(this)] {
+        const std::string error = WebService::OpenPakApi::SetUsername(new_name);
         if (!guard) {
             return;
         }
@@ -2064,9 +2064,10 @@ void NextendoAccountDialog::OnEditUsername() {
                     return;
                 }
                 if (error.empty()) {
-                    Common::NextendoAccount::Save(Common::NextendoAccount::GetPid(), new_name,
-                                                  Common::NextendoAccount::GetFriendCode(),
-                                                  Common::NextendoAccount::GetToken());
+                    Common::OpenPakAccount::Save(Common::OpenPakAccount::GetPid(), new_name,
+                                                 Common::OpenPakAccount::GetFriendCode(),
+                                                 Common::OpenPakAccount::GetToken(),
+                                                 Common::OpenPakAccount::GetBearer());
                     header_name->setText(QString::fromStdString(new_name));
                     status->setText(tr("Username updated."));
                 } else {
@@ -2080,15 +2081,15 @@ void NextendoAccountDialog::OnEditUsername() {
 #endif
 }
 
-void NextendoAccountDialog::SetBusy(bool busy) {
+void OpenPakAccountDialog::SetBusy(bool busy) {
     add_button->setEnabled(!busy);
 }
 
-u64 NextendoAccountDialog::SelectedPid(const QModelIndex& index) const {
+u64 OpenPakAccountDialog::SelectedPid(const QModelIndex& index) const {
     return index.isValid() ? index.data(NextendoFriendItem::PidRole).toULongLong() : 0;
 }
 
-void NextendoAccountDialog::ApplyFriendFilter(const QString& text) {
+void OpenPakAccountDialog::ApplyFriendFilter(const QString& text) {
     for (int row = 0; row < friends_model->rowCount(); ++row) {
         const QString name =
             friends_model->index(row, 0).data(NextendoFriendItem::NameRole).toString();
@@ -2096,7 +2097,7 @@ void NextendoAccountDialog::ApplyFriendFilter(const QString& text) {
     }
 }
 
-void NextendoAccountDialog::UpdateRequestsBadge(int count) {
+void OpenPakAccountDialog::UpdateRequestsBadge(int count) {
     if (count <= 0) {
         requests_badge->hide();
         UpdateDashboard();
@@ -2107,7 +2108,7 @@ void NextendoAccountDialog::UpdateRequestsBadge(int count) {
     UpdateDashboard();
 }
 
-void NextendoAccountDialog::UpdateDashboard() {
+void OpenPakAccountDialog::UpdateDashboard() {
     int online = 0;
     int in_game = 0;
     for (int row = 0; row < friends_model->rowCount(); ++row) {
@@ -2219,7 +2220,7 @@ void NextendoAccountDialog::UpdateDashboard() {
     dash_friends_list_layout->addStretch(1);
 }
 
-void NextendoAccountDialog::OnFriendsViewClicked(const QModelIndex& index) {
+void OpenPakAccountDialog::OnFriendsViewClicked(const QModelIndex& index) {
     if (!index.isValid()) {
         return;
     }
@@ -2262,13 +2263,13 @@ void NextendoAccountDialog::OnFriendsViewClicked(const QModelIndex& index) {
                               tr("Yes"), tr("No"), avatar_b64)) {
                 return;
             }
-            RunAsync([pid] { return WebService::NextendoApi::AcceptFriend(pid); });
+            RunAsync([pid] { return WebService::OpenPakApi::AcceptFriend(pid); });
         } else {
             if (!ConfirmAction(tr("Friend Request"), tr("Decline %1's friend request?").arg(name),
                               tr("Yes"), tr("No"), avatar_b64)) {
                 return;
             }
-            RunAsync([pid] { return WebService::NextendoApi::DeclineFriend(pid); });
+            RunAsync([pid] { return WebService::OpenPakApi::DeclineFriend(pid); });
         }
     } else {
         const QString name = index.data(NextendoFriendItem::NameRole).toString();
@@ -2276,19 +2277,19 @@ void NextendoAccountDialog::OnFriendsViewClicked(const QModelIndex& index) {
                           tr("Yes"), tr("No"), avatar_b64)) {
             return;
         }
-        RunAsync([pid] { return WebService::NextendoApi::RemoveFriend(pid); });
+        RunAsync([pid] { return WebService::OpenPakApi::RemoveFriend(pid); });
     }
 #endif
 }
 
-void NextendoAccountDialog::RunAsync(std::function<std::string()> task,
+void OpenPakAccountDialog::RunAsync(std::function<std::string()> task,
                                      std::function<void()> on_success) {
 #ifdef ENABLE_WEB_SERVICE
     SetBusy(true);
     status->setText(tr("Working..."));
 
     std::thread{[this, work = std::move(task), success_cb = std::move(on_success),
-                guard = QPointer<NextendoAccountDialog>(this)] {
+                guard = QPointer<OpenPakAccountDialog>(this)] {
         const std::string result = work();
         if (!guard) {
             return;
@@ -2318,7 +2319,7 @@ void NextendoAccountDialog::RunAsync(std::function<std::string()> task,
 #endif
 }
 
-void NextendoAccountDialog::OnAdd() {
+void OpenPakAccountDialog::OnAdd() {
 #ifdef ENABLE_WEB_SERVICE
     const std::string code = friend_code_input->text().trimmed().toStdString();
     if (code.empty()) {
@@ -2326,7 +2327,7 @@ void NextendoAccountDialog::OnAdd() {
         return;
     }
     friend_code_input->clear();
-    RunAsync([code] { return WebService::NextendoApi::AddFriendByCode(code); }, [this, code] {
+    RunAsync([code] { return WebService::OpenPakApi::AddFriendByCode(code); }, [this, code] {
         Common::NextendoOutgoingRequests::Add(code);
         if (controller) {
             controller->NotifyFriendRequestSent(QString::fromStdString(code));
@@ -2335,13 +2336,13 @@ void NextendoAccountDialog::OnAdd() {
 #endif
 }
 
-void NextendoAccountDialog::RefreshFriends() {
+void OpenPakAccountDialog::RefreshFriends() {
 #ifdef ENABLE_WEB_SERVICE
     SetBusy(true);
     status->setText(tr("Loading..."));
 
-    std::thread{[this, guard = QPointer<NextendoAccountDialog>(this)] {
-        auto fetched = WebService::NextendoApi::GetFriends();
+    std::thread{[this, guard = QPointer<OpenPakAccountDialog>(this)] {
+        auto fetched = WebService::OpenPakApi::GetFriends();
         if (!guard) {
             return;
         }
@@ -2384,7 +2385,7 @@ void NextendoAccountDialog::RefreshFriends() {
                         ++group_size[entry.app_id];
                     }
                 }
-                const auto rank = [&](const WebService::NextendoApi::Friend& f) -> int {
+                const auto rank = [&](const WebService::OpenPakApi::Friend& f) -> int {
                     if (f.presence_status == 0) {
                         return static_cast<int>(group_size.size()) + 2;
                     }
@@ -2397,7 +2398,7 @@ void NextendoAccountDialog::RefreshFriends() {
                     return 1; // refined below by group size, same tier is fine for a stable sort
                 };
                 std::stable_sort(list.friends.begin(), list.friends.end(),
-                                 [&](const WebService::NextendoApi::Friend& a, const WebService::NextendoApi::Friend& b) {
+                                 [&](const WebService::OpenPakApi::Friend& a, const WebService::OpenPakApi::Friend& b) {
                                      const int ra = rank(a);
                                      const int rb = rank(b);
                                      if (ra != rb) {
@@ -2489,7 +2490,7 @@ void NextendoAccountDialog::RefreshFriends() {
 #endif
 }
 
-void NextendoAccountDialog::RefreshCloudSaveTab() {
+void OpenPakAccountDialog::RefreshCloudSaveTab() {
     const std::string app_id_hex = controller ? controller->GetLocalAppId() : std::string{};
     const bool any_game_running = !app_id_hex.empty();
 
@@ -2550,7 +2551,7 @@ void NextendoAccountDialog::RefreshCloudSaveTab() {
     }
 }
 
-void NextendoAccountDialog::RebuildCloudSaveTitlePicker() {
+void OpenPakAccountDialog::RebuildCloudSaveTitlePicker() {
     for (QAbstractButton* button : cloud_save_picker_group->buttons()) {
         cloud_save_picker_group->removeButton(button);
         button->deleteLater();
@@ -2609,7 +2610,7 @@ void NextendoAccountDialog::RebuildCloudSaveTitlePicker() {
     cloud_save_download_button->setEnabled(cloud_save_selected_title_id != 0);
 }
 
-void NextendoAccountDialog::ProbeCloudSaveAvailability(u64 title_id) {
+void OpenPakAccountDialog::ProbeCloudSaveAvailability(u64 title_id) {
 #ifdef ENABLE_WEB_SERVICE
     if (cloud_save_probing.count(title_id)) {
         return;
@@ -2617,8 +2618,8 @@ void NextendoAccountDialog::ProbeCloudSaveAvailability(u64 title_id) {
     cloud_save_probing.insert(title_id);
 
     const std::string title_id_hex = fmt::format("{:016x}", title_id);
-    std::thread{[this, title_id, title_id_hex, guard = QPointer<NextendoAccountDialog>(this)] {
-        const auto save = WebService::NextendoApi::PullSave(title_id_hex);
+    std::thread{[this, title_id, title_id_hex, guard = QPointer<OpenPakAccountDialog>(this)] {
+        const auto save = WebService::OpenPakApi::PullSave(title_id_hex);
         const bool has_data = save.has_value() && !save->empty();
 
         QMetaObject::invokeMethod(
@@ -2637,39 +2638,39 @@ void NextendoAccountDialog::ProbeCloudSaveAvailability(u64 title_id) {
 }
 
 namespace {
-QString PlayerDisplayName(const WebService::NextendoApi::LobbyPlayer& player) {
+QString PlayerDisplayName(const WebService::OpenPakApi::LobbyPlayer& player) {
     if (!player.name.empty()) {
         return QString::fromStdString(player.name);
     }
     return QStringLiteral("#%1").arg(player.pid);
 }
 
-QString LobbyStateLine(const WebService::NextendoApi::Lobby& lobby) {
-    const QString status = lobby.state_code == "searching" ? NextendoAccountDialog::tr("Looking for players")
-                          : lobby.state_code == "matched"  ? NextendoAccountDialog::tr("In a match")
+QString LobbyStateLine(const WebService::OpenPakApi::Lobby& lobby) {
+    const QString status = lobby.state_code == "searching" ? OpenPakAccountDialog::tr("Looking for players")
+                          : lobby.state_code == "matched"  ? OpenPakAccountDialog::tr("In a match")
                                                             : QString();
     if (status.isEmpty()) {
-        return NextendoAccountDialog::tr("%1 / %2 players").arg(lobby.count).arg(lobby.max);
+        return OpenPakAccountDialog::tr("%1 / %2 players").arg(lobby.count).arg(lobby.max);
     }
-    return NextendoAccountDialog::tr("%1 / %2 players \xE2\x80\x94 %3")
+    return OpenPakAccountDialog::tr("%1 / %2 players \xE2\x80\x94 %3")
         .arg(lobby.count)
         .arg(lobby.max)
         .arg(status);
 }
 } // namespace
 
-void NextendoAccountDialog::RefreshPlayers() {
+void OpenPakAccountDialog::RefreshPlayers() {
 #ifdef ENABLE_WEB_SERVICE
-    std::thread{[this, guard = QPointer<NextendoAccountDialog>(this)] {
-        auto lobby = WebService::NextendoApi::GetMyLobby();
-        auto recent = WebService::NextendoApi::GetRecentPlayers();
+    std::thread{[this, guard = QPointer<OpenPakAccountDialog>(this)] {
+        auto lobby = WebService::OpenPakApi::GetMyLobby();
+        auto recent = WebService::OpenPakApi::GetRecentPlayers();
 
         std::unordered_map<u64, std::string> avatars;
         const auto fetch_avatar = [&](u64 pid) {
             if (pid == 0 || avatars.contains(pid)) {
                 return;
             }
-            avatars[pid] = WebService::NextendoApi::GetAvatarByPid(pid);
+            avatars[pid] = WebService::OpenPakApi::GetAvatarByPid(pid);
         };
         for (const auto& player : lobby.players) {
             fetch_avatar(player.pid);
@@ -2724,7 +2725,7 @@ void NextendoAccountDialog::RefreshPlayers() {
 #endif
 }
 
-void NextendoAccountDialog::OnPlayersViewClicked(const QModelIndex& index) {
+void OpenPakAccountDialog::OnPlayersViewClicked(const QModelIndex& index) {
 #ifdef ENABLE_WEB_SERVICE
     if (!index.isValid()) {
         return;
@@ -2739,11 +2740,11 @@ void NextendoAccountDialog::OnPlayersViewClicked(const QModelIndex& index) {
     }
 
     const u64 pid = SelectedPid(index);
-    if (pid == 0 || pid == Common::NextendoAccount::GetPid()) {
+    if (pid == 0 || pid == Common::OpenPakAccount::GetPid()) {
         return;
     }
     if (!known_player_pids.contains(pid)) {
-        status->setText(tr("This player isn't a known Nextendo account."));
+        status->setText(tr("This player isn't a known OpenPak account."));
         return;
     }
     const std::string friend_code = index.data(NextendoFriendItem::FriendCodeRole).toString().toStdString();
@@ -2757,7 +2758,7 @@ void NextendoAccountDialog::OnPlayersViewClicked(const QModelIndex& index) {
                        tr("No"), avatar_b64)) {
         return;
     }
-    RunAsync([friend_code] { return WebService::NextendoApi::AddFriendByCode(friend_code); },
+    RunAsync([friend_code] { return WebService::OpenPakApi::AddFriendByCode(friend_code); },
              [this, friend_code] {
                  Common::NextendoOutgoingRequests::Add(friend_code);
                  if (controller) {
@@ -2767,14 +2768,14 @@ void NextendoAccountDialog::OnPlayersViewClicked(const QModelIndex& index) {
 #endif
 }
 
-void NextendoAccountDialog::ShowPlayersContextMenu(QListView* view, const QPoint& pos) {
+void OpenPakAccountDialog::ShowPlayersContextMenu(QListView* view, const QPoint& pos) {
 #ifdef ENABLE_WEB_SERVICE
     const QModelIndex index = view->indexAt(pos);
     if (!index.isValid()) {
         return;
     }
     const u64 pid = SelectedPid(index);
-    if (pid == 0 || pid == Common::NextendoAccount::GetPid() || !known_player_pids.contains(pid)) {
+    if (pid == 0 || pid == Common::OpenPakAccount::GetPid() || !known_player_pids.contains(pid)) {
         return;
     }
 
@@ -2789,7 +2790,7 @@ void NextendoAccountDialog::ShowPlayersContextMenu(QListView* view, const QPoint
 #endif
 }
 
-void NextendoAccountDialog::ShowFriendsContextMenu(const QPoint& pos) {
+void OpenPakAccountDialog::ShowFriendsContextMenu(const QPoint& pos) {
     const QModelIndex index = friends_view->indexAt(pos);
     if (!index.isValid()) {
         return;
@@ -2820,7 +2821,7 @@ void NextendoAccountDialog::ShowFriendsContextMenu(const QPoint& pos) {
     menu.exec(friends_view->viewport()->mapToGlobal(pos));
 }
 
-void NextendoAccountDialog::OpenReportDialog(u64 pid, const QString& name,
+void OpenPakAccountDialog::OpenReportDialog(u64 pid, const QString& name,
                                              const QString& avatar_b64) {
 #ifdef ENABLE_WEB_SERVICE
     QDialog dialog(this);
@@ -2834,7 +2835,7 @@ void NextendoAccountDialog::OpenReportDialog(u64 pid, const QString& name,
     reason_combo->addItem(tr("Inappropriate avatar"), QStringLiteral("avatar"));
     reason_combo->addItem(tr("Harassment"), QStringLiteral("harassment"));
     reason_combo->addItem(tr("Griefing"), QStringLiteral("griefing"));
-    reason_combo->addItem(tr("Impersonating a Nextendo account"),
+    reason_combo->addItem(tr("Impersonating a OpenPak account"),
                           QStringLiteral("impersonation"));
     reason_combo->addItem(tr("Other"), QStringLiteral("other"));
 
@@ -2867,7 +2868,7 @@ void NextendoAccountDialog::OpenReportDialog(u64 pid, const QString& name,
 
     RunAsync(
         [pid, reason, comment] {
-            const std::string error = WebService::NextendoApi::ReportPlayer(pid, reason, comment);
+            const std::string error = WebService::OpenPakApi::ReportPlayer(pid, reason, comment);
             if (error == "not_encountered") {
                 return std::string("You haven't shared a lobby with this player recently.");
             }
@@ -2880,10 +2881,10 @@ void NextendoAccountDialog::OpenReportDialog(u64 pid, const QString& name,
 #endif
 }
 
-void NextendoAccountDialog::RefreshHistory() {
+void OpenPakAccountDialog::RefreshHistory() {
 #ifdef ENABLE_WEB_SERVICE
-    std::thread{[this, guard = QPointer<NextendoAccountDialog>(this)] {
-        auto fetched = WebService::NextendoApi::GetHistory();
+    std::thread{[this, guard = QPointer<OpenPakAccountDialog>(this)] {
+        auto fetched = WebService::OpenPakApi::GetHistory();
         if (!fetched.ok || !guard) {
             return;
         }

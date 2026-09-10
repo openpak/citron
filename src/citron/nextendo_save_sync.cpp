@@ -16,14 +16,14 @@
 
 #include "common/nextendo_compatible_titles.h"
 #include "common/logging.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "core/core.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/filesystem/filesystem.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 #ifdef CITRON_ENABLE_LIBARCHIVE
@@ -42,7 +42,7 @@ namespace {
 // neither (e.g. a non-Windows build without libarchive).
 bool IsEligible(u64 title_id) {
     return Nextendo::CompatibleTitles::Table().count(title_id) != 0 &&
-          Common::NextendoAccount::IsLinked();
+          Common::OpenPakAccount::IsLinked();
 }
 
 bool HasLocalContent(const FileSys::VirtualDir& dir) {
@@ -227,7 +227,7 @@ void Pull(Core::System& system, u64 title_id, bool force) {
     auto save_dir = system.GetFileSystemController().GetSaveDataFactory().GetTitleSaveDirectory(
         title_id);
     if (!force && HasLocalContent(save_dir)) {
-        LOG_INFO(Frontend, "Nextendo save pull {:016X}: local save present -> kept (no overwrite)",
+        LOG_INFO(Frontend, "OpenPak save pull {:016X}: local save present -> kept (no overwrite)",
                  title_id);
         return;
     }
@@ -235,7 +235,7 @@ void Pull(Core::System& system, u64 title_id, bool force) {
         return;
     }
 
-    const auto zip = WebService::NextendoApi::PullSave(fmt::format("{:016x}", title_id));
+    const auto zip = WebService::OpenPakApi::PullSave(fmt::format("{:016x}", title_id));
     if (!zip || zip->empty()) {
         return;
     }
@@ -246,7 +246,7 @@ void Pull(Core::System& system, u64 title_id, bool force) {
     const bool applied = UnzipToDirectoryPowerShell(*zip, save_dir->GetFullPath(), title_id);
 #endif
     if (applied) {
-        LOG_INFO(Frontend, "Nextendo save pull {:016X}: applied ({} B)", title_id, zip->size());
+        LOG_INFO(Frontend, "OpenPak save pull {:016X}: applied ({} B)", title_id, zip->size());
     }
 #else
     (void)system;
@@ -282,11 +282,11 @@ void UploadCaptured(u64 title_id, std::vector<u8> zip_bytes) {
         return;
     }
     const std::string error =
-        WebService::NextendoApi::PushSave(fmt::format("{:016x}", title_id), zip_bytes);
+        WebService::OpenPakApi::PushSave(fmt::format("{:016x}", title_id), zip_bytes);
     if (!error.empty()) {
-        LOG_WARNING(Frontend, "Nextendo save push {:016X} failed: {}", title_id, error);
+        LOG_WARNING(Frontend, "OpenPak save push {:016X} failed: {}", title_id, error);
     } else {
-        LOG_INFO(Frontend, "Nextendo save push {:016X}: {} B", title_id, zip_bytes.size());
+        LOG_INFO(Frontend, "OpenPak save push {:016X}: {} B", title_id, zip_bytes.size());
     }
 #else
     (void)title_id;

@@ -210,17 +210,17 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                             program_image.size() - module_start);
         if (build != stardew_build) {
             LOG_ERROR(Loader,
-                      "[Nextendo] Stardew: unsupported main build {}; certificate patch skipped",
+                      "[OpenPak] Stardew: unsupported main build {}; certificate patch skipped",
                       build);
         } else if (verify_offset + expected.size() > image.size() ||
                    !std::equal(expected.begin(), expected.end(), image.begin() + verify_offset)) {
             LOG_ERROR(Loader,
-                      "[Nextendo] Stardew: X509 verification prologue mismatch; certificate "
+                      "[OpenPak] Stardew: X509 verification prologue mismatch; certificate "
                       "patch skipped");
         } else {
             std::copy(replacement.begin(), replacement.end(), image.begin() + verify_offset);
             LOG_INFO(Loader,
-                     "[Nextendo] Stardew: build-scoped X509 certificate compatibility patch "
+                     "[OpenPak] Stardew: build-scoped X509 certificate compatibility patch "
                      "applied");
         }
         if (build != stardew_build) {
@@ -229,13 +229,13 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                    !std::equal(flag_expected.begin(), flag_expected.end(),
                                image.begin() + accept_flag_offset)) {
             LOG_ERROR(Loader,
-                      "[Nextendo] Stardew: certificate-acceptance flag read mismatch; "
+                      "[OpenPak] Stardew: certificate-acceptance flag read mismatch; "
                       "pin-bypass patch skipped");
         } else {
             std::copy(flag_replacement.begin(), flag_replacement.end(),
                       image.begin() + accept_flag_offset);
             LOG_INFO(Loader,
-                     "[Nextendo] Stardew: build-scoped certificate-acceptance flag bypass "
+                     "[OpenPak] Stardew: build-scoped certificate-acceptance flag bypass "
                      "applied");
         }
     }
@@ -261,7 +261,7 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
             std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(),
                       patchable_section.data());
         } else {
-            LOG_ERROR(Loader, "[Nextendo] Splatoon 3 built-in patch changed the image size "
+            LOG_ERROR(Loader, "[OpenPak] Splatoon 3 built-in patch changed the image size "
                               "unexpectedly; skipped");
         }
     }

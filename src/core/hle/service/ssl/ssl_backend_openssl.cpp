@@ -12,6 +12,8 @@
 #include <openssl/x509.h>
 
 #include "common/fs/file.h"
+#include "common/fs/fs_util.h"
+#include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/string_util.h"
 
@@ -34,6 +36,11 @@ std::once_flag one_time_init_flag;
 bool one_time_init_success = false;
 
 SSL_CTX* ssl_ctx;
+// [OpenPak] True once the OpenPak CA (config/openpak/ca.pem) is in the trust store. With it,
+// the redirected Nintendo names are verified like any other host; without it the old
+// verify-nothing behaviour stays, loudly, so an install that has not fetched the CA yet still
+// plays.
+bool openpak_ca_loaded = false;
 IOFile key_log_file; // only open if SSLKEYLOGFILE set in environment
 BIO_METHOD* bio_meth;
 
@@ -119,7 +126,7 @@ public:
                         if (pos2 != std::string::npos) {
                             effective_host.replace(pos2, 1, "lp1");
                         }
-                        LOG_INFO(Service_SSL, "[Nextendo] Recovered host '{}' for IP {}", effective_host, ip_str);
+                        LOG_INFO(Service_SSL, "[OpenPak] Recovered host '{}' for IP {}", effective_host, ip_str);
                     }
                 }
             }
@@ -138,10 +145,13 @@ public:
     }
 
     Result SetVerifyOption(u32 verify_option) override {
-        // [Nextendo] Always bypass certificate verification for self-hosted/redirected servers
-        skip_cert_verification = true;
-        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, bypassing cert verification for Nextendo", verify_option);
-        SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
+        // [OpenPak] With the OpenPak CA pinned, the redirected servers are verified against it
+        // like anything else. Without it, verification is off, as it was before.
+        skip_cert_verification = !openpak_ca_loaded;
+        if (skip_cert_verification) {
+            LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, no OpenPak CA pinned; verification off", verify_option);
+            SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
+        }
         return ResultSuccess;
     }
 
@@ -157,7 +167,7 @@ public:
                     if (pos != std::string::npos) {
                         last_host.replace(pos, 1, "lp1");
                     }
-                    LOG_INFO(Service_SSL, "[Nextendo] DoHandshake SNI injection host '{}' for IP {}", last_host, ip_str);
+                    LOG_INFO(Service_SSL, "[OpenPak] DoHandshake SNI injection host '{}' for IP {}", last_host, ip_str);
                     SSL_set1_host(ssl, last_host.c_str());
                     SSL_set_tlsext_host_name(ssl, last_host.c_str());
                 }
@@ -171,16 +181,18 @@ public:
             npln_wire = BuildAlpnWire(requested_alpn_protos);
         }
         if (!npln_wire.empty()) {
-            LOG_INFO(Service_SSL, "[Nextendo] NPLN host '{}': honoring game-requested ALPN ({} byte(s))",
+            LOG_INFO(Service_SSL, "[OpenPak] NPLN host '{}': honoring game-requested ALPN ({} byte(s))",
                      servername, npln_wire.size());
             SSL_set_alpn_protos(ssl, npln_wire.data(), static_cast<unsigned int>(npln_wire.size()));
         } else {
             SSL_set_alpn_protos(ssl, kHttp11Only, sizeof(kHttp11Only) - 1);
         }
 
-        // Bypassing verification for Nextendo compatibility
-        SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
-        SSL_set_verify_result(ssl, X509_V_OK);
+        if (!openpak_ca_loaded) {
+            // No CA to pin: verify nothing, as before the CA existed.
+            SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
+            SSL_set_verify_result(ssl, X509_V_OK);
+        }
         const int ret = SSL_do_handshake(ssl);
 
         if (ret <= 0) {
@@ -396,6 +408,20 @@ void OneTimeInit() {
         LOG_ERROR(Service_SSL, "SSL_CTX_set_default_verify_paths failed");
         CheckOpenSSLErrors();
         return;
+    }
+
+    // [OpenPak] Pin the OpenPak CA when it is present. The account layer fetches it from
+    // openpak.org over public TLS at sign-in; a hand-placed copy works too.
+    {
+        const auto ca_path = GetCitronPath(CitronPath::ConfigDir) / "openpak" / "ca.pem";
+        const std::string ca_str = PathToUTF8String(ca_path);
+        if (Exists(ca_path) && SSL_CTX_load_verify_locations(ssl_ctx, ca_str.c_str(), nullptr) == 1) {
+            openpak_ca_loaded = true;
+            LOG_INFO(Service_SSL, "[OpenPak] Pinned CA {}", ca_str);
+        } else {
+            ERR_clear_error();
+            LOG_WARNING(Service_SSL, "[OpenPak] No CA at {}: redirected servers are not verified. Sign in once to fetch it.", ca_str);
+        }
     }
 
     OneTimeInitLogFile();

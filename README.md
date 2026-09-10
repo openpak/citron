@@ -1,110 +1,49 @@
-# Citron Neo — Nextendo Network / NZ:P Edition
+# Citron — OpenPak edition
 
-A fork of the [Citron Neo](https://github.com/citron-neo/emulator) with two
-purposes:
+A fork of [Citron Neo](https://github.com/citron-neo/emulator) that plays supported Switch titles
+online on the [OpenPak](https://openpak.org) network: sign in with your OpenPak account and the
+emulator does the rest. No hosts-file edits, no external DNS, no certificate bypass.
 
-1. **Nextendo Network online play** — connect a Nextendo Network account and play supported titles
-   online from Citron, without hosts-file edits, external DNS, or manual SSL bypass.
-2. **Nazi Zombies: Portable (Emulator Edition)** — the emulator-side fixes this fork was
-   originally created for, and still carries.
+It started life as the Nextendo Network edition of Citron. That integration is GPL like Citron
+itself; this is the same code turned to face OpenPak's servers.
 
 > [!WARNING]
-> **This is a work in progress. Expect bugs.**
->
-> Online support is new, incomplete, and only lightly tested — largely by one person, on one
-> machine, against multiple games. Things will break. If you hit a problem, please
-> **[open an issue](../../issues)** and include:
->
-> - your `citron_log.txt` (Linux: `~/.local/share/citron/log/citron_log.txt`)
-> - the exact error code the game showed, if any (e.g. `2306-0802`)
-> - the game, its version, and what you were doing when it failed
->
-> A log makes the difference between a fixable report and a guess. For network problems, set the
-> log filter to `*:Info Service:Debug Service.SSL:Debug WebService:Debug` before reproducing.
+> **This is a work in progress. Expect bugs.** If you hit a problem, open an issue with your
+> `citron_log.txt` (Linux: `~/.local/share/citron/log/citron_log.txt`), the exact error code
+> the game showed, the game and its version, and what you were doing. For network problems,
+> set the log filter to `*:Info Service:Debug Service.SSL:Debug WebService:Debug` first.
 
----
-
-## Status
-
-Verified working: All officially supported titles.
+## How it works
 
 | | |
 | --- | --- |
-| Account sign-in | Browser-based, OAuth loopback + PKCE — the emulator never sees your password |
-| Hostname redirection | Nintendo online hostnames resolve to the configured Nextendo servers |
-| TLS | Handshake with recovered SNI, ALPN pinned to HTTP/1.1 |
-| Auth + secure server | Kerberos ticket, matchmaking, session entry |
-| NAT check | Both vantage points, sub-second |
-| Peer-to-peer | Hole-punching, races completed |
-| Play-time sync | Pushed to your Nextendo profile on game exit |
-| Presence | Published on sign-in and game start/stop |
-| Profile name | Local Switch profile renamed to your account nickname |
+| Account | Email and password, sent to openpak.org over public TLS and nowhere else. What comes back is an API token and the account's Switch identity: PID, friend code, and the token title servers use to know who is playing. |
+| Redirection | Nintendo's online hostnames resolve to the OpenPak server (`145.241.199.19` by default, from the Network settings page). |
+| Certificates | Signing in fetches the OpenPak CA into `config/openpak/ca.pem`; from the next launch the redirected names are verified against it. Without the file, verification is off and the log says so. |
+| Friends | The OpenPak friend graph, with the presence game servers report. Add by friend code, accept or decline. |
+| Cloud saves | Pulled on launch and pushed on exit through `/api/v1/me/saves`, versioned: a save pushed from a stale base is kept as a conflict, never dropped. Manage them at openpak.org/account/saves. |
+| Online counts | Players per title, from openpak.org's public status. |
+
+Not on OpenPak (yet), so the corresponding buttons answer "not available": lobby and recent
+players, reports, play history, BCAT seeds, chat rooms, editing your name or picture from the
+emulator. Use the website for those that exist there.
 
 ## Setup
 
 1. Build as you would upstream Citron (see `docs/`), or use a release build.
-2. Open the **NexTendo** menu and click **Enable Network Redirection**. It's off by default; the
-   server addresses are already filled in, so there's nothing to type.
-3. Still in the **NexTendo** menu, click **Sign In** and complete sign-in in your browser.
+2. In the **OpenPak** menu, enable **Network Redirection**. The server address is already set.
+3. In the same menu, choose **Sign In** and enter your OpenPak email and password.
 4. Launch a supported game and enter its online mode.
 
-`NEXTENDO_SERVER_IP`, `NEXTENDO_NAT_IP` and `NEXTENDO_API` are honoured as environment overrides
-if you need to point at something other than the default servers; the API override only accepts
-loopback or HTTPS on the Nextendo domain, because those requests carry your account token.
+Environment overrides: `OPENPAK_SERVER_IP` (the redirect target), `OPENPAK_API` (the account
+API, https or loopback only, since it carries your token), `OPENPAK_ENABLE=1` for the command
+line build, `OPENPAK_PHOTON_IP` for titles on Photon.
 
-**Friends, requests, and recently played** live under **NexTendo → Open Account Page** — add by
-friend code, accept or decline requests, see who's online.
+## Building
 
-> [!CAUTION]
-> Your Network ID (PID) is effectively a credential on this network: the service accepts a bare PID
-> as an identity. This fork deliberately never displays or logs it. Don't paste it anywhere, and
-> don't ship `nextendo_account.txt` — it holds your session token — inside a build or archive.
+The upstream instructions apply. The GitHub workflows under `.github/workflows` build Linux
+(x86_64, x86_64-v3, aarch64 AppImages), Windows, macOS and Android on dispatch.
 
-## Credits and how this was built
+## Licence
 
-This is [Citron](https://git.citron-emu.org/citron/emu), itself derived from
-[yuzu](https://github.com/yuzu-emu/yuzu). All emulation — CPU, GPU, audio, input, filesystem — is
-theirs. This fork's changes are confined to the networking and account layers plus the surrounding
-UI.
-
-The Nextendo Network client behaviour was worked out by **studying the reference implementation**,
-[Ryujinx-Nextendo](https://github.com/NextendoNetwork/Ryujinx-Nextendo), together with the
-[published server sources](https://github.com/NextendoNetwork) — which document the protocol, the
-endpoints, and the reasons behind a number of non-obvious decisions far better than black-box
-guessing ever would. Credit where it is due: several fixes here exist because their comments
-explained *why* something was necessary.
-
-**No code from that project is copied into this one.** It could not be: it is licensed under
-PolyForm Shield 1.0.0, which is incompatible with Citron's GPL. Everything here is an independent
-C++ implementation written against Citron's own IPC, socket, TLS and configuration layers, which
-differ substantially from Ryujinx's. Where the two diverge, it is deliberate:
-
-Also referenced: [Kinnay's NintendoClients](https://github.com/kinnay/NintendoClients) for NEX and
-error-code documentation, and [switchbrew](https://switchbrew.org) for service definitions.
-
-## Security
-
-- **Sign-in never touches your password.** It's browser-based OAuth loopback + PKCE — the
-  emulator only ever sees a short-lived session token, never your credentials.
-- **Your Network ID (PID) is never displayed or logged.** It functions as a bearer credential on
-  this network, so this fork deliberately keeps it out of the UI and out of `citron_log.txt`.
-- **Peer IP addresses are redacted in logs.** Connection logs (socket bind/connect/send/receive,
-  and room join/leave/kick/ban events) mask the address before it's written, so a log file pasted
-  into a bug report or Discord doesn't hand out another player's IP.
-- **Redirection is off by default.** It only activates once you explicitly enable it from the
-  NexTendo menu — an unconfigured toggle behaves like stock Citron.
-- **The API override is restricted to loopback or HTTPS on the Nextendo domain**, since that
-  request carries your account token.
-- Your session token lives in `nextendo_account.txt` — don't share it or ship it inside a build or
-  archive.
-
-## Legal
-
-Licensed **GPL-3.0-or-later**, as required by Citron. See [LICENSE](LICENSE).
-
-This project ships no Nintendo code, keys, firmware or games, and is not affiliated with, endorsed
-by, or associated with Nintendo. You must supply your own legally dumped games and system files,
-exactly as with upstream Citron. "Nintendo Switch" and all game titles are trademarks of their
-respective owners.
-
-Nextendo Network is a community-run service, independent of this fork and of Nintendo.
+GPL-2.0-or-later, like Citron.

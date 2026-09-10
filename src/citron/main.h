@@ -47,7 +47,7 @@ class ControllerDialog;
 class QDialog;
 class QLabel;
 class MultiplayerState;
-class NextendoAccountDialog;
+class OpenPakAccountDialog;
 class NextendoController;
 class NextendoRoomOverlay;
 class NextendoToast;
@@ -463,7 +463,7 @@ private:
     NextendoController* nextendo_controller = nullptr;
     NextendoToast* nextendo_toast = nullptr;
     QDialog* nextendo_signin_dialog = nullptr;
-    NextendoAccountDialog* nextendo_account_dialog_instance = nullptr;
+    OpenPakAccountDialog* nextendo_account_dialog_instance = nullptr;
     QString pending_chat_invite_room_id;
     // The room itself lives in this persistent floating overlay (not tied to any
     // menu/toast click's lifetime), same pattern as multiplayer_room_overlay below

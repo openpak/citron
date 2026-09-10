@@ -12,7 +12,7 @@
 #include <QTimer>
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace Nextendo::OnlineCounts {
@@ -29,7 +29,7 @@ public:
     void Poll() {
 #ifdef ENABLE_WEB_SERVICE
         std::thread{[] {
-            auto counts = WebService::NextendoApi::GetOnlineCounts();
+            auto counts = WebService::OpenPakApi::GetOnlineCounts();
             std::scoped_lock lock{g_mutex};
             g_counts = std::move(counts);
         }}.detach();

@@ -6,7 +6,7 @@
 #include "citron/main.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace {
@@ -20,7 +20,7 @@ QString NextendoGateHint(Result error) {
         return {};
     }
 
-    const auto status = WebService::NextendoApi::GetOnlineStatus();
+    const auto status = WebService::OpenPakApi::GetOnlineStatus();
     if (!status.queried || status.allow || status.message.empty()) {
         return {};
     }

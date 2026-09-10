@@ -11,7 +11,7 @@
 #include <vector>
 #include "common/common_types.h"
 
-namespace WebService::NextendoApi {
+namespace WebService::OpenPakApi {
 
 struct LoginResult {
     bool ok = false;
@@ -19,7 +19,8 @@ struct LoginResult {
     u64 pid = 0;
     std::string username;
     std::string friend_code;
-    std::string token;
+    std::string token;       // the nnex token the adapter minted; rides in the BAAS id_token
+    std::string bearer;      // the website API token; only ever sent to the website
 };
 
 // Reason a NEX login was refused, as evaluated by the account server's gates.
@@ -30,14 +31,10 @@ struct OnlineStatus {
     std::string message;     // Human-readable text for the reason.
 };
 
-// The API base url. NEXTENDO_API overrides it; only https or loopback is accepted, because this
+// The API base url. OPENPAK_API overrides it; only https or loopback is accepted, because this
 // request carries the account token.
 std::string BaseUrl();
 
-// Signs in through the user's browser (OAuth loopback + PKCE), so the emulator never sees the
-// e-mail or password: password login on /api/login is website-only, behind a captcha. `open_url` is
-// handed the authorize URL to open. Blocks until the browser reaches the loopback callback.
-LoginResult SignInWithBrowser(const std::function<void(const std::string&)>& open_url);
 
 // Uses the stored account token. Answers only about the caller's own account.
 OnlineStatus GetOnlineStatus();
@@ -56,6 +53,7 @@ void SyncHistory(const std::vector<HistoryEntry>& entries);
 
 struct Friend {
     u64 pid = 0;
+    std::string account_id;  // the OpenPak account behind the pid; what the website API keys on
     std::string name;        // console nickname if set, else account username
     std::string friend_code;
     s32 presence_status = 0; // 0 offline, 1 online, 2 in a game
@@ -227,4 +225,4 @@ HistoryList GetHistory();
 // Round-trip time to the backend's /api/health in milliseconds, or nullopt on failure.
 std::optional<int> PingBackend();
 
-} // namespace WebService::NextendoApi
+} // namespace WebService::OpenPakApi

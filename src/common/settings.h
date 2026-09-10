@@ -732,16 +732,16 @@ struct Values {
                                            Category::Network};
     Setting<std::string> lobby_api_url{linkage, "api.ynet-fun.xyz", "lobby_api_url",
                                        Category::Network};
-    Setting<bool> enable_nextendo{linkage, false, "enable_nextendo", Category::Network};
-    Setting<std::string> nextendo_server_ip{linkage, "51.178.29.194", "nextendo_server_ip",
+    Setting<bool> enable_openpak{linkage, false, "enable_openpak", Category::Network};
+    Setting<std::string> openpak_server_ip{linkage, "145.241.199.19", "openpak_server_ip",
                                             Category::Network};
-    Setting<std::string> nextendo_nat_ip{linkage, "164.132.111.120", "nextendo_nat_ip",
+    Setting<std::string> openpak_nat_ip{linkage, "", "openpak_nat_ip",
                                          Category::Network};
-    Setting<std::string> nextendo_pid{linkage, "", "nextendo_pid", Category::Network};
+    Setting<std::string> openpak_pid{linkage, "", "openpak_pid", Category::Network};
     // Governs the automatic pull-on-boot/push-on-stop cloud save sync only -- the manual
     // "Download Save" button in the Nextendo Account dialog is an explicit per-click action
     // and isn't gated by this, since that's already opt-in every time.
-    Setting<bool> nextendo_cloud_sync_enabled{linkage, true, "nextendo_cloud_sync_enabled",
+    Setting<bool> openpak_cloud_sync_enabled{linkage, true, "openpak_cloud_sync_enabled",
                                               Category::Network};
 
     // WebService

@@ -392,7 +392,7 @@ void KScheduler::SwitchThread(KThread* next_thread) {
         const u64 cur_pc = cur_thread ? cur_thread->GetContext().pc : 0;
         const u64 cur_lr = cur_thread ? cur_thread->GetContext().lr : 0;
         LOG_INFO(Kernel,
-                 "[Nextendo][SCHED-WATCH] core={} {}(id={},prio={},pc={:#x},lr={:#x}) -> {}(id={},prio={})",
+                 "[OpenPak][SCHED-WATCH] core={} {}(id={},prio={},pc={:#x},lr={:#x}) -> {}(id={},prio={})",
                  m_core_id, cur_thread ? "thread" : "null", cur_thread ? cur_thread->GetThreadId() : 0,
                  cur_thread ? cur_thread->GetPriority() : -1, cur_pc, cur_lr,
                  next_thread == m_idle_thread ? "idle" : "thread", next_thread->GetThreadId(),

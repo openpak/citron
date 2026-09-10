@@ -41,7 +41,7 @@
 #include "citron/nzp_online_count.h"
 #include "citron/uisettings.h"
 #include "citron/util/image_cache.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 
 namespace {
 void DrawShadowedText(QPainter* painter, const QRect& rect, int flags, const QString& text,
@@ -846,7 +846,7 @@ void GameListDelegate::PaintCompatibility(QPainter* painter, const QRect& rect,
 void GameListDelegate::PaintOnline(QPainter* painter, const QRect& rect,
                                    const QStyleOptionViewItem& option,
                                    const QModelIndex& index) const {
-    if (!Common::NextendoAccount::IsLinked()) {
+    if (!Common::OpenPakAccount::IsLinked()) {
         PaintDefault(painter, rect, option, index);
         return;
     }
@@ -912,7 +912,7 @@ void GameListDelegate::PaintOnline(QPainter* painter, const QRect& rect,
     };
 
     int x = rect.left() + margin;
-    x = draw_pill(x, pill_y, tr("Nextendo: %1 online").arg(players), QColor(50, 195, 85));
+    x = draw_pill(x, pill_y, tr("OpenPak: %1 online").arg(players), QColor(50, 195, 85));
     if (is_nzp || needs_update) {
         draw_pill(x, pill_y, version_pill_text, QColor(0, 190, 255));
     }

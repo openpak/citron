@@ -36,7 +36,7 @@
 #include "citron/theme.h"
 #include "citron/uisettings.h"
 #include "ui_nextendo_chat_room.h"
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 
 namespace {
 QColor PlayerColorForPid(u64 pid) {
@@ -360,7 +360,7 @@ void NextendoChatRoom::FetchAvatar(u64 pid) {
     avatar_cache[pid] = QString{};
 #ifdef ENABLE_WEB_SERVICE
     std::thread{[this, pid, guard = QPointer<NextendoChatRoom>(this)] {
-        const std::string b64 = WebService::NextendoApi::GetAvatarByPid(pid);
+        const std::string b64 = WebService::OpenPakApi::GetAvatarByPid(pid);
         if (b64.empty()) {
             return;
         }
@@ -692,7 +692,7 @@ void NextendoChatRoom::ReportPlayer(u64 pid, const QString& name) {
     reason_combo->addItem(tr("Inappropriate avatar"), QStringLiteral("avatar"));
     reason_combo->addItem(tr("Harassment"), QStringLiteral("harassment"));
     reason_combo->addItem(tr("Griefing"), QStringLiteral("griefing"));
-    reason_combo->addItem(tr("Impersonating a Nextendo account"), QStringLiteral("impersonation"));
+    reason_combo->addItem(tr("Impersonating a OpenPak account"), QStringLiteral("impersonation"));
     reason_combo->addItem(tr("Other"), QStringLiteral("other"));
 
     auto* comment_edit = new QLineEdit(&dialog);
@@ -723,7 +723,7 @@ void NextendoChatRoom::ReportPlayer(u64 pid, const QString& name) {
     const std::string comment = comment_edit->text().toStdString();
 
     std::thread{[pid, reason, comment, guard = QPointer<NextendoChatRoom>(this)] {
-        const std::string error = WebService::NextendoApi::ReportPlayer(pid, reason, comment);
+        const std::string error = WebService::OpenPakApi::ReportPlayer(pid, reason, comment);
         QMetaObject::invokeMethod(
             qApp,
             [guard, error] {

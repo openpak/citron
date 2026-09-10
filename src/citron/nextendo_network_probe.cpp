@@ -15,7 +15,7 @@
 #include "common/settings.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace {
@@ -50,9 +50,9 @@ void NextendoNetworkProbe::ProbeNat() {
     connect(nat_socket, &QUdpSocket::readyRead, this, &NextendoNetworkProbe::OnNatReadyRead);
 
     const QHostAddress host1(
-        GetConfiguredHost(Settings::values.nextendo_server_ip.GetValue(), "NEXTENDO_SERVER_IP"));
+        GetConfiguredHost(Settings::values.openpak_server_ip.GetValue(), "OPENPAK_SERVER_IP"));
     const QHostAddress host2(
-        GetConfiguredHost(Settings::values.nextendo_nat_ip.GetValue(), "NEXTENDO_NAT_IP"));
+        GetConfiguredHost(Settings::values.openpak_nat_ip.GetValue(), "OPENPAK_NAT_IP"));
 
     nat_targets.clear();
     nat_external_ports.clear();
@@ -136,7 +136,7 @@ void NextendoNetworkProbe::Finish(NatStatus status) {
 void NextendoNetworkProbe::PingBackend() {
 #ifdef ENABLE_WEB_SERVICE
     std::thread{[this] {
-        const auto ms = WebService::NextendoApi::PingBackend();
+        const auto ms = WebService::OpenPakApi::PingBackend();
         QMetaObject::invokeMethod(
             this, [this, ms] { emit PingResult(ms.value_or(-1)); }, Qt::QueuedConnection);
     }}.detach();

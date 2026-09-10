@@ -65,13 +65,13 @@ std::pair<QColor, QColor> ColorsForTab(int tab) {
 } // namespace
 
 NextendoPopulationDialog::NextendoPopulationDialog(QWidget* parent) : QDialog(parent) {
-    setWindowTitle(tr("Nextendo Population"));
+    setWindowTitle(tr("OpenPak Population"));
     setFixedSize(561, 367);
 
     auto* layout = new QVBoxLayout(this);
 
     auto* description = new QLabel(
-        tr("Average Nextendo online population by hour, sourced from a community-run scraper of "
+        tr("Average OpenPak online population by hour, sourced from a community-run scraper of "
            "the public online-count endpoint. Updated every hour (with live updates)."));
     description->setWordWrap(true);
     layout->addWidget(description);

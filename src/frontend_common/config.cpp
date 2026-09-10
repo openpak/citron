@@ -121,7 +121,7 @@ void Config::SetUpIni() {
     }
     fclose(fp);
 
-    // [Nextendo] nextendo_server_ip/nextendo_nat_ip/nextendo_pid used to live under
+    // [Nextendo] openpak_server_ip/openpak_nat_ip/openpak_pid used to live under
     // Category::Services before being moved to Category::Network. No Setting<> has been
     // tagged Category::Services since, so ReadCategory/SaveCategory(Services) is a no-op --
     // but SimpleIni never clears a section it doesn't write to, so any config file written by

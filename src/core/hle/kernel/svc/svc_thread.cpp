@@ -43,7 +43,7 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
             trace_str += fmt::format("\n    {}+0x{:x} ({})", entry.module, entry.offset, entry.name);
         }
         LOG_INFO(Kernel_SVC,
-                 "[Nextendo][DIAG] CreateThread entry_point=0x{:08X} caller backtrace:{}",
+                 "[OpenPak][DIAG] CreateThread entry_point=0x{:08X} caller backtrace:{}",
                  entry_point, trace_str);
 
         // [Nextendo][DIAG] One-shot absolute-base resolution for guest modules seen in a
@@ -57,7 +57,7 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
             for (const auto& entry : backtrace) {
                 if (entry.module.find("EOSSDK") != std::string::npos &&
                     reported_modules.insert(entry.module).second) {
-                    LOG_INFO(Kernel_SVC, "[Nextendo][DIAG] Module '{}' runtime base = 0x{:X}",
+                    LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] Module '{}' runtime base = 0x{:X}",
                              entry.module, entry.original_address - entry.offset);
                 }
             }
@@ -151,7 +151,7 @@ void SleepThread(Core::System& system, s64 ns) {
     std::chrono::steady_clock::time_point diag_sleep_start{};
     if (diag_sleep) {
         diag_sleep_start = std::chrono::steady_clock::now();
-        LOG_INFO(Kernel_SVC, "[Nextendo][DIAG] SleepThread starting, requested={}ms",
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] SleepThread starting, requested={}ms",
                  ns / 1'000'000);
     }
 
@@ -179,7 +179,7 @@ void SleepThread(Core::System& system, s64 ns) {
             const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                          std::chrono::steady_clock::now() - diag_sleep_start)
                                          .count();
-            LOG_INFO(Kernel_SVC, "[Nextendo][DIAG] SleepThread resolved after {}ms wall-clock",
+            LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] SleepThread resolved after {}ms wall-clock",
                      elapsed_ms);
         }
     } else if (yield_type == Svc::YieldType::WithoutCoreMigration) {

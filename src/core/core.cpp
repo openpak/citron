@@ -37,7 +37,7 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "common/string_util.h"
@@ -451,7 +451,7 @@ struct System::Impl {
             room_member->SendGameInfo(game_info);
         }
 
-        Common::NextendoAccount::WriteGuestBridge(
+        Common::OpenPakAccount::WriteGuestBridge(
             Common::FS::GetCitronPath(Common::FS::CitronPath::SDMCDir));
 
         status = SystemResultStatus::Success;

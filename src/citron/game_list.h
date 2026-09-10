@@ -179,7 +179,7 @@ signals:
     void ShowList(bool show);
     void PopulatingCompleted();
     void SaveConfig();
-    void OpenNextendoAccountRequested();
+    void OpenOpenPakAccountRequested();
 
 public slots:
     void OnConfigurationChanged();

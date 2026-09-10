@@ -1225,7 +1225,7 @@ GameList::GameList(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
         break;
     }
     connect(carousel_view, &GameCarouselView::ProfileClicked, this,
-            &GameList::OpenNextendoAccountRequested);
+            &GameList::OpenOpenPakAccountRequested);
 
     connect(carousel_view, &GameCarouselView::BackdropThemeChanged, this, [this](int theme) {
         UISettings::values.carousel_backdrop_theme.SetValue(theme);
@@ -3120,7 +3120,7 @@ void GameList::DonePopulating(const QStringList& watch_list) {
                 if (title_id != 0 && main_window->NextendoByamlRequired(title_id) &&
                     !main_window->NextendoByamlInstalled(title_id) &&
                     !main_window->NextendoByamlSkipped(title_id)) {
-                    LOG_INFO(Frontend, "Nextendo BCAT: auto-downloading schedule for {:016X}",
+                    LOG_INFO(Frontend, "OpenPak BCAT: auto-downloading schedule for {:016X}",
                              title_id);
                     main_window->SilentlyDownloadNextendoByaml(title_id);
                 }

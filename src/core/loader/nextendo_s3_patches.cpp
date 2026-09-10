@@ -65,7 +65,7 @@ std::vector<u8> ApplyOne(std::vector<u8> nso, std::span<const u8> ips_bytes,
     auto in_file = std::make_shared<FileSys::VectorVfsFile>(nso, "nso");
     const auto patched = FileSys::PatchIPS(in_file, MakeIpsFile(ips_bytes));
     if (patched == nullptr) {
-        LOG_ERROR(Loader, "[Nextendo] Splatoon 3: {} patch failed to apply", what);
+        LOG_ERROR(Loader, "[OpenPak] Splatoon 3: {} patch failed to apply", what);
         return nso;
     }
     return patched->ReadAllBytes();
@@ -90,7 +90,7 @@ std::vector<u8> ApplyIfMatch(const std::array<u8, 0x20>& build_id, std::vector<u
             ++applied_count;
         }
 
-        LOG_INFO(Loader, "[Nextendo] Splatoon 3: {} built-in patch(es) applied (build {})",
+        LOG_INFO(Loader, "[OpenPak] Splatoon 3: {} built-in patch(es) applied (build {})",
                  applied_count, build_id_hex);
         return nso;
     }
@@ -98,7 +98,7 @@ std::vector<u8> ApplyIfMatch(const std::array<u8, 0x20>& build_id, std::vector<u
     // Rien ne correspond. Sur « main », c'est fatal pour l'en ligne : on le dit fort, une fois.
     if (module_name == "main") {
         LOG_ERROR(Loader,
-                  "[Nextendo] Splatoon 3 : AUCUN correctif integre pour ce build ({}). L'en ligne "
+                  "[OpenPak] Splatoon 3 : AUCUN correctif integre pour ce build ({}). L'en ligne "
                   "NE FONCTIONNERA PAS : l'epinglage de certificat du jeu reste actif, la "
                   "connexion "
                   "NPLN echouera en 2321-4992 apres une poignee de main TLS pourtant reussie. "

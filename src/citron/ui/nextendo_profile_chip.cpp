@@ -12,11 +12,11 @@
 
 #include "citron/nextendo_avatar_cache.h"
 #include "citron/uisettings.h"
-#include "common/nextendo_account.h"
+#include "common/openpak_account.h"
 #include "common/nextendo_avatar.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/nextendo_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace {
@@ -53,13 +53,13 @@ void NextendoProfileChip::SetScale(qreal scale) {
 
 void NextendoProfileChip::RefreshAvatar() {
 #ifdef ENABLE_WEB_SERVICE
-    if (!Common::NextendoAccount::IsLinked()) {
+    if (!Common::OpenPakAccount::IsLinked()) {
         avatar = QPixmap();
         update();
         return;
     }
     std::thread{[this] {
-        auto profile = WebService::NextendoApi::GetProfile();
+        auto profile = WebService::OpenPakApi::GetProfile();
         if (!profile.ok) {
             return;
         }
@@ -87,9 +87,9 @@ void NextendoProfileChip::mousePressEvent(QMouseEvent* event) {
 }
 
 void NextendoProfileChip::enterEvent(QEnterEvent*) {
-    const bool linked = Common::NextendoAccount::IsLinked();
-    name_label->setText(linked ? QString::fromStdString(Common::NextendoAccount::GetUsername())
-                               : tr("Sign In to Nextendo"));
+    const bool linked = Common::OpenPakAccount::IsLinked();
+    name_label->setText(linked ? QString::fromStdString(Common::OpenPakAccount::GetUsername())
+                               : tr("Sign In to OpenPak"));
     name_label->adjustSize();
     name_label->show();
 }
@@ -102,7 +102,7 @@ void NextendoProfileChip::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    const bool linked = Common::NextendoAccount::IsLinked();
+    const bool linked = Common::OpenPakAccount::IsLinked();
     const QString hex = QString::fromStdString(UISettings::values.accent_color.GetValue());
     const QColor accent = QColor(hex).isValid() ? QColor(hex) : QColor(0, 150, 255);
 
@@ -119,7 +119,7 @@ void NextendoProfileChip::paintEvent(QPaintEvent*) {
         p.drawPixmap(circle.toRect(), avatar);
         p.restore();
     } else {
-        const QString name = linked ? QString::fromStdString(Common::NextendoAccount::GetUsername())
+        const QString name = linked ? QString::fromStdString(Common::OpenPakAccount::GetUsername())
                                     : QString{};
         p.setPen(linked ? Qt::white : QColor(150, 150, 158));
         QFont f = font();

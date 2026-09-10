@@ -68,7 +68,7 @@ void MaybeLogNextendoDeadlineWatch(int64_t timeout_ns) {
     if (timeout_ns < MinInterestingNs) {
         return; // short polling-interval waits, not a deadline
     }
-    LOG_INFO(Kernel_SVC, "[Nextendo][DEADLINE-WATCH] WaitSynchronization timeout_ns={} ({:.3f} ms)",
+    LOG_INFO(Kernel_SVC, "[OpenPak][DEADLINE-WATCH] WaitSynchronization timeout_ns={} ({:.3f} ms)",
              timeout_ns, static_cast<double>(timeout_ns) / 1'000'000.0);
 }
 } // namespace
@@ -147,7 +147,7 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
     std::chrono::steady_clock::time_point diag_wait_start{};
     if (diag_infinite_wait) {
         diag_wait_start = std::chrono::steady_clock::now();
-        LOG_INFO(Kernel_SVC, "[Nextendo][DIAG] WaitSynchronization INFINITE wait starting, "
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] WaitSynchronization INFINITE wait starting, "
                              "num_handles={}",
                  num_handles);
     }
@@ -192,7 +192,7 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
             // CreateEvent/SignalEvent's own diagnostics (svc_event.cpp) -- see those comments for
             // why object address, not handle number, is the correlation key.
             LOG_INFO(Kernel_SVC,
-                     "[Nextendo][DIAG] WaitSynchronization ONE-SHOT probe (timeout=0) handle=0x{:X} "
+                     "[OpenPak][DIAG] WaitSynchronization ONE-SHOT probe (timeout=0) handle=0x{:X} "
                      "type={} readable_event_obj={}",
                      handles[0], objs[0]->GetTypeObj().GetName(), static_cast<const void*>(objs[0]));
         }
@@ -225,7 +225,7 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
     // this specific probe found its handle already signaled (res==Success) or not (ResultTimedOut,
     // matching the Sixth Update's decompiled `w0 == 0xea01` bail branch).
     if (timeout_ns == 0 && num_handles == 1 && IsNextendoDeadlineWatchActive()) {
-        LOG_INFO(Kernel_SVC, "[Nextendo][DIAG] WaitSynchronization ONE-SHOT probe result=0x{:X}",
+        LOG_INFO(Kernel_SVC, "[OpenPak][DIAG] WaitSynchronization ONE-SHOT probe result=0x{:X}",
                  res.raw);
     }
 
@@ -234,7 +234,7 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
                                      std::chrono::steady_clock::now() - diag_wait_start)
                                      .count();
         LOG_INFO(Kernel_SVC,
-                 "[Nextendo][DIAG] WaitSynchronization INFINITE wait resolved after {}ms "
+                 "[OpenPak][DIAG] WaitSynchronization INFINITE wait resolved after {}ms "
                  "wall-clock, out_index={}, result=0x{:X}",
                  elapsed_ms, *out_index, res.raw);
     }
