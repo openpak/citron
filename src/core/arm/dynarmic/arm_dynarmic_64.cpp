@@ -71,7 +71,7 @@ constexpr u64 MailboxVA = 0x83F70920ULL;
 // then tail-jumps into NetworkManager.Join(code, false) -- the same real, complete, working
 // connect path a manual code-entry UI would use (confirmed via full disassembly: validates
 // the code, sets sessionName, and calls Fusion's own NetworkRunner.JoinSessionLobby).
-constexpr u32 TrampolineWords[] = {
+[[maybe_unused]] constexpr u32 TrampolineWords[] = {
     0xd100c3ff, 0xf9000bf4, 0xb9401ba9, 0x7100013f, 0x540004cd, 0x7110013f, 0x5400048c,
     0xf9000fe9, 0xd2812400, 0xf2b07ee0, 0xf9400000, 0xb4000340, 0xaa0003f3, 0xaa0903e0,
     0x9719b737, 0xf90013e0, 0xf9400be8, 0xb9401be9, 0xf94013ea, 0x91008108, 0x9100514a,
