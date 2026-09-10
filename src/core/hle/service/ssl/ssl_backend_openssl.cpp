@@ -12,6 +12,7 @@
 #include <openssl/x509.h>
 
 #include "common/fs/file.h"
+#include "common/fs/fs.h"
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
@@ -415,7 +416,7 @@ void OneTimeInit() {
     {
         const auto ca_path = GetCitronPath(CitronPath::ConfigDir) / "openpak" / "ca.pem";
         const std::string ca_str = PathToUTF8String(ca_path);
-        if (Exists(ca_path) && SSL_CTX_load_verify_locations(ssl_ctx, ca_str.c_str(), nullptr) == 1) {
+        if (Common::FS::Exists(ca_path) && SSL_CTX_load_verify_locations(ssl_ctx, ca_str.c_str(), nullptr) == 1) {
             openpak_ca_loaded = true;
             LOG_INFO(Service_SSL, "[OpenPak] Pinned CA {}", ca_str);
         } else {
