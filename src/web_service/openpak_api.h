@@ -35,6 +35,14 @@ struct OnlineStatus {
 // request carries the account token.
 std::string BaseUrl();
 
+// Signs in with the OpenPak account's email and password: mints a website API token, then asks
+// for the account's Switch identity. Also fetches the OpenPak CA into config/openpak/ca.pem so
+// the redirected Nintendo names can be verified from the next launch on.
+LoginResult SignIn(const std::string& email, const std::string& password);
+
+// Fetches the OpenPak CA over public TLS and stores it for the SSL service. Best effort.
+bool FetchCA();
+
 
 // Uses the stored account token. Answers only about the caller's own account.
 OnlineStatus GetOnlineStatus();
