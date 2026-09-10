@@ -5,7 +5,7 @@
 
 #include "common/hex_util.h"
 #include "common/legacy_friends.h"
-#include "web_service/legacy_api.h"
+#include "web_service/openpak_api.h"
 #include "core/core_timing.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"

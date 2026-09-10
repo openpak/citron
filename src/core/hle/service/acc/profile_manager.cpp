@@ -9,7 +9,7 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 #include <ranges>
 #include "common/settings.h"
 #include "common/string_util.h"

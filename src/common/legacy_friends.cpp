@@ -7,7 +7,7 @@
 #include <thread>
 #include <utility>
 
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 #include "common/legacy_friends.h"
 
 namespace Common::OpenPakFriends {

@@ -15,7 +15,7 @@
 #include "common/settings.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/legacy_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace {
@@ -50,9 +50,9 @@ void ExternalReferenceProbe::ProbeNat() {
     connect(nat_socket, &QUdpSocket::readyRead, this, &ExternalReferenceProbe::OnNatReadyRead);
 
     const QHostAddress host1(
-        GetConfiguredHost(Settings::values.legacy_server_ip.GetValue(), "OPENPAK_LEGACY_SERVER_IP"));
+        GetConfiguredHost(Settings::values.openpak_server_ip.GetValue(), "OPENPAK_SERVER_IP"));
     const QHostAddress host2(
-        GetConfiguredHost(Settings::values.legacy_nat_ip.GetValue(), "OPENPAK_LEGACY_NAT_IP"));
+        GetConfiguredHost(Settings::values.openpak_nat_ip.GetValue(), "OPENPAK_NAT_IP"));
 
     nat_targets.clear();
     nat_external_ports.clear();

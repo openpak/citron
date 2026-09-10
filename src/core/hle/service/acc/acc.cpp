@@ -19,7 +19,7 @@
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 #include "common/legacy_avatar.h"
 #include "common/legacy_compatible_titles.h"
 #include "common/settings.h"
@@ -55,12 +55,12 @@ namespace Service::Account {
 namespace {
 
 // The BAAS id_token read through LoadIdTokenCache. NEX parses it before logging in, so it must be
-// a real RS256 JWT. Key comes from OPENPAK_LEGACY_BAAS_SIGNING_KEY or legacy_baas.pem, else generated.
+// a real RS256 JWT. Key comes from OPENPAK_BAAS_SIGNING_KEY or openpak_baas.pem, else generated.
 constexpr const char* BaasIssuer = "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
 constexpr const char* BaasJku =
     "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates";
 constexpr const char* BaasAudience = "ed9e2f05d286f7b8";
-constexpr const char* BaasKeyId = "legacy-baas-key-1";
+constexpr const char* BaasKeyId = "openpak-citron-key-1";
 
 std::string Base64UrlEncode(std::span<const u8> data) {
     static constexpr std::string_view alphabet =
@@ -107,10 +107,10 @@ EVP_PKEY* GetBaasSigningKey() {
     static EVP_PKEY* key = []() -> EVP_PKEY* {
         std::string pem;
 
-        if (const char* env = std::getenv("OPENPAK_LEGACY_BAAS_SIGNING_KEY"); env && *env) {
+        if (const char* env = std::getenv("OPENPAK_BAAS_SIGNING_KEY"); env && *env) {
             pem = env;
         } else if (const auto file = Common::FS::ReadStringFromFile(
-                       std::filesystem::path{"legacy_baas.pem"}, Common::FS::FileType::TextFile);
+                       std::filesystem::path{"openpak_baas.pem"}, Common::FS::FileType::TextFile);
                    !file.empty()) {
             pem = file;
         }
@@ -132,7 +132,7 @@ EVP_PKEY* GetBaasSigningKey() {
         // No key supplied: reuse a persisted auto-generated one so the identity (and its
         // public JWK) stays stable across launches instead of a fresh key every process start.
         const auto auto_key_path =
-            Common::FS::GetCitronPath(Common::FS::CitronPath::KeysDir) / "legacy_baas_auto.pem";
+            Common::FS::GetCitronPath(Common::FS::CitronPath::KeysDir) / "openpak_baas_auto.pem";
         if (const auto existing =
                 Common::FS::ReadStringFromFile(auto_key_path, Common::FS::FileType::TextFile);
             existing.find("BEGIN") != std::string::npos) {
@@ -254,10 +254,10 @@ std::string BuildIdToken() {
     // whatever the caller expects. Unset by default (family rule): the historical random sub
     // keeps being served, so NEX titles are unaffected.
     std::string sub = RandomHex(0x10);
-    if (const char* forced_sub = std::getenv("OPENPAK_LEGACY_BAAS_SUB");
+    if (const char* forced_sub = std::getenv("OPENPAK_BAAS_SUB");
         forced_sub != nullptr && *forced_sub != '\0') {
         sub = forced_sub;
-        LOG_INFO(Service_ACC, "[OpenPak] BAAS id_token uses OPENPAK_LEGACY_BAAS_SUB override");
+        LOG_INFO(Service_ACC, "[OpenPak] BAAS id_token uses OPENPAK_BAAS_SUB override");
     }
 
     const std::string payload = fmt::format(
@@ -1118,7 +1118,7 @@ private:
             if (const u64 linked = Common::OpenPakAccount::GetPid(); linked != 0) {
                 return linked;
             }
-            std::string pid_setting = Settings::values.legacy_pid.GetValue();
+            std::string pid_setting = Settings::values.openpak_pid.GetValue();
             if (!pid_setting.empty()) {
                 try {
                     return std::stoull(pid_setting);

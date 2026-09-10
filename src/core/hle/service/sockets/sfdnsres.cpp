@@ -84,19 +84,19 @@ static std::string GetConfiguredIp(const std::string& setting, const char* env_v
 
 // [OpenPak] La redirection est-elle active ?
 //
-// Le reglage « enable_legacy » n'existe QUE dans la facade Qt (src/citron/main.cpp) : la facade
+// Le reglage « enable_openpak » n'existe QUE dans la facade Qt (src/citron/main.cpp) : la facade
 // SDL (citron_cmd) ne le cable nulle part et le reecrit a sa valeur par defaut, false, au
 // demarrage. Mesure du 2026-08-25 : lance par citron-cmd, Splatoon 3 a resolu
 // « t-dce9377b-lp1.lp1.t.npln.srv.nintendo.net » vers 34.49.112.177 — le VRAI serveur de Nintendo —
-// alors que le fichier de configuration portait bien enable_legacy=true.
+// alors que le fichier de configuration portait bien enable_openpak=true.
 //
 // On accepte donc aussi une activation par l'environnement, exactement comme GetConfiguredIp le
 // fait deja pour les deux adresses. Une valeur vide, « 0 », « false » ou « no » ne l'active pas.
 static bool RedirectionOpenPakActive() {
-    if (Settings::values.enable_legacy.GetValue()) {
+    if (Settings::values.enable_openpak.GetValue()) {
         return true;
     }
-    const char* env = std::getenv("OPENPAK_LEGACY_ENABLE");
+    const char* env = std::getenv("OPENPAK_ENABLE");
     if (env == nullptr || *env == '\0') {
         return false;
     }
@@ -121,11 +121,15 @@ static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) 
     }
 
     const std::string server_ip =
-        GetConfiguredIp(Settings::values.legacy_server_ip.GetValue(), "OPENPAK_LEGACY_SERVER_IP");
-    const std::string nat_ip =
-        GetConfiguredIp(Settings::values.legacy_nat_ip.GetValue(), "OPENPAK_LEGACY_NAT_IP");
-
+        GetConfiguredIp(Settings::values.openpak_server_ip.GetValue(), "OPENPAK_SERVER_IP");
+    // OpenPak does not serve the NAT check; a console that cannot check its NAT falls back
+    // sensibly, so the host stays on real DNS unless an address is configured for it.
     if (host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net")) {
+        const std::string nat_ip =
+            GetConfiguredIp(Settings::values.openpak_nat_ip.GetValue(), "OPENPAK_NAT_IP");
+        if (nat_ip == "127.0.0.1") {
+            return std::nullopt;
+        }
         LOG_INFO(Service, "[OpenPak] Redirecting NAT check host '{}' -> '{}'", host, nat_ip);
         return nat_ip;
     }
@@ -142,7 +146,7 @@ static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) 
 }
 
 // [OpenPak] Debug-only tap: redirects an "npln" host straight to a local TLS-terminating
-// proxy instead of production, for protocol inspection. Independent of enable_legacy (this
+// proxy instead of production, for protocol inspection. Independent of enable_openpak (this
 // isn't a OpenPak-server redirect, just a temporary debugging aid) -- unset by default, so it
 // never affects a normal run. OPENPAK_LEGACY_S3_DEBUG_PROXY_IP=<ip> to enable.
 static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
@@ -160,14 +164,14 @@ static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
 // [OpenPak] Redirects Outbound's Photon traffic (ns.photonengine.io and friends) to our own
 // self-hosted Photon-protocol-compatible server instead of Photon Cloud -- see HANDOFF.md's
 // "Self-hosted Photon server" section in outbound-legacy for why. Independent of
-// enable_legacy, same reasoning as GetNplnDebugProxyIp above: a separate redirect target,
+// enable_openpak, same reasoning as GetNplnDebugProxyIp above: a separate redirect target,
 // unset by default so it never affects a normal (non-Outbound) run.
-// OPENPAK_LEGACY_PHOTON_IP=<ip> to enable.
+// OPENPAK_PHOTON_IP=<ip> to enable.
 static std::optional<std::string> GetPhotonRedirectIp(const std::string& host) {
     if (Common::ToLower(host).find("photonengine.io") == std::string::npos) {
         return std::nullopt;
     }
-    const char* env = std::getenv("OPENPAK_LEGACY_PHOTON_IP");
+    const char* env = std::getenv("OPENPAK_PHOTON_IP");
     if (!env || !*env) {
         return std::nullopt;
     }

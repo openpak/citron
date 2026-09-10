@@ -54,7 +54,7 @@
 #include <QVBoxLayout>
 
 #include "common/fs/path_util.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 #include "common/legacy_outgoing_requests.h"
 #include "common/settings.h"
 #include "citron/legacy_account_dialog.h"
@@ -71,7 +71,7 @@
 #include "hid_core/hid_core.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/legacy_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace {
@@ -727,7 +727,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
                                              int initial_page_)
     : QDialog(parent), controller(controller_), system(system_), hid_core(system_.HIDCore()),
       initial_page(initial_page_) {
-    setWindowTitle(tr("OpenPak Account"));
+    setWindowTitle(tr("OpenPak account"));
     setFixedSize(999, 598);
 
     // Otherwise the same physical controller drives both this dialog's navigation and a
@@ -837,7 +837,7 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     dash_online_dot = online_icon;
     dash_online_text = new QLabel;
     dash_online_text->setAlignment(Qt::AlignCenter);
-    const bool legacy_enabled = Settings::values.enable_legacy.GetValue();
+    const bool legacy_enabled = Settings::values.enable_openpak.GetValue();
     online_icon->SetOnline(legacy_enabled);
     if (legacy_enabled) {
         dash_online_text->setText(tr("Online"));
@@ -1259,10 +1259,10 @@ OpenPakAccountDialog::OpenPakAccountDialog(OpenPakController* controller_,
     // Governs only the automatic pull-on-boot/push-on-stop sync -- not the manual Download
     // Save button above, which is already an explicit action each time it's clicked.
     cloud_save_auto_sync_checkbox = new QCheckBox(tr("Automatically sync cloud saves"));
-    cloud_save_auto_sync_checkbox->setChecked(Settings::values.legacy_cloud_sync_enabled.GetValue());
+    cloud_save_auto_sync_checkbox->setChecked(Settings::values.openpak_cloud_sync_enabled.GetValue());
     cloud_save_auto_sync_checkbox->setCursor(Qt::PointingHandCursor);
     connect(cloud_save_auto_sync_checkbox, &QCheckBox::toggled, this,
-            [](bool checked) { Settings::values.legacy_cloud_sync_enabled.SetValue(checked); });
+            [](bool checked) { Settings::values.openpak_cloud_sync_enabled.SetValue(checked); });
 
     auto* cloud_save_card = new QFrame;
     cloud_save_card->setStyleSheet(DashCardStyle());
@@ -2065,8 +2065,9 @@ void OpenPakAccountDialog::OnEditUsername() {
                 }
                 if (error.empty()) {
                     Common::OpenPakAccount::Save(Common::OpenPakAccount::GetPid(), new_name,
-                                                  Common::OpenPakAccount::GetFriendCode(),
-                                                  Common::OpenPakAccount::GetToken());
+                                                 Common::OpenPakAccount::GetFriendCode(),
+                                                 Common::OpenPakAccount::GetToken(),
+                                                 Common::OpenPakAccount::GetBearer());
                     header_name->setText(QString::fromStdString(new_name));
                     status->setText(tr("Username updated."));
                 } else {

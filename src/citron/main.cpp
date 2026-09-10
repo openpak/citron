@@ -174,7 +174,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/legacy_save_sync.h"
 #include "citron/legacy_toast.h"
 #include "citron/play_time_manager.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 #include "common/legacy_friends.h"
 #include "citron/startup_checks.h"
 #include "citron/uisettings.h"
@@ -183,7 +183,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "common/settings.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/mk8d_country_flags.h"
-#include "web_service/legacy_api.h"
+#include "web_service/openpak_api.h"
 #include "web_service/ssbu_mod_installer.h"
 #endif
 #include "common/string_util.h"
@@ -1668,7 +1668,7 @@ void GMainWindow::InitializeHotkeys() {
     LinkActionShortcut(ui->action_Show_Filter_Bar, QStringLiteral("Toggle Filter Bar"));
     LinkActionShortcut(ui->action_Toggle_Grid_View, QStringLiteral("Toggle Grid View"));
     LinkActionShortcut(ui->action_Show_Status_Bar, QStringLiteral("Toggle Status Bar"));
-    LinkActionShortcut(ui->action_OpenPak_Open_Account, QStringLiteral("Toggle OpenPak Account"));
+    LinkActionShortcut(ui->action_OpenPak_Open_Account, QStringLiteral("Toggle OpenPak account"));
     LinkActionShortcut(ui->action_Show_Performance_Overlay,
                        QStringLiteral("Toggle Performance Overlay"));
     LinkActionShortcut(ui->action_Show_Vram_Overlay, QStringLiteral("Toggle VRAM Overlay"));
@@ -2043,7 +2043,7 @@ void GMainWindow::ConnectMenuEvents() {
     // OpenPak
     ui->action_OpenPak_Sign_In->setEnabled(!Common::OpenPakAccount::IsLinked());
     ui->action_OpenPak_Sign_Out->setEnabled(Common::OpenPakAccount::IsLinked());
-    ui->action_OpenPak_Enable_Redirection->setChecked(Settings::values.enable_legacy.GetValue());
+    ui->action_OpenPak_Enable_Redirection->setChecked(Settings::values.enable_openpak.GetValue());
 
     connect(ui->action_OpenPak_Open_Account, &QAction::triggered, this, [this] {
         if (!Common::OpenPakAccount::IsLinked()) {
@@ -2117,7 +2117,7 @@ void GMainWindow::ConnectMenuEvents() {
     connect(action_chat_rooms, &QAction::triggered, this, [this] {
         if (!Common::OpenPakAccount::IsLinked()) {
             QMessageBox::information(this, tr("Chat Rooms"),
-                                     tr("Sign in to OpenPak Network first."));
+                                     tr("Sign in to OpenPak first."));
             return;
         }
         OpenOpenPakChatWindow();
@@ -2127,7 +2127,7 @@ void GMainWindow::ConnectMenuEvents() {
     connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, legacy_controller,
             &OpenPakController::SignOut);
     connect(ui->action_OpenPak_Enable_Redirection, &QAction::toggled, this, [](bool checked) {
-        Settings::values.enable_legacy.SetValue(checked);
+        Settings::values.enable_openpak.SetValue(checked);
     });
     connect(legacy_controller, &OpenPakController::AccountLinked, this, [this] {
         ui->action_OpenPak_Sign_In->setEnabled(false);
@@ -2680,9 +2680,9 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     // PatchType::Mod; cheats live in a separate PatchManager::GetCheats() list entirely and
     // were never checked, so a cheat could still be active while this dialog reported "clean".
     const bool legacy_production_active =
-        Settings::values.enable_legacy.GetValue() &&
-        Settings::values.legacy_server_ip.GetValue() ==
-            Settings::values.legacy_server_ip.GetDefault();
+        Settings::values.enable_openpak.GetValue() &&
+        Settings::values.openpak_server_ip.GetValue() ==
+            Settings::values.openpak_server_ip.GetDefault();
     if (title_id == 0x0100C2500FC20000ULL && legacy_production_active) {
         const FileSys::PatchManager pm{title_id, system->GetFileSystemController(),
                                        system->GetContentProvider()};
@@ -2712,7 +2712,7 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     }
 
     OfferOpenPakByamlDownload(title_id);
-    if (Settings::values.legacy_cloud_sync_enabled.GetValue()) {
+    if (Settings::values.openpak_cloud_sync_enabled.GetValue()) {
         OpenPak::SaveSync::Pull(*system, title_id);
     }
 
@@ -2981,7 +2981,7 @@ void GMainWindow::OnEmulationStopped() {
 #ifdef ENABLE_WEB_SERVICE
     // Only safe past this point: emu_thread has fully exited (no more concurrent guest access to
     // the VFS) and InitializeContentSystem() just rebuilt a fresh save-data factory.
-    if (Settings::values.legacy_cloud_sync_enabled.GetValue()) {
+    if (Settings::values.openpak_cloud_sync_enabled.GetValue()) {
         auto save_zip = OpenPak::SaveSync::CaptureForPush(*system, current_title_id);
         if (!save_zip.empty()) {
             std::thread{[title_id = current_title_id, zip = std::move(save_zip)]() mutable {
@@ -7783,9 +7783,9 @@ void GMainWindow::RunOpenPakByamlDownloadWithProgress(u64 title_id) {
     progress.close();
 
     if (future.result()) {
-        QMessageBox::information(this, tr("OpenPak Network"), tr("Online schedule installed."));
+        QMessageBox::information(this, tr("OpenPak"), tr("Online schedule installed."));
     } else {
-        QMessageBox::warning(this, tr("OpenPak Network"),
+        QMessageBox::warning(this, tr("OpenPak"),
                              tr("Failed to download the online schedule. You can try again later "
                                 "via right-click on the game."));
     }
@@ -8167,11 +8167,11 @@ void GMainWindow::OfferOpenPakByamlDownload(u64 title_id) {
     }
 
     QMessageBox ask(this);
-    ask.setWindowTitle(tr("OpenPak Network"));
-    ask.setText(tr("This game needs the online schedule (OpenPak Network)."));
+    ask.setWindowTitle(tr("OpenPak"));
+    ask.setText(tr("This game needs the online schedule (OpenPak)."));
     ask.setInformativeText(
         tr("This file (stage/mode/festival schedules) is required to play online and is NOT "
-           "included with the emulator. It can be downloaded from OpenPak Network servers and "
+           "included with the emulator. It can be downloaded from OpenPak servers and "
            "installed automatically.\n\nWithout it, the game stays stuck \"offline\". "
            "(Re-downloadable later via right-click on the game.)"));
     QPushButton* yes_button = ask.addButton(tr("Yes, download"), QMessageBox::AcceptRole);

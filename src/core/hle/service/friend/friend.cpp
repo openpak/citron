@@ -12,7 +12,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/errors.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 #include "common/legacy_friends.h"
 #include "common/legacy_nat.h"
 #include "core/hle/service/friend/friend.h"
@@ -20,7 +20,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/server_manager.h"
-#include "web_service/legacy_api.h"
+#include "web_service/openpak_api.h"
 
 // [UNITY-FIX] undef Win32 macros shadowing ServiceContext methods.
 #undef CreateEvent

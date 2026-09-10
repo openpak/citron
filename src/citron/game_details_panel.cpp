@@ -24,7 +24,7 @@
 #include "common/legacy_compatible_titles.h"
 #include "citron/legacy_online_counts.h"
 #include "citron/util/image_cache.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 
 GameDetailsPanel::GameDetailsPanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("GameDetailsPanel"));

@@ -101,8 +101,8 @@ add_library(common STATIC
     scm_rev.h
     scope_exit.h
     scratch_buffer.h
-    legacy_account.cpp
-    legacy_account.h
+    openpak_account.cpp
+    openpak_account.h
     legacy_avatar.cpp
     legacy_avatar.h
     legacy_compatible_titles.h

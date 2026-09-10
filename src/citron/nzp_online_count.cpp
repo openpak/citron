@@ -10,7 +10,7 @@
 #include <QTimer>
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/legacy_api.h"
+#include "web_service/openpak_api.h"
 #endif
 
 namespace OpenPak::NzpOnlineCount {

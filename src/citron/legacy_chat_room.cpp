@@ -36,7 +36,7 @@
 #include "citron/theme.h"
 #include "citron/uisettings.h"
 #include "ui_legacy_chat_room.h"
-#include "web_service/legacy_api.h"
+#include "web_service/openpak_api.h"
 
 namespace {
 QColor PlayerColorForPid(u64 pid) {

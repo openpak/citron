@@ -732,16 +732,16 @@ struct Values {
                                            Category::Network};
     Setting<std::string> lobby_api_url{linkage, "api.ynet-fun.xyz", "lobby_api_url",
                                        Category::Network};
-    Setting<bool> enable_legacy{linkage, false, "enable_legacy", Category::Network};
-    Setting<std::string> legacy_server_ip{linkage, "51.178.29.194", "legacy_server_ip",
+    Setting<bool> enable_openpak{linkage, false, "enable_openpak", Category::Network};
+    Setting<std::string> openpak_server_ip{linkage, "145.241.199.19", "openpak_server_ip",
                                             Category::Network};
-    Setting<std::string> legacy_nat_ip{linkage, "164.132.111.120", "legacy_nat_ip",
+    Setting<std::string> openpak_nat_ip{linkage, "", "openpak_nat_ip",
                                          Category::Network};
-    Setting<std::string> legacy_pid{linkage, "", "legacy_pid", Category::Network};
+    Setting<std::string> openpak_pid{linkage, "", "openpak_pid", Category::Network};
     // Governs the automatic pull-on-boot/push-on-stop cloud save sync only -- the manual
     // "Download Save" button in the OpenPak Account dialog is an explicit per-click action
     // and isn't gated by this, since that's already opt-in every time.
-    Setting<bool> legacy_cloud_sync_enabled{linkage, true, "legacy_cloud_sync_enabled",
+    Setting<bool> openpak_cloud_sync_enabled{linkage, true, "openpak_cloud_sync_enabled",
                                               Category::Network};
 
     // WebService

@@ -26,7 +26,7 @@
 #include "citron/legacy_controller.h"
 #include "citron/legacy_room_overlay.h"
 #include "citron/uisettings.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 
 OpenPakRoomOverlay::OpenPakRoomOverlay(QWidget* parent, OpenPakController* controller_)
     : QWidget(parent), controller(controller_) {

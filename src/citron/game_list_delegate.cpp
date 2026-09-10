@@ -41,7 +41,7 @@
 #include "citron/nzp_online_count.h"
 #include "citron/uisettings.h"
 #include "citron/util/image_cache.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 
 namespace {
 void DrawShadowedText(QPainter* painter, const QRect& rect, int flags, const QString& text,

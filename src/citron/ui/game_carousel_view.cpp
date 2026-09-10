@@ -29,7 +29,7 @@
 #include "citron/legacy_ldn_counts.h"
 #include "citron/legacy_online_counts.h"
 #include "citron/util/image_cache.h"
-#include "common/legacy_account.h"
+#include "common/openpak_account.h"
 
 namespace {
 constexpr int kBackdropPickerRowH = 40;
