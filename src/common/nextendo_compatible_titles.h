@@ -18,8 +18,8 @@ namespace Nextendo::CompatibleTitles {
 
 inline const std::unordered_map<u64, std::string>& Table() {
     static const std::unordered_map<u64, std::string> table{
-        {0x0100152000022000, "3.0.5"},  // Mario Kart 8 Deluxe
-        {0x01006a800016e000, "13.0.4"}, // Super Smash Bros. Ultimate
+        {0x0100152000022000, "4.0.0"},  // Mario Kart 8 Deluxe
+        {0x01006a800016e000, "13.0.5"}, // Super Smash Bros. Ultimate
         {0x0100f8f0000a2000, "5.5.2"},  // Splatoon 2 (EU)
         {0x01003bc0000a0000, "5.5.2"},  // Splatoon 2 (US)
         {0x01003c700009c800, "5.5.2"},  // Splatoon 2 (JP)
@@ -29,6 +29,7 @@ inline const std::unordered_map<u64, std::string>& Table() {
         {0x0100bde00862a000, "3.1.1"},  // Mario Tennis Aces
         {0x0100c2500fc20000, "11.3.0"}, // Splatoon 3
         {0x01009b90006dc000, "3.0.3"},  // Super Mario Maker 2
+        {0x0100277011f1a000, "1.0.2"},  // Super Mario Bros. 35 (last update, Nov 2020; the title closed in 2021)
     };
     return table;
 }
