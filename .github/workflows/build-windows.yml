@@ -10,7 +10,7 @@ on:
 jobs:
   check-version:
     name: Check if new version available
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.head.outputs.hash_short }}
@@ -154,7 +154,7 @@ jobs:
     needs: [check-version, build-clangtron]
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

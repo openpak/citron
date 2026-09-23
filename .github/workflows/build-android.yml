@@ -6,7 +6,7 @@ on:
 jobs:
   check-version:
     name: Check if new version available
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.branch_check.outputs.hash_short }}
@@ -78,12 +78,15 @@ jobs:
     name: Build Android APK
     needs: [check-version]
     if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
+    container: ubuntu:24.04
     outputs:
       git_hash: ${{ steps.get_hash.outputs.git_hash }}
       branch_name: ${{ needs.check-version.outputs.branch_name }}
 
     steps:
+      - name: Bootstrap build container
+        run: apt-get update -qq && apt-get install -y -qq git ca-certificates sudo tar gzip >/dev/null
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.check-version.outputs.branch_name }}
@@ -144,7 +147,8 @@ jobs:
     name: Build Android APK (Snapdragon 8 Elite)
     needs: [check-version]
     if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
+    container: ubuntu:24.04
     outputs:
       git_hash: ${{ steps.get_hash.outputs.git_hash }}
       branch_name: ${{ needs.check-version.outputs.branch_name }}
@@ -157,6 +161,8 @@ jobs:
       CCACHE_SLOPPINESS: time_macros
 
     steps:
+      - name: Bootstrap build container
+        run: apt-get update -qq && apt-get install -y -qq git ca-certificates sudo tar gzip >/dev/null
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.check-version.outputs.branch_name }}
@@ -271,7 +277,7 @@ jobs:
     if: needs.check-version.outputs.should_build == 'true'
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
 
     steps:
       - uses: actions/checkout@v4
