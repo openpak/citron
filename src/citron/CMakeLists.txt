@@ -629,6 +629,10 @@ endif()
 target_link_libraries(citron PRIVATE Boost::headers glad nlohmann_json::nlohmann_json Qt6::Widgets Qt6::Network Qt6::Svg)
 target_link_libraries(citron PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 
+# [OpenPak] The account, the friend cache and the OpenPak web API come from the shared client
+# (externals/openpak-client), as they do for core.
+target_link_libraries(citron PRIVATE openpak::client)
+
 # Add libarchive for updater functionality
 if (TARGET LibArchive::LibArchive)
     target_link_libraries(citron PRIVATE LibArchive::LibArchive)

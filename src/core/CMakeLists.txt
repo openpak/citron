@@ -1284,6 +1284,11 @@ if (ENABLE_WEB_SERVICE)
     target_link_libraries(core PRIVATE web_service)
 endif()
 
+# [OpenPak] acc hands a title the id_token OpenPak issued, which means core walks the same sign-in
+# chain the Qt frontend does, and the friend and applet services read the same account and friend
+# cache. The library is the one place all of that lives.
+target_link_libraries(core PRIVATE openpak::client)
+
 if (HAS_NCE)
     enable_language(C ASM)
     set(CMAKE_ASM_FLAGS "${CFLAGS} -x assembler-with-cpp")

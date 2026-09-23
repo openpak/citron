@@ -54,13 +54,13 @@
 #include <QVBoxLayout>
 
 #include "common/fs/path_util.h"
-#include "common/openpak_account.h"
-#include "common/legacy_outgoing_requests.h"
+#include "openpak/account.h"
+#include "openpak/outgoing_requests.h"
 #include "common/settings.h"
 #include "citron/legacy_account_dialog.h"
 #include "citron/legacy_account_page_p.h"
 #include "citron/legacy_avatar_cache.h"
-#include "common/legacy_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "citron/legacy_controller.h"
 #include "citron/legacy_friend_delegate.h"
 #include "citron/legacy_history_delegate.h"
@@ -71,7 +71,7 @@
 #include "hid_core/hid_core.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 #endif
 
 namespace {
