@@ -39,6 +39,7 @@ private:
     void IsAnyInternetRequestAccepted(HLERequestContext& ctx);
     void IsAnyForegroundRequestAccepted(HLERequestContext& ctx);
     void AcceptSetting(HLERequestContext& ctx);
+    void SetExclusiveClient(HLERequestContext& ctx);
     void GetSsidListVersion(HLERequestContext& ctx);
     void SetWowlDelayedWakeTime(HLERequestContext& ctx);
     void GetNetworkProfile(HLERequestContext& ctx);
