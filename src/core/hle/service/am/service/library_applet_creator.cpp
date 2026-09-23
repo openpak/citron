@@ -21,6 +21,13 @@ namespace Service::AM {
 namespace {
 
 bool ShouldCreateGuestApplet(AppletId applet_id) {
+    // [OpenPak] Invitations go through OpenPak's MyPage, whatever the firmware carries or the
+    // MyPage applet mode says: the real applet speaks to Nintendo's friends servers, which
+    // OpenPak answers only in part.
+    if (applet_id == AppletId::MyPage && Settings::values.enable_openpak.GetValue()) {
+        return false;
+    }
+
 #define X(Name, name)                                                                              \
     if (applet_id == AppletId::Name &&                                                             \
         Settings::values.name##_applet_mode.GetValue() != Settings::AppletMode::LLE) {             \

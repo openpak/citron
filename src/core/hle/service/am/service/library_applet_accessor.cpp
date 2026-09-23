@@ -3,10 +3,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 ReSwitched Team
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
-
 #include "core/hle/service/am/applet_data_broker.h"
-#include "openpak/friends_cache.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applets.h"
 #include "core/hle/service/am/service/library_applet_accessor.h"
@@ -103,25 +100,6 @@ Result ILibraryAppletAccessor::Terminate() {
 
 Result ILibraryAppletAccessor::PushInData(SharedPointer<IStorage> storage) {
     LOG_DEBUG(Service_AM, "called");
-    if (m_applet->applet_id == AppletId::MyPage) {
-        const auto data = storage->GetData();
-        for (std::size_t i = 0; i + 11 <= data.size(); ++i) {
-            if (data[i] != 1 || data[i + 1] != 0 || data[i + 2] != 0 || data[i + 3] != 0 ||
-                data[i + 4] != 6) {
-                continue;
-            }
-            const auto room_begin = data.begin() + static_cast<std::ptrdiff_t>(i + 5);
-            if (std::all_of(room_begin, room_begin + 6, [](u8 c) {
-                    return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
-                })) {
-                Common::NextendoFriends::SetOutgoingInvitationParameter(
-                    std::vector<u8>(data.begin() + static_cast<std::ptrdiff_t>(i),
-                                    data.begin() + static_cast<std::ptrdiff_t>(i + 11)));
-                LOG_INFO(Service_AM, "[OpenPak] Captured Outbound invitation parameter");
-                break;
-            }
-        }
-    }
     m_broker->GetInData().Push(storage);
     R_SUCCEED();
 }
