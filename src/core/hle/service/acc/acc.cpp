@@ -4,24 +4,16 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
-#include <cstdlib>
 #include <mutex>
-
-#include <openssl/bio.h>
-#include <openssl/evp.h>
-#include <openssl/pem.h>
-#include <openssl/rand.h>
+#include <random>
 
 #include "common/common_types.h"
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
-#include "common/hex_util.h"
 #include "common/logging.h"
 #include "openpak/account.h"
 #include "openpak/avatar.h"
-#include "openpak/compatible_titles.h"
 #include "common/settings.h"
 #include <ranges>
 #include "common/stb.h"
@@ -49,256 +41,78 @@
 #include "core/hle/service/ns/ns_types.h"
 #include "core/hle/service/server_manager.h"
 #include "core/loader/loader.h"
+#include "openpak/network_profile.h"
+#include "openpak/platform.h"
+#include "openpak/session.h"
 
 namespace Service::Account {
 
-namespace {
-
-// The BAAS id_token read through LoadIdTokenCache. NEX parses it before logging in, so it must be
-// a real RS256 JWT. Key comes from OPENPAK_BAAS_SIGNING_KEY or openpak_baas.pem, else generated.
-constexpr const char* BaasIssuer = "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
-constexpr const char* BaasJku =
-    "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates";
-constexpr const char* BaasAudience = "ed9e2f05d286f7b8";
-constexpr const char* BaasKeyId = "openpak-citron-key-1";
-
-std::string Base64UrlEncode(std::span<const u8> data) {
-    static constexpr std::string_view alphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-    std::string out;
-    out.reserve((data.size() + 2) / 3 * 4);
-
-    for (std::size_t i = 0; i < data.size(); i += 3) {
-        const u32 remaining = static_cast<u32>(data.size() - i);
-        const u32 triple = (static_cast<u32>(data[i]) << 16) |
-                           (remaining > 1 ? static_cast<u32>(data[i + 1]) << 8 : 0) |
-                           (remaining > 2 ? static_cast<u32>(data[i + 2]) : 0);
-
-        out += alphabet[(triple >> 18) & 0x3F];
-        out += alphabet[(triple >> 12) & 0x3F];
-        if (remaining > 1) {
-            out += alphabet[(triple >> 6) & 0x3F];
-        }
-        if (remaining > 2) {
-            out += alphabet[triple & 0x3F];
-        }
+// [OpenPak] The identity a title asks acc:u0 for.
+//
+// A stubbed id_token is 0x100 zero bytes, which a title server cannot resolve to anybody -- the
+// console says "account not recognised" and no online session ever starts. These walk OpenPak's
+// own sign-in chain instead (openpak-client's session: dauth, the device account, the BAAS login)
+// and hand over what it issued, as Eden and Ryujinx do. Citron used to sign a token of its own
+// with a local key; a title server can only resolve what OpenPak itself issued.
+//
+// Signed in on the asking thread rather than in the background: a game that boots straight into
+// online play must not race a sign-in, and the chain answers in well under a second on a server
+// that is there. When it is not, this returns nothing and the caller keeps the old stub, which
+// is a console that is simply not online.
+static bool OpenPakSignedIn(Core::System& system, const Common::UUID& user) {
+    if (!Settings::values.enable_openpak.GetValue()) {
+        return false;
     }
 
-    return out;
-}
-
-std::string Base64UrlEncode(std::string_view text) {
-    return Base64UrlEncode(
-        std::span{reinterpret_cast<const u8*>(text.data()), text.size()});
-}
-
-std::string RandomHex(std::size_t bytes) {
-    std::vector<u8> buffer(bytes);
-    if (RAND_bytes(buffer.data(), static_cast<int>(buffer.size())) != 1) {
-        for (std::size_t i = 0; i < buffer.size(); ++i) {
-            buffer[i] = static_cast<u8>(std::rand());
-        }
+    // The OpenPak account is the active profile's. Any other profile a title asks about -- a
+    // second local player -- is offline, never handed the active one's identity.
+    if (user.RawString() != openpak::Platform::ProfileId()) {
+        return false;
     }
-    return Common::HexToString(buffer, /*upper=*/false);
+
+    static std::once_flag configured;
+    std::call_once(configured, [] {
+        // The frontend may have configured the session already; the values are the same either
+        // way, and the command-line frontend has nothing that would.
+        openpak::client::session::Configure(Settings::values.openpak_server_ip.GetValue(), 443, {});
+
+        // What the console redirects and where, from OpenPak itself. The stored copy is loaded
+        // first so a launch without network still redirects.
+        openpak::client::profile::Load();
+        void(openpak::client::profile::Refresh({}, "switch"));
+    });
+
+    // Bind the login to the asking title first. A console's baas login carries an
+    // application_auth_token naming the running game, and the game's own online stack checks
+    // that binding before it will use the id_token: one minted for no title in particular
+    // connects to the servers and then never opens a session, which reads as a hang.
+    const u64 program_id = system.GetApplicationProcessProgramID();
+    if (program_id != 0) {
+        std::string version;
+
+        const auto [nacp, icon] = FileSys::PatchManager{
+            program_id, system.GetFileSystemController(), system.GetContentProvider()}
+                                      .GetControlMetadata();
+        if (nacp) {
+            version = nacp->GetVersionString();
+        }
+
+        openpak::client::session::SetApplication(fmt::format("{:016x}", program_id),
+                                                 std::move(version));
+    }
+
+    return openpak::client::session::Ensure();
 }
 
-EVP_PKEY* GetBaasSigningKey() {
-    static EVP_PKEY* key = []() -> EVP_PKEY* {
-        std::string pem;
-
-        if (const char* env = std::getenv("OPENPAK_BAAS_SIGNING_KEY"); env && *env) {
-            pem = env;
-        } else if (const auto file = Common::FS::ReadStringFromFile(
-                       std::filesystem::path{"openpak_baas.pem"}, Common::FS::FileType::TextFile);
-                   !file.empty()) {
-            pem = file;
-        }
-
-        if (pem.find("BEGIN") != std::string::npos) {
-            BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
-            if (bio) {
-                EVP_PKEY* loaded = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-                BIO_free(bio);
-                if (loaded) {
-                    LOG_INFO(Service_ACC, "[OpenPak] Using the supplied BAAS signing key");
-                    return loaded;
-                }
-                LOG_WARNING(Service_ACC,
-                            "[OpenPak] BAAS signing key could not be parsed; generating one");
-            }
-        }
-
-        // No key supplied: reuse a persisted auto-generated one so the identity (and its
-        // public JWK) stays stable across launches instead of a fresh key every process start.
-        const auto auto_key_path =
-            Common::FS::GetCitronPath(Common::FS::CitronPath::KeysDir) / "openpak_baas_auto.pem";
-        if (const auto existing =
-                Common::FS::ReadStringFromFile(auto_key_path, Common::FS::FileType::TextFile);
-            existing.find("BEGIN") != std::string::npos) {
-            BIO* bio = BIO_new_mem_buf(existing.data(), static_cast<int>(existing.size()));
-            if (bio) {
-                EVP_PKEY* loaded = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-                BIO_free(bio);
-                if (loaded) {
-                    LOG_DEBUG(Service_ACC, "[OpenPak] Using the persisted auto-generated BAAS signing key");
-                    return loaded;
-                }
-            }
-        }
-
-        EVP_PKEY* generated = EVP_RSA_gen(2048);
-        if (!generated) {
-            LOG_ERROR(Service_ACC, "[OpenPak] Failed to generate a BAAS signing key");
-            return generated;
-        }
-
-        BIO* out_bio = BIO_new(BIO_s_mem());
-        if (out_bio && PEM_write_bio_PrivateKey(out_bio, generated, nullptr, nullptr, 0, nullptr,
-                                                nullptr)) {
-            char* data = nullptr;
-            const long len = BIO_get_mem_data(out_bio, &data);
-            if (len > 0 && data) {
-                const auto written = Common::FS::WriteStringToFile(
-                    auto_key_path, Common::FS::FileType::TextFile,
-                    std::string_view{data, static_cast<size_t>(len)});
-                if (written > 0) {
-                    LOG_DEBUG(Service_ACC,
-                             "[OpenPak] Generated and persisted a new BAAS signing key at {}",
-                             auto_key_path.string());
-                }
-            }
-        }
-        if (out_bio) {
-            BIO_free(out_bio);
-        }
-        return generated;
-    }();
-
-    return key;
-}
-
-std::string SignRs256(std::string_view signing_input) {
-    EVP_PKEY* key = GetBaasSigningKey();
-    if (!key) {
+static std::vector<u8> OpenPakIdTokenBytes(Core::System& system, const Common::UUID& user) {
+    if (!OpenPakSignedIn(system, user)) {
         return {};
     }
 
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (!ctx) {
-        return {};
-    }
+    const std::string token = openpak::client::session::IdToken();
 
-    std::string signature;
-    std::size_t length = 0;
-
-    if (EVP_DigestSignInit(ctx, nullptr, EVP_sha256(), nullptr, key) == 1 &&
-        EVP_DigestSign(ctx, nullptr, &length,
-                       reinterpret_cast<const u8*>(signing_input.data()),
-                       signing_input.size()) == 1) {
-        std::vector<u8> raw(length);
-        if (EVP_DigestSign(ctx, raw.data(), &length,
-                           reinterpret_cast<const u8*>(signing_input.data()),
-                           signing_input.size()) == 1) {
-            raw.resize(length);
-            signature = Base64UrlEncode(raw);
-        }
-    }
-
-    if (signature.empty()) {
-        LOG_ERROR(Service_ACC, "[OpenPak] Failed to sign the BAAS id_token");
-    }
-
-    EVP_MD_CTX_free(ctx);
-    return signature;
+    return {token.begin(), token.end()};
 }
-
-std::string BuildIdToken() {
-    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count();
-
-    const std::string header =
-        fmt::format(R"({{"alg":"RS256","kid":"{}","typ":"id_token","jku":"{}"}})", BaasKeyId,
-                    BaasJku);
-
-    // [Nextendo] Ride the signed nx2 token in the "nnex" claim so the auth server can
-    // cryptographically bind this NEX login to the account (anti-impersonation).
-    std::string nnex_claim;
-    if (Common::OpenPakAccount::IsLinked()) {
-        const std::string tok = Common::OpenPakAccount::GetToken();
-        if (!tok.empty()) {
-            nnex_claim = fmt::format(R"("nnex":"{}",)", tok);
-        }
-    }
-
-    // [Nextendo] The console's own nnAccount module expects a "nintendo" claim dictionary
-    // with device metadata (dt, pc, di, sn, ist) -- without it, nnAccount's local schema
-    // check rejects an otherwise well-formed, correctly-signed token even though the server
-    // side has nothing to complain about. Matches Ryujinx-Nextendo's own fix for the exact
-    // same shape of failure (their commit message: "the console receives HTTP 200 but
-    // rejects the body because the JWT schema doesn't match what nnAccount expects").
-    // Reuses the same device id for both the top-level "di" and the nested one, matching
-    // Ryujinx-Nextendo's own token (a single deviceId feeding both places).
-    const std::string device_id = RandomHex(0x10);
-    const std::string nintendo_claim = fmt::format(
-        R"("nintendo":{{"dt":"NX Prod 1","pc":"HAC","di":"{}","sn":"XAW10000000000","ist":false}},)",
-        device_id);
-
-    // [Nextendo] Optional stable-identity experiment (fallguys-nextendo 2026-08-31): the
-    // historical random "sub" is accepted by NEX titles, but Fall Guys' EOS Connect
-    // external-auth exchange fails client-side regardless of the server's response, and one
-    // candidate cause is a cross-check between this token's identity and the stable account
-    // identity the title sees via IManagerForApplication::GetAccountId. When this env var is
-    // set, it pins "sub" to an explicit value so the token identity can be aligned with
-    // whatever the caller expects. Unset by default (family rule): the historical random sub
-    // keeps being served, so NEX titles are unaffected.
-    std::string sub = RandomHex(0x10);
-    if (const char* forced_sub = std::getenv("OPENPAK_BAAS_SUB");
-        forced_sub != nullptr && *forced_sub != '\0') {
-        sub = forced_sub;
-        LOG_INFO(Service_ACC, "[OpenPak] BAAS id_token uses OPENPAK_BAAS_SUB override");
-    }
-
-    const std::string payload = fmt::format(
-        R"({{"sub":"{}","aud":"{}","iss":"{}","typ":"id_token","iat":{},"exp":{},"jku":"{}",)"
-        R"("jti":"{}","di":"{}","sn":"XAW10000000000","bs:did":"{}",{}{}"hm":true}})",
-        sub, BaasAudience, BaasIssuer, now, now + 3 * 60 * 60, BaasJku,
-        Common::UUID::MakeRandom().FormattedString(), device_id, RandomHex(0x10),
-        nintendo_claim, nnex_claim);
-
-    const std::string signing_input =
-        Base64UrlEncode(header) + "." + Base64UrlEncode(payload);
-
-    return signing_input + "." + SignRs256(signing_input);
-}
-
-std::vector<u8> GetIdTokenBytes() {
-    static std::mutex mutex;
-    static std::vector<u8> cached;
-    static std::chrono::steady_clock::time_point expiry{};
-    static u64 cached_generation = 0;
-
-    std::lock_guard lock{mutex};
-
-    // [Nextendo] Rebuild whenever the linked account changes (sign-in/sign-out), not just on
-    // a time-based expiry -- otherwise a token minted before the user finishes linking (e.g.
-    // this cache gets populated once at boot while still unlinked) keeps being served for up
-    // to 2 hours after a successful link, silently missing the "nnex" claim the whole time.
-    const u64 generation = Common::OpenPakAccount::GetGeneration();
-    const auto now = std::chrono::steady_clock::now();
-    if (cached.empty() || now >= expiry || generation != cached_generation) {
-        const std::string token = BuildIdToken();
-        cached.assign(token.begin(), token.end());
-        expiry = now + std::chrono::hours{2};
-        cached_generation = generation;
-        LOG_INFO(Service_ACC, "[OpenPak] Issued a signed BAAS id_token ({} bytes)", cached.size());
-    }
-
-    return cached;
-}
-
-} // Anonymous namespace
 
 // Thumbnails are hard coded to be at least this size
 constexpr std::size_t THUMBNAIL_SIZE = 0x24000;
@@ -313,7 +127,9 @@ static void SeedImageFromNextendoIfMissing(const Common::UUID& uuid) {
     if (Common::FS::Exists(path)) {
         return;
     }
-    if (!Common::OpenPakAccount::IsLinked()) {
+    // The OpenPak account is the active profile's; another profile's picture is its own.
+    if (uuid.RawString() != openpak::Platform::ProfileId() ||
+        !Common::OpenPakAccount::IsLinked()) {
         return;
     }
     const auto jpeg = Common::NextendoAvatar::GetSelfJPEG();
@@ -537,23 +353,92 @@ public:
     }
 };
 
+// [OpenPak] An async request that is done before anyone asks: authorization is a local yes.
+class CompletedAsyncContext final : public IAsyncContext {
+public:
+    explicit CompletedAsyncContext(Core::System& system_) : IAsyncContext{system_} {
+        MarkComplete();
+    }
+
+protected:
+    bool IsComplete() const override {
+        return true;
+    }
+    void Cancel() override {}
+    Result GetResult() const override {
+        return ResultSuccess;
+    }
+};
+
+// [OpenPak] nn::account::nas::IAuthorizationRequest, ported from Eden (and Ryujinx before it): the
+// title-driven half of the console authorization flow. A title that talks to a third-party
+// network asks the account system to authorize it against the signed-in user, then collects the
+// proof -- an authorization code or the id_token -- to hand to that network. The user is already
+// signed in, so there is nothing to interact over: the request completes at once, reports
+// authorized, and both proofs are the session's own id_token, the credential OpenPak's
+// check_token resolves.
 class IAuthorizationRequest final : public ServiceFramework<IAuthorizationRequest> {
 public:
-    explicit IAuthorizationRequest(Core::System& system_, Common::UUID)
-        : ServiceFramework{system_, "IAuthorizationRequest"} {
+    explicit IAuthorizationRequest(Core::System& system_, Common::UUID user_)
+        : ServiceFramework{system_, "IAuthorizationRequest"}, user{user_},
+          session_id{std::random_device{}() | (u64{std::random_device{}()} << 32)} {
         // clang-format off
         static const FunctionInfo functions[] = {
-            {0, nullptr, "GetSessionId"},
-            {10, nullptr, "InvokeWithoutInteractionAsync"},
-            {19, nullptr, "IsAuthorized"},
-            {20, nullptr, "GetAuthorizationCode"},
-            {21, nullptr, "GetIdToken"},
-            {22, nullptr, "GetState"},
+            {0, &IAuthorizationRequest::GetSessionId, "GetSessionId"},
+            {10, &IAuthorizationRequest::InvokeWithoutInteractionAsync, "InvokeWithoutInteractionAsync"},
+            {19, &IAuthorizationRequest::IsAuthorized, "IsAuthorized"},
+            {20, &IAuthorizationRequest::GetSessionToken, "GetAuthorizationCode"},
+            {21, &IAuthorizationRequest::GetSessionToken, "GetIdToken"},
+            {22, &IAuthorizationRequest::GetState, "GetState"},
         };
         // clang-format on
 
         RegisterHandlers(functions);
     }
+
+private:
+    void GetSessionId(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push(session_id);
+    }
+
+    void InvokeWithoutInteractionAsync(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<CompletedAsyncContext>(system);
+    }
+
+    void IsAuthorized(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u8>(1);
+    }
+
+    // Nothing here fails the call: a title that only wants the size asks with no buffer.
+    void GetSessionToken(HLERequestContext& ctx) {
+        const std::vector<u8> token = OpenPakIdTokenBytes(system, user);
+        if (ctx.CanWriteBuffer() && !token.empty()) {
+            if (token.size() > ctx.GetWriteBufferSize()) {
+                LOG_WARNING(Service_ACC, "[OpenPak] id_token is {} bytes, guest buffer is {}",
+                            token.size(), ctx.GetWriteBufferSize());
+            } else {
+                ctx.WriteBuffer(token);
+            }
+        }
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(static_cast<u32>(token.size()));
+    }
+
+    void GetState(HLERequestContext& ctx) {
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(3); // nn::account::nas::AuthorizationRequestState: Done
+    }
+
+    Common::UUID user;
+    u64 session_id;
 };
 
 class IOAuthProcedure final : public ServiceFramework<IOAuthProcedure> {
@@ -903,15 +788,21 @@ public:
 
 class EnsureTokenIdCacheAsyncInterface final : public IAsyncContext {
 public:
-    explicit EnsureTokenIdCacheAsyncInterface(Core::System& system_) : IAsyncContext{system_} {
+    explicit EnsureTokenIdCacheAsyncInterface(Core::System& system_, Common::UUID user_)
+        : IAsyncContext{system_}, user{user_} {
         MarkComplete();
     }
     ~EnsureTokenIdCacheAsyncInterface() = default;
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        const std::vector<u8> token_bytes = GetIdTokenBytes();
-        LOG_INFO(Service_ACC, "[OpenPak] Providing BAAS ID token in async interface ({} bytes)",
-                 token_bytes.size());
+        std::vector<u8> token_bytes = OpenPakIdTokenBytes(system, user);
+        if (token_bytes.empty()) {
+            LOG_WARNING(Service_ACC, "(STUBBED) called");
+            token_bytes.assign(0x100, u8(0));
+        } else {
+            LOG_INFO(Service_ACC, "[OpenPak] Handing the title an id_token ({} bytes)",
+                     token_bytes.size());
+        }
 
         ctx.WriteBuffer(token_bytes);
 
@@ -930,6 +821,9 @@ protected:
     Result GetResult() const override {
         return ResultSuccess;
     }
+
+private:
+    Common::UUID user; ///< The user the title asked about; OpenPak speaks for the active one only.
 };
 
 class AuthenticateApplicationAsyncInterface final : public IAsyncContext {
@@ -1090,10 +984,11 @@ private:
 class IManagerForApplication final : public ServiceFramework<IManagerForApplication> {
 public:
     explicit IManagerForApplication(Core::System& system_,
-                                    const std::shared_ptr<ProfileManager>& profile_manager_)
+                                    const std::shared_ptr<ProfileManager>& profile_manager_,
+                                    Common::UUID user_id_)
         : ServiceFramework{system_, "IManagerForApplication"},
-          ensure_token_id{std::make_shared<EnsureTokenIdCacheAsyncInterface>(system)},
-          profile_manager{profile_manager_} {
+          ensure_token_id{std::make_shared<EnsureTokenIdCacheAsyncInterface>(system, user_id_)},
+          profile_manager{profile_manager_}, user_id{user_id_} {
         // clang-format off
         static const FunctionInfo functions[] = {
             {0, &IManagerForApplication::CheckAvailability, "CheckAvailability"},
@@ -1103,7 +998,7 @@ public:
             {4, &IManagerForApplication::LoadIdTokenCache, "LoadIdTokenCache"},
             {130, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCacheForApplication"},
             {136, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCache"}, // 19.0.0+
-            {150, nullptr, "CreateAuthorizationRequest"},
+            {150, &IManagerForApplication::CreateAuthorizationRequest, "CreateAuthorizationRequest"},
             {160, &IManagerForApplication::StoreOpenContext, "StoreOpenContext"},
             {170, &IManagerForApplication::LoadNetworkServiceLicenseKindAsync, "LoadNetworkServiceLicenseKindAsync"},
         };
@@ -1113,53 +1008,14 @@ public:
     }
 
 private:
-    u64 GetEffectivePid() const {
-        const u64 raw_pid = []() -> u64 {
-            if (const u64 linked = Common::OpenPakAccount::GetPid(); linked != 0) {
-                return linked;
-            }
-            std::string pid_setting = Settings::values.openpak_pid.GetValue();
-            if (!pid_setting.empty()) {
-                try {
-                    return std::stoull(pid_setting);
-                } catch (...) {}
-            }
-            const char* pid_env = std::getenv("NEXTENDO_PID");
-            if (pid_env && *pid_env) {
-                try {
-                    return std::stoull(pid_env);
-                } catch (...) {}
-            }
-            return 0;
-        }();
+    // [OpenPak] The network service account id has to be the one the id_token was issued for,
+    // or a title asks a server about a player nobody has heard of. The local profile hash is
+    // what stands in when there is no OpenPak identity, as upstream has it.
+    u64 GetEffectiveAccountId() const {
+        const u64 nsa_id =
+            OpenPakSignedIn(system, user_id) ? openpak::client::session::NetworkServiceAccountId() : 0;
 
-        if (raw_pid == 0) {
-            return 0xcafe;
-        }
-
-        // [Nextendo] Version gate: refuse to present a real PID for a title whose installed
-        // version doesn't match what Nextendo's servers require, reusing the exact same
-        // server-side refusal as "no account linked" (0xcafe is not a real registered
-        // account, so the gated server rejects it) rather than inventing a new failure mode.
-        // Keeps outdated clients off the servers entirely -- reduces load from clients that
-        // can't speak the wire format the server expects, and keeps the playerbase from
-        // fragmenting across versions.
-        const u64 program_id = system.GetApplicationProcessProgramID();
-        if (Nextendo::CompatibleTitles::Table().contains(program_id)) {
-            const FileSys::PatchManager pm{program_id, system.GetFileSystemController(),
-                                           system.GetContentProvider()};
-            const auto metadata = pm.GetControlMetadata();
-            const std::string installed_version =
-                metadata.first != nullptr ? metadata.first->GetVersionString() : std::string{};
-            if (!Nextendo::CompatibleTitles::IsVersionOk(program_id, installed_version)) {
-                LOG_WARNING(Service_ACC,
-                            "[OpenPak] Refusing online PID: installed version doesn't match "
-                            "what this title requires for online play");
-                return 0xcafe;
-            }
-        }
-
-        return raw_pid;
+        return nsa_id != 0 ? nsa_id : profile_manager->GetLastOpenedUser().Hash();
     }
 
     void CheckAvailability(HLERequestContext& ctx) {
@@ -1169,9 +1025,8 @@ private:
     }
 
     void GetAccountId(HLERequestContext& ctx) {
-        u64 account_id = GetEffectivePid();
-        // The PID is accepted as a bare identity by the online service, so never log its value.
-        LOG_DEBUG(Service_ACC, "[OpenPak] Returning the linked account's Network ID");
+        const u64 account_id = GetEffectiveAccountId();
+        LOG_DEBUG(Service_ACC, "called");
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
@@ -1193,8 +1048,17 @@ private:
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
-        const std::vector<u8> token_bytes = GetIdTokenBytes();
-        LOG_INFO(Service_ACC, "[OpenPak] Providing BAAS ID token ({} bytes)", token_bytes.size());
+        // [OpenPak] This is the copy a running title actually reaches (IManagerForApplication,
+        // command 4). A title handed 0x100 zero bytes here throws where it parses them: Stardew
+        // aborts with 2162-0001 before it opens a single socket.
+        std::vector<u8> token_bytes = OpenPakIdTokenBytes(system, user_id);
+        if (token_bytes.empty()) {
+            LOG_WARNING(Service_ACC, "(STUBBED) called");
+            token_bytes.assign(0x100, u8(0));
+        } else {
+            LOG_INFO(Service_ACC, "[OpenPak] Handing the title an id_token ({} bytes)",
+                     token_bytes.size());
+        }
 
         ctx.WriteBuffer(token_bytes);
 
@@ -1205,7 +1069,7 @@ private:
     }
 
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {
-        u64 account_id = GetEffectivePid();
+        const u64 account_id = GetEffectiveAccountId();
         LOG_DEBUG(Service_ACC, "[OpenPak] GetNintendoAccountUserResourceCacheForApplication called");
 
         std::vector<u8> nas_user_base_for_application(0x68, 0);
@@ -1220,6 +1084,13 @@ private:
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
         rb.PushRaw<u64>(account_id);
+    }
+
+    void CreateAuthorizationRequest(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_ACC, "called");
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IAuthorizationRequest>(system, user_id);
     }
 
     void StoreOpenContext(HLERequestContext& ctx) {
@@ -1243,6 +1114,7 @@ private:
 
     std::shared_ptr<EnsureTokenIdCacheAsyncInterface> ensure_token_id{};
     std::shared_ptr<ProfileManager> profile_manager;
+    Common::UUID user_id; ///< The user the title asked about; OpenPak speaks for the active one only.
 };
 
 // 8.0.0+
@@ -1443,10 +1315,12 @@ Result Module::Interface::InitializeApplicationInfoBase() {
 }
 
 void Module::Interface::GetBaasAccountManagerForApplication(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_ACC, "called");
+    IPC::RequestParser rp{ctx};
+    const auto uuid = rp.PopRaw<Common::UUID>();
+    LOG_DEBUG(Service_ACC, "called, uuid=0x{}", uuid.RawString());
     IPC::ResponseBuilder rb{ctx, 2, 0, 1};
     rb.Push(ResultSuccess);
-    rb.PushIpcInterface<IManagerForApplication>(system, profile_manager);
+    rb.PushIpcInterface<IManagerForApplication>(system, profile_manager, uuid);
 }
 
 void Module::Interface::AuthenticateApplicationAsync(HLERequestContext& ctx) {
@@ -1661,25 +1535,22 @@ void Module::Interface::TrySelectUserWithoutInteraction(HLERequestContext& ctx) 
     LOG_DEBUG(Service_ACC, "called, is_network_service_account_required={}, user_count={}",
              is_network_service_account_required, profile_manager->GetUserCount());
     IPC::ResponseBuilder rb{ctx, 6};
-    if (profile_manager->GetUserCount() != 1) {
-        LOG_DEBUG(Service_ACC, "-> ResultSuccess w/ InvalidUUID (user_count != 1)");
-        rb.Push(ResultSuccess);
-        rb.PushRaw(Common::InvalidUUID);
-        return;
-    }
 
-    const auto user_list = profile_manager->GetAllUsers();
-    if (std::ranges::all_of(user_list, [](const auto& user) { return user.IsInvalid(); })) {
-        LOG_DEBUG(Service_ACC, "-> ResultUnknown (all users invalid)");
+    // [OpenPak] The profile in use, whatever the count: it is chosen when the emulator opens, and
+    // the OpenPak identity and cloud saves follow it, so a title that picks silently must pick
+    // the same one rather than ask again or take the first.
+    const auto current = profile_manager->GetUser(
+        static_cast<std::size_t>(Settings::values.current_user.GetValue()));
+    if (!current || current->IsInvalid()) {
+        LOG_DEBUG(Service_ACC, "-> ResultUnknown (no current user)");
         rb.Push(ResultUnknown); // TODO(ogniK): Find the correct error code
         rb.PushRaw(Common::InvalidUUID);
         return;
     }
 
-    // Select the first user we have
-    LOG_DEBUG(Service_ACC, "-> ResultSuccess uuid=0x{}", profile_manager->GetUser(0)->RawString());
+    LOG_DEBUG(Service_ACC, "-> ResultSuccess uuid=0x{}", current->RawString());
     rb.Push(ResultSuccess);
-    rb.PushRaw(profile_manager->GetUser(0)->uuid);
+    rb.PushRaw(*current);
 }
 
 void Module::Interface::GetUserRegistrationNotifier(HLERequestContext& ctx) {
