@@ -28,10 +28,6 @@ public:
 
 private slots:
     void OnRestoreDefaultLobbyApi();
-    void OnToggleUnhideServerIp(bool checked);
-    void OnToggleUnhideNatIp(bool checked);
-    void OnRestoreDefaultNextendoServerIp();
-    void OnRestoreDefaultNextendoNatIp();
 
 private:
     void changeEvent(QEvent*) override;

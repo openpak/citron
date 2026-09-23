@@ -4,39 +4,22 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <memory>
 #include <thread>
 #include <utility>
-
-#include <QActionGroup>
-#include <QByteArray>
-#include <QDesktopServices>
 #include <vector>
-#include <QDialog>
-#include <QDialogButtonBox>
+
+#include <QByteArray>
 #include <QDir>
 #include <QFileInfo>
-#include <QIcon>
 #include <QImage>
-#include <QInputDialog>
 #include <QJsonObject>
-#include <QLineEdit>
-#include <QListWidget>
 #include <QMenu>
-#include <QMessageBox>
 #include <QPointer>
-#include <QPushButton>
 #include <QStandardItemModel>
-#include <QSysInfo>
-#include <QUrl>
-#include <QVBoxLayout>
 
 #include <fmt/format.h>
 
-#include "citron/game_list.h"
-#include "citron/game_list_p.h"
-#include "citron/openpak_host.h"
-#include "citron/uisettings.h"
-#include "citron/util/controller_navigation.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
@@ -49,20 +32,33 @@
 #include "core/hle/service/am/applet_manager.h"
 #include "hid_core/hid_core.h"
 #include "openpak/account.h"
+#include "openpak/api.h"
 #include "openpak/friends_cache.h"
 #include "openpak/platform.h"
 #include "openpak/session.h"
+#include "openpak/qt/account_dialog.h"
 #include "openpak/qt/chat_client.h"
 #include "openpak/qt/crash_report_prompt.h"
-#include "openpak/qt/account_dialog.h"
+#include "openpak/qt/host_kit.h"
+#include "openpak/qt/prompts.h"
 #include "openpak/qt/save_sync.h"
 #include "openpak/qt/sign_in_dialog.h"
+#include "openpak/qt/strings.h"
+#include "openpak/qt/toast.h"
+#include "citron/game_list.h"
+#include "citron/game_list_p.h"
+#include "citron/openpak_host.h"
+#include "citron/uisettings.h"
+#include "citron/util/controller_navigation.h"
 
-#ifdef ENABLE_WEB_SERVICE
-#include "openpak/api.h"
-#endif
+using openpak::qt::Tr;
+using Kind = NextendoToast::Kind;
+namespace Api = WebService::OpenPakApi;
 
 namespace {
+
+// The emulator's name where OpenPak shows it: the device name, the cloud saves' "from".
+constexpr auto kEmulator = "Citron";
 
 // Citron's gamepad navigation, the HID core's player-one controller, handed to the shared dialogs
 // through the library's Navigation interface. The dialogs are the library's; the controller that
@@ -86,15 +82,27 @@ public:
     }
 };
 
-std::filesystem::path AvatarPath(const Common::UUID& uuid) {
-    return Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
-           fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
+QPixmap FromBase64(const std::string& base64) {
+    QPixmap picture;
+    if (!base64.empty()) {
+        picture.loadFromData(QByteArray::fromBase64(QByteArray::fromStdString(base64)));
+    }
+    return picture;
+}
+
+QPixmap FromBytes(const std::vector<u8>& bytes) {
+    QPixmap picture;
+    if (!bytes.empty()) {
+        picture.loadFromData(bytes.data(), static_cast<uint>(bytes.size()));
+    }
+    return picture;
 }
 
 } // namespace
 
 OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_, QObject* parent)
-    : openpak::qt::Host(parent), system(system_), main_window(main_window_) {
+    : openpak::qt::Host(parent), system(system_), main_window(main_window_),
+      toast(new NextendoToast(main_window_)) {
     friend_poll_timer.setInterval(20000);
     connect(&friend_poll_timer, &QTimer::timeout, this, &OpenPakHost::PollFriends);
     friend_poll_timer.start();
@@ -108,27 +116,63 @@ OpenPakHost::OpenPakHost(Core::System& system_, QWidget* main_window_, QObject* 
 
     active_profile = openpak::Platform::ProfileId();
 
-#ifdef ENABLE_WEB_SERVICE
-    // Which machine a cloud save version came from, as the Cloud saves page lists it.
-    WebService::OpenPakApi::SetSaveDevice(
-        QStringLiteral("Citron on %1").arg(QSysInfo::machineHostName()).toStdString());
-#endif
+    // Which machine a cloud save version came from, as the Cloud saves page lists it; the
+    // sign-in dialog's device name replaces it once somebody signs in.
+    Api::SetSaveDevice(
+        openpak::qt::DefaultDeviceName(QString::fromLatin1(kEmulator)).toStdString());
 }
 
 OpenPakHost::~OpenPakHost() = default;
+
+void OpenPakHost::Notify(int kind, const QString& text, const QPixmap& picture, int page,
+                         std::function<void()> on_click) {
+    if (page >= 0 && !on_click) {
+        on_click = [this, page] { OpenWindow(page); };
+    }
+    if (static_cast<Kind>(kind) == Kind::GameInvite && on_click) {
+        on_click = [this, click = std::move(on_click)] {
+            if (!invitation_clicked || !invitation_clicked()) {
+                click();
+            }
+        };
+    }
+    toast->Show(static_cast<Kind>(kind), text, picture, std::move(on_click));
+}
 
 void OpenPakHost::GoOnline() {
     // Sign in now rather than when a game first asks. Being online is the point of the
     // integration: until this runs the account is offline, invisible to friends, and hears about
     // no invitation. The chain is walked off the UI thread because a server that is slow to
     // answer must not be a window that is slow to open.
-    std::thread{[this] {
+    QPointer<OpenPakHost> self(this);
+    const QString profile = ProfileName();
+    std::thread{[this, self, profile] {
         // Configure before signing in, or Enabled() is false and Ensure() returns without a
         // word: the account service configures it too, but not until a game first asks, and the
         // whole point here is to be online before that.
         if (Settings::values.enable_openpak.GetValue()) {
             openpak::client::session::Configure(Settings::values.openpak_server_ip.GetValue(), 443,
                                                 {});
+        }
+
+        // A stored sign-in the website no longer takes starts the profile offline, with a toast
+        // rather than a prompt (UX spec §5.1).
+        if (Common::OpenPakAccount::HasBearer()) {
+            const auto profile_answer = Api::GetProfile();
+            if (!profile_answer.ok && profile_answer.error == "Your session expired. Sign in again.") {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, self, profile] {
+                        if (self) {
+                            Notify(static_cast<int>(Kind::Account),
+                                   Tr("The OpenPak sign-in for %1 has expired. Sign in again from "
+                                      "the OpenPak menu.")
+                                       .arg(profile),
+                                   {}, -1, [this] { SignIn(); });
+                        }
+                    },
+                    Qt::QueuedConnection);
+            }
         }
 
         if (!openpak::client::session::Ensure()) {
@@ -141,9 +185,7 @@ void OpenPakHost::GoOnline() {
             if (!system.IsPoweredOn()) {
                 return std::string{};
             }
-
             const u64 program_id = system.GetApplicationProcessProgramID();
-
             return program_id == 0 ? std::string{} : fmt::format("{:016x}", program_id);
         });
     }}.detach();
@@ -159,7 +201,6 @@ std::optional<Common::UUID> OpenPakHost::CurrentUser() const {
 
 QString OpenPakHost::ProfileName(const std::string& key) const {
     const auto& profile_manager = system.GetProfileManager();
-
     for (const auto& uuid : profile_manager.GetAllUsers()) {
         Service::Account::ProfileBase profile{};
         if (uuid.IsValid() && uuid.RawString() == key &&
@@ -170,15 +211,23 @@ QString OpenPakHost::ProfileName(const std::string& key) const {
                 profile.username.size()));
         }
     }
-
     return QString::fromStdString(key);
+}
+
+QString OpenPakHost::ProfileName() const {
+    const auto current = CurrentUser();
+    return current ? ProfileName(current->RawString()) : QString{};
+}
+
+std::filesystem::path OpenPakHost::AvatarPath(const Common::UUID& uuid) const {
+    return Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
+           fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
 }
 
 void OpenPakHost::SelectUser(const Common::UUID& uuid) {
     if (const auto index = system.GetProfileManager().GetUserIndex(uuid)) {
         Settings::values.current_user = static_cast<s32>(*index);
     }
-
     ProfileMaybeChanged();
 }
 
@@ -197,6 +246,7 @@ void OpenPakHost::ProfileMaybeChanged() {
     // Nothing shown for the last profile's account may be shown as this one's.
     Common::NextendoFriends::Set({});
     last_known_status.clear();
+    last_known_game.clear();
     offline_streak.clear();
     last_known_requests.clear();
     first_poll = true;
@@ -224,8 +274,8 @@ void OpenPakHost::RunStartup(bool interactive) {
     if (interactive && Settings::values.enable_openpak.GetValue()) {
         PickStartupProfile();
 
-        // Set up once, ever, and never over a game that is starting: sign in, create an account,
-        // or play offline -- after which the profile is the person's own either way.
+        // Set up once per install, and never over a game that is starting: sign in, create an
+        // account, or play offline -- after which the profile is the person's own either way.
         if (!IsLinked() && !UISettings::values.openpak_setup_offered.GetValue()) {
             UISettings::values.openpak_setup_offered = true;
             RunSetup(false);
@@ -244,13 +294,10 @@ void OpenPakHost::PickStartupProfile() {
         return;
     }
 
-    const QString startup =
-        QString::fromStdString(UISettings::values.openpak_startup_profile.GetValue());
-
+    const QString startup = QString::fromStdString(UISettings::values.openpak_startup_profile.GetValue());
     if (startup.isEmpty()) {
         return; // the last used, which current_user already is
     }
-
     if (startup != QStringLiteral("ask")) {
         for (const auto& uuid : profile_manager.GetAllUsers()) {
             if (uuid.IsValid() && QString::fromStdString(uuid.RawString()) == startup) {
@@ -260,105 +307,54 @@ void OpenPakHost::PickStartupProfile() {
         return;
     }
 
-    QDialog dialog(main_window);
-    dialog.setWindowTitle(tr("Who is playing?"));
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* list = new QListWidget;
-    list->setIconSize(QSize(48, 48));
-    layout->addWidget(list);
-
-    const auto current = CurrentUser();
+    std::vector<openpak::qt::ProfileRow> rows;
     for (const auto& uuid : profile_manager.GetAllUsers()) {
         if (uuid.IsInvalid()) {
             continue;
         }
-
         const std::string key = uuid.RawString();
-        const std::string account = Common::OpenPakAccount::UsernameOf(key);
-        auto* item = new QListWidgetItem(QStringLiteral("%1\n%2").arg(
-            ProfileName(key), account.empty()
-                                  ? tr("Offline")
-                                  : tr("OpenPak: %1").arg(QString::fromStdString(account))));
-        item->setData(Qt::UserRole, QString::fromStdString(key));
-        item->setIcon(
-            QIcon(QString::fromStdString(Common::FS::PathToUTF8String(AvatarPath(uuid)))));
-        list->addItem(item);
-
-        if (current && *current == uuid) {
-            list->setCurrentItem(item);
-        }
+        rows.push_back({QString::fromStdString(key), ProfileName(key),
+                        QString::fromStdString(Common::OpenPakAccount::UsernameOf(key)),
+                        QPixmap(QString::fromStdString(Common::FS::PathToUTF8String(AvatarPath(uuid))))});
     }
-
-    auto* buttons = new QDialogButtonBox;
-    buttons->addButton(tr("Continue"), QDialogButtonBox::AcceptRole);
-    QPushButton* add = buttons->addButton(tr("Add account"), QDialogButtonBox::ActionRole);
-    buttons->addButton(QDialogButtonBox::Cancel);
-    layout->addWidget(buttons);
-
-    bool add_account = false;
-    connect(add, &QPushButton::clicked, &dialog, [&] {
-        add_account = true;
-        dialog.accept();
-    });
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
-
-    if (dialog.exec() != QDialog::Accepted) {
-        return; // closing it keeps the last used
-    }
-
-    if (add_account) {
+    const auto current = CurrentUser();
+    const auto choice = openpak::qt::PickProfile(
+        main_window, rows, current ? QString::fromStdString(current->RawString()) : QString{});
+    switch (choice.action) {
+    case openpak::qt::ProfileChoice::Action::Add:
         RunSetup(true);
         return;
+    case openpak::qt::ProfileChoice::Action::Cancel:
+        return; // closing it keeps the last used
+    case openpak::qt::ProfileChoice::Action::Continue:
+        break;
     }
-
-    if (const auto* item = list->currentItem()) {
-        const std::string key = item->data(Qt::UserRole).toString().toStdString();
-        for (const auto& uuid : profile_manager.GetAllUsers()) {
-            if (uuid.IsValid() && uuid.RawString() == key) {
-                SelectUser(uuid);
-            }
+    if (choice.remember) {
+        UISettings::values.openpak_startup_profile = choice.key.toStdString();
+    }
+    for (const auto& uuid : profile_manager.GetAllUsers()) {
+        if (uuid.IsValid() && QString::fromStdString(uuid.RawString()) == choice.key) {
+            SelectUser(uuid);
         }
     }
 }
 
 void OpenPakHost::RunSetup(bool add_account) {
-    QMessageBox box(main_window);
-    box.setWindowTitle(add_account ? tr("Add an account") : tr("Set up this profile"));
-    box.setText(tr("Sign in to OpenPak to play online: friends, invitations and cloud saves follow "
-                   "this profile. Or keep it offline. You can sign in later from the OpenPak "
-                   "menu."));
-    QPushButton* sign_in = box.addButton(tr("Sign in with OpenPak"), QMessageBox::AcceptRole);
-    QPushButton* create = box.addButton(tr("Create an account"), QMessageBox::ActionRole);
-    QPushButton* offline = box.addButton(tr("Play offline"), QMessageBox::RejectRole);
-    QPushButton* cancel = add_account ? box.addButton(QMessageBox::Cancel) : nullptr;
-    box.setDefaultButton(sign_in);
-    // The first launch has no cancel: closing it is the offline path, which still asks a name.
-    box.setEscapeButton(add_account ? cancel : offline);
-    box.exec();
-
-    auto* const clicked = box.clickedButton();
-    if (cancel != nullptr && clicked == cancel) {
+    const openpak::qt::SetupChoice choice = openpak::qt::AskSetup(main_window, add_account);
+    if (choice == openpak::qt::SetupChoice::Cancel) {
         return;
     }
 
     auto& profile_manager = system.GetProfileManager();
-
-    if (clicked == offline) {
+    if (choice == openpak::qt::SetupChoice::Offline) {
         const auto current = CurrentUser();
         const QString suggested =
             add_account || !current ? QString{} : ProfileName(current->RawString());
-
-        bool ok = false;
-        const QString name = QInputDialog::getText(main_window, tr("Profile name"), tr("Name:"),
-                                                   QLineEdit::Normal, suggested, &ok)
-                                 .trimmed();
-        if (!ok || name.isEmpty()) {
-            RunSetup(add_account);
+        const QString name = openpak::qt::AskProfileName(main_window, suggested);
+        if (name.isEmpty()) {
+            RunSetup(add_account); // an empty name or Cancel goes back to the setup
             return;
         }
-
         if (add_account) {
             const auto uuid = Common::UUID::MakeRandom();
             profile_manager.CreateNewUser(uuid, name.toStdString());
@@ -369,13 +365,6 @@ void OpenPakHost::RunSetup(bool add_account) {
         }
         return;
     }
-
-#ifdef ENABLE_WEB_SERVICE
-    if (clicked == create) {
-        QDesktopServices::openUrl(QUrl(QString::fromStdString(WebService::OpenPakApi::BaseUrl()) +
-                                       QStringLiteral("/register")));
-    }
-#endif
 
     // The account is kept under the current profile, so a new one is made current before the
     // sign-in and taken away again if nobody signs in.
@@ -388,13 +377,14 @@ void OpenPakHost::RunSetup(bool add_account) {
         SelectUser(*created);
     }
 
+    // Create an account opened the website; the sign-in follows with what to do first.
     const QString intro =
-        clicked == create
-            ? tr("Finish creating your account in the browser and verify your email, then sign in "
-                 "here.")
+        choice == openpak::qt::SetupChoice::Create
+            ? Tr("Finish creating your account in the browser and verify your email, then sign "
+                 "in here.")
             : QString{};
 
-    AskAndSignIn(true, intro, {}, {}, [this, add_account, created, previous](bool signed_in) {
+    AskAndSignIn(true, intro, [this, add_account, created, previous](bool signed_in) {
         if (signed_in) {
             return;
         }
@@ -409,46 +399,10 @@ void OpenPakHost::RunSetup(bool add_account) {
     });
 }
 
-QMenu* OpenPakHost::CreateStartupMenu(QWidget* parent) {
-    auto* menu = new QMenu(tr("OpenPak account at startup"), parent);
-
-    // Rebuilt each time it opens: profiles come and go in the profile manager.
-    connect(menu, &QMenu::aboutToShow, menu, [this, menu] {
-        menu->clear();
-        auto* group = new QActionGroup(menu);
-        const QString chosen =
-            QString::fromStdString(UISettings::values.openpak_startup_profile.GetValue());
-
-        const auto add = [&](const QString& label, const QString& value) {
-            QAction* action = menu->addAction(label);
-            action->setCheckable(true);
-            action->setChecked(chosen == value);
-            group->addAction(action);
-            connect(action, &QAction::triggered, this, [value] {
-                UISettings::values.openpak_startup_profile = value.toStdString();
-            });
-        };
-
-        add(tr("Last used"), QString{});
-        add(tr("Ask every time"), QStringLiteral("ask"));
-        menu->addSeparator();
-        for (const auto& uuid : system.GetProfileManager().GetAllUsers()) {
-            if (uuid.IsValid()) {
-                add(ProfileName(uuid.RawString()), QString::fromStdString(uuid.RawString()));
-            }
-        }
-    });
-
-    return menu;
-}
-
 bool OpenPakHost::IsLinked() const {
     return Common::OpenPakAccount::IsLinked();
 }
 
-// OpenPak runs no chat server; the client stays for whoever points it at one. No
-// OPENPAK_API-style restriction is needed here (unlike the account API, this carries no account
-// token, only a bare PID and a display name).
 void OpenPakHost::EnsureChatConnected() {
     if (!Common::OpenPakAccount::IsLinked()) {
         return;
@@ -492,6 +446,7 @@ void OpenPakHost::EnsureChatConnected() {
         });
     }
 
+    // OpenPak runs no chat server. The client stays for whoever points it at one.
     const char* host_env = std::getenv("OPENPAK_CHAT_HOST");
     if (!host_env || !*host_env) {
         return;
@@ -509,7 +464,6 @@ QString OpenPakHost::ResolveGameName(const std::string& app_id_hex,
     if (app_id_hex.empty()) {
         return {};
     }
-
     u64 program_id = 0;
     try {
         program_id = std::stoull(app_id_hex, nullptr, 16);
@@ -532,14 +486,13 @@ QString OpenPakHost::ResolveGameName(const std::string& app_id_hex,
     if (!hint_name.empty()) {
         return QString::fromStdString(hint_name);
     }
-    return tr("a game");
+    return Tr("Unknown game");
 }
 
 QString OpenPakHost::ResolveGameIcon(const std::string& app_id_hex) const {
     if (app_id_hex.empty()) {
         return {};
     }
-
     u64 program_id = 0;
     try {
         program_id = std::stoull(app_id_hex, nullptr, 16);
@@ -566,6 +519,17 @@ QString OpenPakHost::ResolveGameIcon(const std::string& app_id_hex) const {
             .toBase64());
 }
 
+bool OpenPakHost::ChatEnabled() const {
+    // Citron's chat rooms are an experiment outside the OpenPak spec, offered only where a chat
+    // server has been named (OPENPAK_CHAT_HOST).
+    const char* host_env = std::getenv("OPENPAK_CHAT_HOST");
+    return host_env && *host_env;
+}
+
+QString OpenPakHost::ChatInviteText() const {
+    return tr("Invite to Chat Room");
+}
+
 std::string OpenPakHost::GetLocalAppId() const {
     if (!system.IsPoweredOn()) {
         return {};
@@ -574,150 +538,208 @@ std::string OpenPakHost::GetLocalAppId() const {
 }
 
 void OpenPakHost::SignIn() {
-    AskAndSignIn(false, {}, {}, {});
+    AskAndSignIn(false, {});
 }
 
-void OpenPakHost::AskAndSignIn(bool adopt, const QString& intro, const QString& error,
-                               const QString& last_email, std::function<void(bool)> done) {
-#ifdef ENABLE_WEB_SERVICE
-    // Email and password, asked here on the UI thread; the sign-in itself runs off it. The
-    // password goes to OpenPak over TLS and nowhere else: what comes back is a website token
+void OpenPakHost::AskAndSignIn(bool adopt, const QString& intro, std::function<void(bool)> done) {
+    // Email, password and device name, asked here; the sign-in runs off the UI thread with the
+    // dialog's busy bar, and a failure stays in the dialog with the email kept (UX spec §3.3).
+    // The password goes to OpenPak over TLS and nowhere else: what comes back is a website token
     // and the Switch identity the games see.
-    OpenPakSignInDialog dialog(main_window, intro, error, last_email);
-    if (dialog.exec() != QDialog::Accepted) {
+    struct Outcome {
+        Api::LoginResult result;
+        std::string link_failure;
+        bool linked = false;
+    };
+    auto outcome = std::make_shared<Outcome>();
+    const std::string profile = openpak::Platform::ProfileId();
+
+    OpenPakSignInDialog dialog(main_window, intro);
+    dialog.SetDeviceName(openpak::qt::DefaultDeviceName(QString::fromLatin1(kEmulator), ProfileName()));
+    dialog.SetSubmitter([this, outcome, profile](QString email, QString password,
+                                                 QString device) -> QString {
+        if (!device.isEmpty()) {
+            Api::SetDeviceName(device.toStdString());
+            Api::SetSaveDevice(device.toStdString());
+        }
+        auto result = Api::SignIn(email.toStdString(), password.toStdString());
+        if (!result.ok) {
+            return openpak::qt::ErrorText(result.error);
+        }
+        // One account, one profile: two profiles on one account would share a cloud-save slot and
+        // overwrite each other's progress. Checked before the console link, which would otherwise
+        // bind this profile's device account to it first.
+        const std::string holder = Common::OpenPakAccount::HolderOf(result.pid, profile);
+        if (!holder.empty()) {
+            return Tr("This OpenPak account is already linked to the profile \"%1\". Sign in "
+                      "there, or sign that profile out first.")
+                .arg(ProfileName(holder));
+        }
+        // Two sign-ins, because they are two different things: the website account is what
+        // friends and cloud saves speak with, and the console chain is what puts an identity in
+        // front of a title server. A link that fails leaves the website half standing, and the
+        // Account page offers Try again.
+        if (openpak::client::session::Enabled()) {
+            outcome->link_failure =
+                openpak::client::session::LinkWithPassword(email.toStdString(), password.toStdString());
+            outcome->linked = outcome->link_failure.empty();
+        }
+        outcome->result = std::move(result);
+        return {};
+    });
+
+    if (dialog.exec() != QDialog::Accepted || !outcome->result.ok) {
         if (done) {
             done(false);
         }
         return;
     }
-    const QString email = dialog.Email();
-    const QString password = dialog.Password();
-    emit StatusChanged(tr("Signing in to OpenPak..."));
 
-    QPointer<OpenPakHost> self(this);
-    std::thread{[this, self, email_utf8 = email.toStdString(),
-                 password_utf8 = password.toStdString(), adopt, intro, done] {
-        auto login_result = WebService::OpenPakApi::SignIn(email_utf8, password_utf8);
-
-        // One account, one profile: two profiles on one account would share a cloud-save slot and
-        // overwrite each other's progress. Checked before the console link, which would otherwise
-        // bind this profile's device account to it first.
-        if (login_result.ok) {
-            const std::string holder =
-                Common::OpenPakAccount::HolderOf(login_result.pid, openpak::Platform::ProfileId());
-            if (!holder.empty()) {
-                login_result.ok = false;
-                login_result.error = tr("This OpenPak account is already linked to the profile "
-                                        "\"%1\". Sign in there, or sign that profile out first.")
-                                         .arg(ProfileName(holder))
-                                         .toStdString();
-            }
-        }
-
-        // Two sign-ins, because they are two different things: the website account is what
-        // friends and cloud saves speak with, and the console chain is what puts an identity in
-        // front of a title server. A link that fails leaves the website half standing.
-        std::string link_failure;
-        if (login_result.ok && openpak::client::session::Enabled()) {
-            link_failure = openpak::client::session::LinkWithPassword(email_utf8, password_utf8);
-        }
-
-        if (!self) {
-            return;
-        }
-        QMetaObject::invokeMethod(
-            this,
-            [this, self, result = std::move(login_result), link_failure,
-             typed_email = QString::fromStdString(email_utf8), adopt, intro, done] {
-                if (!self) {
-                    return;
-                }
-                if (!result.ok) {
-                    emit StatusChanged(QString::fromStdString(result.error));
-                    emit SignInFinished();
-                    // Back to the dialog with the reason on it, rather than a line in the
-                    // status bar and a menu to find again.
-                    AskAndSignIn(adopt, intro, QString::fromStdString(result.error), typed_email, done);
-                    return;
-                }
-                emit StatusChanged(
-                    link_failure.empty()
-                        ? tr("Signed in as %1, and this console is now linked to your account.")
-                              .arg(QString::fromStdString(result.username))
-                        : tr("Signed in as %1, but the console link did not complete: %2")
-                              .arg(QString::fromStdString(result.username),
-                                   QString::fromStdString(link_failure)));
-
-                Common::OpenPakAccount::Save(result.pid, result.username, result.friend_code,
-                                             result.token, result.bearer);
-                if (adopt) {
-                    ApplyProfileName(result.username);
-                    SyncProfileAvatar();
-                }
-                Common::NextendoFriends::SetLocalStatus(Common::NextendoFriends::PresenceOnline);
-                first_poll = true;
-                emit AccountLinked();
-                emit SignInFinished();
-                RefreshFriendCache();
-                EnsureChatConnected();
-                if (done) {
-                    done(true);
-                }
-            },
-            Qt::QueuedConnection);
-    }}.detach();
-#else
-    emit StatusChanged(tr("This build has no web services support."));
-#endif
+    const auto& result = outcome->result;
+    if (!outcome->link_failure.empty()) {
+        LOG_WARNING(Frontend, "[OpenPak] Signed in, but the console link did not complete: {}",
+                    outcome->link_failure);
+    }
+    Common::OpenPakAccount::Save(result.pid, result.username, result.friend_code, result.token,
+                                 result.bearer);
+    if (adopt) {
+        ApplyProfileName(result.username);
+        SyncProfileAvatar();
+    }
+    Common::NextendoFriends::SetLocalStatus(Common::NextendoFriends::PresenceOnline);
+    first_poll = true;
+    const QString name = QString::fromStdString(result.username);
+    Notify(static_cast<int>(Kind::Account),
+           outcome->linked
+               ? Tr("Signed in as %1, and this console is now linked to your account.").arg(name)
+               : Tr("Signed in as %1.").arg(name),
+           {}, OpenPakAccountDialog::kAccountPage);
+    emit AccountLinked();
+    emit SignInFinished();
+    RefreshFriendCache();
+    EnsureChatConnected();
+    if (done) {
+        done(true);
+    }
 }
 
 void OpenPakHost::SignOut() {
     // The website token is revoked on the server, not only forgotten here, as Ryujinx does. The
     // console link stays: signing out of the website does not unlink a Switch either.
-#ifdef ENABLE_WEB_SERVICE
-    std::thread{[bearer = Common::OpenPakAccount::GetBearer()] {
-        WebService::OpenPakApi::RevokeToken(bearer);
-    }}.detach();
-#endif
+    std::thread{[bearer = Common::OpenPakAccount::GetBearer()] { Api::RevokeToken(bearer); }}.detach();
     Common::OpenPakAccount::Clear();
     Common::NextendoFriends::Set({});
     last_known_status.clear();
+    last_known_game.clear();
     offline_streak.clear();
     if (chat_client) {
         chat_client->Disconnect();
     }
+    Notify(static_cast<int>(Kind::Account), Tr("Signed out of OpenPak."));
     emit AccountUnlinked();
 }
 
-void OpenPakHost::ManualSaveDownload(u64 title_id) {
-#ifdef ENABLE_WEB_SERVICE
-    // Belt-and-suspenders: the dialog already hides this action while any game is running,
-    // but writing into the save directory while the emulated filesystem layer is mounted by
-    // a live session is what actually crashes it, so refuse here regardless of caller.
-    if (system.IsPoweredOn()) {
-        emit StatusChanged(tr("Stop the running game before downloading a cloud save."));
+void OpenPakHost::PopulateMenu(QMenu* menu, std::function<void()> open_settings_) {
+    open_settings = std::move(open_settings_);
+    openpak::qt::MenuHooks hooks;
+    hooks.game_running = [this] { return system.IsPoweredOn(); };
+    hooks.openpak_on = [] { return Settings::values.enable_openpak.GetValue(); };
+    hooks.signed_in_as = [this] {
+        return IsLinked() ? QString::fromStdString(Common::OpenPakAccount::GetUsername()) : QString{};
+    };
+    hooks.avatar = [this] {
+        const auto current = CurrentUser();
+        return current ? QPixmap(QString::fromStdString(Common::FS::PathToUTF8String(AvatarPath(*current))))
+                       : QPixmap{};
+    };
+    hooks.sign_in = [this] { SignIn(); };
+    hooks.sign_out = [this] { SignOut(); };
+    hooks.open_window = [this](int page) { OpenWindow(page); };
+    hooks.open_settings = [this] {
+        if (open_settings) {
+            open_settings();
+        }
+    };
+    hooks.profile_name = [this] { return ProfileName(); };
+    openpak::qt::PopulateOpenPakMenu(menu, std::move(hooks));
+}
+
+void OpenPakHost::OpenWindow(int page) {
+    if (window) {
+        window->GoToPage(page);
+        window->raise();
+        window->activateWindow();
         return;
     }
-    emit StatusChanged(tr("Downloading save from the cloud..."));
-    QPointer<OpenPakHost> self(this);
-    std::thread{[this, self, title_id, directory = SaveDirectory(title_id)] {
-        Nextendo::SaveSync::Pull(directory, title_id, /*force=*/true);
-        if (!self) {
-            return;
+    OpenPakAccountDialog dialog(this, main_window, page);
+    window = &dialog;
+    if (decorate_window) {
+        decorate_window(dialog);
+    }
+    dialog.exec();
+    window = nullptr;
+}
+
+void OpenPakHost::ToggleWindow() {
+    if (window) {
+        window->close();
+        return;
+    }
+    OpenWindow(OpenPakAccountDialog::LastPage());
+}
+
+openpak::qt::SettingsHooks OpenPakHost::MakeSettingsHooks() {
+    openpak::qt::SettingsHooks hooks;
+    hooks.enabled = [] { return Settings::values.enable_openpak.GetValue(); };
+    hooks.set_enabled = [](bool on) { Settings::values.enable_openpak = on; };
+    hooks.game_running = [this] { return system.IsPoweredOn(); };
+    hooks.profile = [this] { return ProfileName(); };
+    hooks.signed_in_as = [this] {
+        return IsLinked() ? QString::fromStdString(Common::OpenPakAccount::GetUsername()) : QString{};
+    };
+    hooks.sign_in = [this] { SignIn(); };
+    hooks.sign_out = [this] { SignOut(); };
+    hooks.open_window = [this] { OpenWindow(OpenPakAccountDialog::kAccountPage); };
+    hooks.profiles = [this] {
+        std::vector<std::pair<QString, QString>> profiles;
+        for (const auto& uuid : system.GetProfileManager().GetAllUsers()) {
+            if (uuid.IsValid()) {
+                profiles.emplace_back(QString::fromStdString(uuid.RawString()),
+                                      ProfileName(uuid.RawString()));
+            }
         }
+        return profiles;
+    };
+    hooks.startup = [] {
+        return QString::fromStdString(UISettings::values.openpak_startup_profile.GetValue());
+    };
+    hooks.set_startup = [](const QString& value) {
+        UISettings::values.openpak_startup_profile = value.toStdString();
+    };
+    return hooks;
+}
+
+void OpenPakHost::ManualSaveDownload(u64 title_id) {
+    // The Cloud saves page already disables this while a game runs, but writing into the save
+    // directory while the emulated filesystem has it mounted is what breaks it, so it is refused
+    // here whoever asks.
+    if (system.IsPoweredOn()) {
+        emit StatusChanged(Tr("Stop the running game first."));
+        return;
+    }
+    QPointer<OpenPakHost> self(this);
+    const QString game = ResolveGameName(fmt::format("{:016X}", title_id));
+    std::thread{[this, self, title_id, game, directory = SaveDirectory(title_id)] {
+        Nextendo::SaveSync::Pull(directory, title_id, /*force=*/true);
         QMetaObject::invokeMethod(
             this,
-            [this, self] {
-                if (!self) {
-                    return;
+            [this, self, game] {
+                if (self) {
+                    emit StatusChanged(Tr("Downloaded the cloud save for %1.").arg(game));
                 }
-                emit StatusChanged(tr("Cloud save applied."));
             },
             Qt::QueuedConnection);
     }}.detach();
-#else
-    emit StatusChanged(tr("This build has no web services support."));
-#endif
 }
 
 void OpenPakHost::PullSaveBeforeLaunch(u64 title_id) {
@@ -727,12 +749,21 @@ void OpenPakHost::PullSaveBeforeLaunch(u64 title_id) {
     const QString game = ResolveGameName(fmt::format("{:016X}", title_id));
     switch (Nextendo::SaveSync::PullBeforeLaunch(SaveDirectory(title_id), title_id)) {
     case Nextendo::SaveSync::PullOutcome::Pulled:
-        emit StatusChanged(tr("Your cloud save for %1 is here.").arg(game));
+    {
+        const QString text =
+            Tr("Cloud save for %1 downloaded; the previous local copy was kept beside it.").arg(game);
+        Notify(static_cast<int>(Kind::Saves), text, {}, OpenPakAccountDialog::kCloudSavesPage);
+        emit StatusChanged(text);
         break;
+    }
     case Nextendo::SaveSync::PullOutcome::BothExist:
-        emit StatusChanged(tr("%1 has a save here and one in the cloud; nothing was changed. "
-                              "Choose one on the Cloud saves page.")
-                               .arg(game));
+        // Never a blocking choice at launch (UX spec §3.9): the game starts on its local save,
+        // and the toast leads to Resolve... on the Cloud saves page.
+        Notify(static_cast<int>(Kind::Saves),
+               Tr("%1 has a save here and a different one in the cloud. Choose one on the Cloud "
+                  "saves page.")
+                   .arg(game),
+               {}, OpenPakAccountDialog::kCloudSavesPage);
         break;
     case Nextendo::SaveSync::PullOutcome::Nothing:
         break;
@@ -756,10 +787,15 @@ void OpenPakHost::PushSaveAfterExit(u64 title_id) {
         QMetaObject::invokeMethod(
             this,
             [this, self, error, game] {
-                if (self) {
-                    emit StatusChanged(error.empty() ? tr("%1 saved to the cloud.").arg(game)
-                                                     : QString::fromStdString(error));
+                if (!self) {
+                    return;
                 }
+                const QString text = error.empty()
+                                         ? Tr("Save for %1 uploaded to OpenPak.").arg(game)
+                                         : Tr("The save for %1 did not upload: %2")
+                                               .arg(game, openpak::qt::ErrorText(error));
+                Notify(static_cast<int>(Kind::Saves), text, {}, OpenPakAccountDialog::kCloudSavesPage);
+                emit StatusChanged(text);
             },
             Qt::QueuedConnection);
     }}.detach();
@@ -773,7 +809,6 @@ void OpenPakHost::ApplyProfileName(const std::string& name) {
     if (name.empty()) {
         return;
     }
-
     // The live profile manager, not a throwaway one parsed from disk: that is the instance every
     // running game and the profile manager page read, so a rename made anywhere else never shows.
     auto& profile_manager = system.GetProfileManager();
@@ -798,7 +833,6 @@ void OpenPakHost::ApplyProfileName(const std::string& name) {
 }
 
 void OpenPakHost::SyncProfileAvatar() {
-#ifdef ENABLE_WEB_SERVICE
     if (!Common::OpenPakAccount::IsLinked()) {
         return;
     }
@@ -809,21 +843,19 @@ void OpenPakHost::SyncProfileAvatar() {
     const auto uuid = *current;
     const u64 pid = Common::OpenPakAccount::GetPid();
     std::thread{[this, uuid, pid, guard = QPointer<OpenPakHost>(this)] {
-        const std::string b64 = WebService::OpenPakApi::GetAvatarByPid(pid);
+        const std::string b64 = Api::GetAvatarByPid(pid);
         if (b64.empty()) {
             return;
         }
         QMetaObject::invokeMethod(
             this,
             [this, guard, uuid, b64] {
-                if (!guard) {
-                    return;
+                if (guard) {
+                    WriteProfileAvatar(uuid, b64);
                 }
-                WriteProfileAvatar(uuid, b64);
             },
             Qt::QueuedConnection);
     }}.detach();
-#endif
 }
 
 void OpenPakHost::WriteProfileAvatar(const Common::UUID& uuid, const std::string& avatar_b64) {
@@ -834,10 +866,7 @@ void OpenPakHost::WriteProfileAvatar(const Common::UUID& uuid, const std::string
     if (image.width() != 256 || image.height() != 256) {
         image = image.scaled(256, 256, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
     }
-
-    const auto image_path =
-        QString::fromStdString(Common::FS::PathToUTF8String(AvatarPath(uuid)));
-
+    const auto image_path = QString::fromStdString(Common::FS::PathToUTF8String(AvatarPath(uuid)));
     QDir{}.mkpath(QFileInfo(image_path).absolutePath());
     if (image.save(image_path, "JPEG")) {
         LOG_INFO(Frontend, "[OpenPak] Synced the active profile's avatar from the account");
@@ -849,6 +878,7 @@ void OpenPakHost::RefreshFriendCache() {
 }
 
 void OpenPakHost::NotifyFriendRequestSent(const QString& friend_code) {
+    // The window's status line says it (UX spec §3.10: request sent is not a toast).
     emit FriendRequestSent(friend_code);
 }
 
@@ -858,9 +888,7 @@ QString OpenPakHost::JoinFriendSession(u64 pid) {
                                  [pid](const auto& e) { return e.pid == pid; });
     if (it == entries.end() || it->status != Common::NextendoFriends::PresenceOnlinePlay ||
         it->app_field.empty()) {
-        const QString message = tr("That friend isn't in a joinable game right now.");
-        emit StatusChanged(message);
-        return message;
+        return Tr("That friend is not in a game you can join right now.");
     }
 
     // Bypasses the native Invite Friends applet entirely: this friend's published session blob
@@ -869,32 +897,22 @@ QString OpenPakHost::JoinFriendSession(u64 pid) {
     const auto user = CurrentUser();
     if (!user || !system.GetAppletManager().PushFriendInvitation(
                      *user, std::vector<u8>(it->app_field.begin(), it->app_field.end()))) {
-        const QString message = tr("Start the game first, then join from here.");
-        emit StatusChanged(message);
-        return message;
+        return Tr("Start the game first, then join from here.");
     }
-
-    const QString message = tr("Joining %1's game.").arg(QString::fromStdString(it->name));
-    emit StatusChanged(message);
-    return message;
+    return Tr("Joining %1's game.").arg(QString::fromStdString(it->name));
 }
 
 void OpenPakHost::PollFriends() {
-#ifdef ENABLE_WEB_SERVICE
     if (!Common::OpenPakAccount::IsLinked()) {
         return;
     }
 
     QPointer<OpenPakHost> self(this);
     std::thread{[this, self] {
-        auto fetched = WebService::OpenPakApi::GetFriends();
-        if (!fetched.ok) {
+        auto fetched = Api::GetFriends();
+        if (!fetched.ok || !self) {
             return;
         }
-        if (!self) {
-            return;
-        }
-
         QMetaObject::invokeMethod(
             this,
             [this, self, list = std::move(fetched)] {
@@ -906,54 +924,67 @@ void OpenPakHost::PollFriends() {
                 for (const auto& entry : list.friends) {
                     const auto decoded_image =
                         QByteArray::fromBase64(QByteArray::fromStdString(entry.image_base64));
-                    cache.push_back(
-                        {entry.pid, entry.name, entry.presence_status, entry.app_field,
-                         std::vector<u8>(decoded_image.begin(), decoded_image.end())});
+                    cache.push_back({entry.pid, entry.name, entry.presence_status, entry.app_field,
+                                     std::vector<u8>(decoded_image.begin(), decoded_image.end())});
                 }
-                // This cache feeds the toasts and the host's own lists. The guest reads the
-                // library's BAAS caches instead, whose sync signals its notification queues.
                 Common::NextendoFriends::Set(std::move(cache));
 
-                const bool suppress_toasts = first_poll;
+                // The first answer after start or sign-in is silent (UX spec §3.10).
+                const bool quiet = first_poll;
                 first_poll = false;
 
                 std::map<u64, s32> current_status;
+                std::map<u64, std::string> current_game;
                 for (const auto& entry : list.friends) {
                     const auto it = last_known_status.find(entry.pid);
                     const bool was_online = it != last_known_status.end() && it->second != 0;
+                    const QString name = QString::fromStdString(entry.name);
 
-                    // A status of 0 on a single poll can be a mid-transition blip on the
-                    // server (e.g. switching presence when joining a match together) rather
-                    // than a real disconnect. Require it to repeat on the next poll (~20s)
-                    // before treating the friend as actually offline, so a one-poll blip can't
-                    // fire a false "went offline" or the false "came online" right after it.
+                    // A status of 0 on a single poll can be a blip while presence changes (say,
+                    // joining a match together) rather than a real disconnect: it has to repeat
+                    // on the next poll before the friend counts as offline.
                     if (entry.presence_status == 0 && was_online) {
                         if (++offline_streak[entry.pid] < 2) {
                             current_status[entry.pid] = it->second;
+                            current_game[entry.pid] = last_known_game[entry.pid];
                             continue;
                         }
-                        if (!suppress_toasts) {
-                            emit FriendWentOffline(entry.pid, QString::fromStdString(entry.name),
-                                                   QString::fromStdString(entry.image_base64));
-                        }
+                        emit FriendWentOffline(entry.pid, name, QString::fromStdString(entry.image_base64));
                     } else {
                         offline_streak.erase(entry.pid);
-                        const bool was_offline = it == last_known_status.end() || it->second == 0;
-                        if (!suppress_toasts && was_offline && entry.presence_status != 0) {
-                            emit FriendCameOnline(entry.pid, QString::fromStdString(entry.name),
-                                                  ResolveGameName(entry.app_id, entry.app_name),
+                        const QString game = entry.app_id.empty()
+                                                 ? QString{}
+                                                 : ResolveGameName(entry.app_id, entry.app_name);
+                        const bool came_online = !was_online && entry.presence_status != 0;
+                        const bool new_game = was_online && !entry.app_id.empty() &&
+                                              last_known_game[entry.pid] != entry.app_id;
+                        if (!quiet && came_online) {
+                            Notify(static_cast<int>(Kind::Online),
+                                   game.isEmpty() ? Tr("%1 is online").arg(name)
+                                                  : Tr("%1 is playing %2").arg(name, game),
+                                   FromBase64(entry.image_base64), OpenPakAccountDialog::kFriendsPage);
+                            emit FriendCameOnline(entry.pid, name, game,
                                                   QString::fromStdString(entry.image_base64));
+                        } else if (!quiet && new_game) {
+                            Notify(static_cast<int>(Kind::Online), Tr("%1 is playing %2").arg(name, game),
+                                   FromBase64(entry.image_base64), OpenPakAccountDialog::kFriendsPage);
                         }
                     }
                     current_status[entry.pid] = entry.presence_status;
+                    current_game[entry.pid] = entry.presence_status != 0 ? entry.app_id : std::string{};
                 }
                 last_known_status = std::move(current_status);
+                last_known_game = std::move(current_game);
 
                 std::set<u64> current_requests;
                 for (const auto& entry : list.requests) {
                     current_requests.insert(entry.pid);
-                    if (!suppress_toasts && !last_known_requests.contains(entry.pid)) {
-                        emit FriendRequestReceived(entry.pid, QString::fromStdString(entry.name),
+                    if (!quiet && !last_known_requests.contains(entry.pid)) {
+                        const QString name = QString::fromStdString(entry.name);
+                        Notify(static_cast<int>(Kind::Request),
+                               Tr("%1 wants to be your friend").arg(name),
+                               FromBase64(entry.image_base64), OpenPakAccountDialog::kFriendsPage);
+                        emit FriendRequestReceived(entry.pid, name,
                                                    QString::fromStdString(entry.image_base64));
                     }
                 }
@@ -961,7 +992,6 @@ void OpenPakHost::PollFriends() {
             },
             Qt::QueuedConnection);
     }}.detach();
-#endif
 }
 
 void OpenPakHost::PollInvitations() {
@@ -982,29 +1012,37 @@ void OpenPakHost::PollInvitations() {
 
         const QString sender = QString::fromStdString(invitation.sender_name);
         const QString game = ResolveGameName(invitation.title_id);
+        // The sender's picture, when they are a friend the cache has one for.
+        QPixmap sender_picture;
+        for (const auto& known : Common::NextendoFriends::Get()) {
+            if (known.name == invitation.sender_name) {
+                sender_picture = FromBytes(known.image);
+                break;
+            }
+        }
         if (running.empty() || Common::ToLower(running) != Common::ToLower(invitation.title_id)) {
             if (announced_invitations.insert(invitation.id).second) {
-                emit StatusChanged(
-                    tr("%1 invited you to play %2. Start it to join.").arg(sender, game));
-                // The toast, as a console shows one on its HOME menu: the sender is a BAAS user
-                // here rather than an OpenPak pid, so none is given.
+                Notify(static_cast<int>(Kind::GameInvite), Tr("%1 invited you to %2").arg(sender, game),
+                       sender_picture, OpenPakAccountDialog::kInvitationsPage);
                 emit FriendInvitationReceived(0, sender);
             }
             continue;
         }
 
         offered_invitations.insert(invitation.id);
-        const auto answer = QMessageBox::question(
-            main_window, tr("Game invitation"),
-            tr("%1 invited you to join them in %2.").arg(sender, game),
-            QMessageBox::Yes | QMessageBox::Ignore, QMessageBox::Yes);
-
-        if (answer == QMessageBox::Yes) {
+        openpak::qt::InvitationCard card;
+        card.sender = sender;
+        card.sender_picture = sender_picture;
+        card.game = game;
+        card.game_icon = FromBase64(ResolveGameIcon(invitation.title_id).toStdString());
+        card.sent = invitation.created_at;
+        card.message = openpak::qt::InvitationMessage(invitation.messages);
+        if (openpak::qt::OfferInvitation(main_window, card)) {
             const auto user = CurrentUser();
             if (!user ||
                 !system.GetAppletManager().PushFriendInvitation(*user, invitation.app_param)) {
-                emit StatusChanged(
-                    tr("The game closed before the invitation could be handed over."));
+                Notify(static_cast<int>(Kind::GameInvite),
+                       Tr("The game closed before the invitation could be handed over."));
             }
         }
 
@@ -1040,8 +1078,7 @@ std::vector<openpak::qt::Host::Title> OpenPakHost::InstalledTitles() const {
 std::filesystem::path OpenPakHost::ModDirectory(u64 title_id) {
     // load/<TITLEID>/<mod>/romfs: where BISFactory::GetModificationLoadRoot reads, so an
     // installed mod shows up in the title's Properties -> Add-Ons like any other.
-    return Common::FS::GetCitronPath(Common::FS::CitronPath::LoadDir) /
-           fmt::format("{:016X}", title_id);
+    return Common::FS::GetCitronPath(Common::FS::CitronPath::LoadDir) / fmt::format("{:016X}", title_id);
 }
 
 std::filesystem::path OpenPakHost::SaveDirectory(u64 title_id) {
@@ -1049,8 +1086,8 @@ std::filesystem::path OpenPakHost::SaveDirectory(u64 title_id) {
     // builds. The active profile's own, because the cloud save belongs to the account that
     // profile is signed in as: another profile's folder would upload somebody else's progress.
     // A title with only a device save (ACNH) keeps it under the all-zero user, as on a console.
-    const auto root = Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) / "user" /
-                      "save" / "0000000000000000";
+    const auto root = Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) / "user" / "save" /
+                      "0000000000000000";
     const std::string title = fmt::format("{:016X}", title_id);
     const auto current = CurrentUser();
     if (!current || current->IsInvalid()) {
@@ -1075,22 +1112,22 @@ bool OpenPakHost::IsDarkTheme() const {
     return UISettings::IsDarkTheme();
 }
 
-// Notification and cloud-sync preferences are Citron's own settings, as they were before the
-// dialogs moved into the library.
+// The notification and cloud-sync preferences are settings, under the same keys as Citron's
+// (UX spec §3.13).
 bool OpenPakHost::NotificationsEnabled() const {
-    return UISettings::values.nextendo_notifications_enabled.GetValue();
+    return UISettings::values.openpak_notifications_enabled.GetValue();
 }
 
 void OpenPakHost::SetNotificationsEnabled(bool enabled) {
-    UISettings::values.nextendo_notifications_enabled = enabled;
+    UISettings::values.openpak_notifications_enabled = enabled;
 }
 
 int OpenPakHost::NotificationCorner() const {
-    return UISettings::values.nextendo_notification_corner.GetValue();
+    return UISettings::values.openpak_notification_corner.GetValue();
 }
 
 void OpenPakHost::SetNotificationCorner(int corner) {
-    UISettings::values.nextendo_notification_corner = corner;
+    UISettings::values.openpak_notification_corner = corner;
 }
 
 bool OpenPakHost::RedirectEnabled() const {
@@ -1124,94 +1161,4 @@ openpak::qt::Navigation* OpenPakHost::CreateNavigation(QObject* parent) {
         return nullptr;
     }
     return new OpenPakNavigation(system.HIDCore(), owner);
-}
-
-// The OpenPak menu as the UX spec has it (emulators/prds/openpak-ux-spec.md §3.1): the same ten
-// items, order and words in every emulator. States are recomputed each time the menu opens.
-void OpenPakHost::PopulateMenu(QMenu* menu, std::function<void(int)> open_window,
-                               std::function<void()> open_settings) {
-    menu->clear();
-    menu->setTitle(tr("&OpenPak"));
-
-    QAction* header = menu->addAction(tr("Sign in to OpenPak..."));
-    menu->addSeparator();
-
-    struct PageItem {
-        const char* text;
-        int page;
-        bool needs_account;
-    };
-    static constexpr PageItem pages[] = {
-        {QT_TR_NOOP("Friends"), OpenPakAccountDialog::kFriendsPage, true},
-        {QT_TR_NOOP("Invitations"), OpenPakAccountDialog::kInvitationsPage, true},
-        {QT_TR_NOOP("Cloud saves"), OpenPakAccountDialog::kCloudSavesPage, true},
-        {QT_TR_NOOP("Mods"), OpenPakAccountDialog::kModsPage, false},
-        {QT_TR_NOOP("News"), OpenPakAccountDialog::kNewsPage, false},
-        {QT_TR_NOOP("Status"), OpenPakAccountDialog::kStatusPage, false},
-    };
-    std::vector<std::pair<QAction*, bool>> page_actions;
-    for (const PageItem& item : pages) {
-        QAction* action = menu->addAction(tr(item.text));
-        connect(action, &QAction::triggered, this,
-                [open_window, page = item.page] { open_window(page); });
-        page_actions.emplace_back(action, item.needs_account);
-    }
-    menu->addSeparator();
-    QAction* settings = menu->addAction(tr("OpenPak settings..."));
-    QAction* website = menu->addAction(tr("OpenPak website"));
-    QAction* sign_out = menu->addAction(tr("Sign out..."));
-
-    connect(header, &QAction::triggered, this, [this, open_window, open_settings] {
-        if (!Settings::values.enable_openpak.GetValue()) {
-            open_settings();
-        } else if (IsLinked()) {
-            open_window(OpenPakAccountDialog::kAccountPage);
-        } else {
-            SignIn();
-        }
-    });
-    connect(settings, &QAction::triggered, this, [open_settings] { open_settings(); });
-    connect(website, &QAction::triggered, this, [] {
-        QDesktopServices::openUrl(
-            QUrl(QString::fromStdString(WebService::OpenPakApi::BaseUrl())));
-    });
-    connect(sign_out, &QAction::triggered, this, [this, menu] {
-        // §3.5. The library's shared confirmation replaces this box when it lands (spec L6).
-        QMessageBox box(QMessageBox::Question, tr("Sign out of OpenPak?"),
-                        tr("%1 goes offline on this emulator. Your friends, invitations and "
-                           "cloud saves stay on your account, and you can sign in again at any "
-                           "time.")
-                            .arg(ProfileName(openpak::Platform::ProfileId())),
-                        QMessageBox::NoButton, menu->parentWidget());
-        QPushButton* confirm = box.addButton(tr("Sign out"), QMessageBox::DestructiveRole);
-        QPushButton* cancel = box.addButton(QMessageBox::Cancel);
-        box.setDefaultButton(cancel);
-        box.setEscapeButton(cancel);
-        box.exec();
-        if (box.clickedButton() == confirm) {
-            SignOut();
-        }
-    });
-
-    connect(menu, &QMenu::aboutToShow, this, [this, header, page_actions, sign_out] {
-        const bool enabled = Settings::values.enable_openpak.GetValue();
-        const bool linked = enabled && IsLinked();
-        const bool running = system.IsPoweredOn();
-        if (linked) {
-            header->setText(tr("Signed in as %1")
-                                .arg(QString::fromStdString(Common::OpenPakAccount::GetUsername())));
-            header->setEnabled(true);
-            header->setToolTip({});
-        } else {
-            header->setText(tr("Sign in to OpenPak..."));
-            header->setEnabled(!enabled || !running);
-            header->setToolTip(enabled && running ? tr("Stop the running game first.")
-                                                  : QString{});
-        }
-        for (const auto& [action, needs_account] : page_actions) {
-            action->setEnabled(!needs_account || linked);
-        }
-        sign_out->setEnabled(linked && !running);
-        sign_out->setToolTip(linked && running ? tr("Stop the running game first.") : QString{});
-    });
 }

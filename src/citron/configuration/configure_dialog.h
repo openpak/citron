@@ -31,6 +31,7 @@ class ConfigureGraphicsAdvanced;
 class ConfigureHotkeys;
 class ConfigureInput;
 class ConfigureNetwork;
+class ConfigureOpenPak;
 class ConfigureProfileManager;
 class ConfigureSystem;
 class ConfigureUi;
@@ -53,6 +54,9 @@ public:
     void ApplyConfiguration();
 
     ConfigureFilesystem* GetFilesystemTab() const { return filesystem_tab.get(); }
+
+    // Shows the OpenPak page, as the OpenPak menu's OpenPak settings... asks.
+    void SelectOpenPak();
 
 public slots:
     void UpdateTheme();
@@ -88,6 +92,8 @@ private:
     std::unique_ptr<ConfigureHotkeys> hotkeys_tab;
     std::unique_ptr<ConfigureInput> input_tab;
     std::unique_ptr<ConfigureNetwork> network_tab;
+    std::unique_ptr<ConfigureOpenPak> openpak_tab;
+    QPushButton* openpak_tab_button = nullptr;
     std::unique_ptr<ConfigureProfileManager> profile_tab;
     std::unique_ptr<ConfigureSystem> system_tab;
     std::unique_ptr<ConfigureWeb> web_tab;

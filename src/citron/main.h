@@ -332,6 +332,8 @@ private slots:
     void OnMenuTrimXCI();
     void OnMenuRecentFile();
     void OnConfigure();
+    // Configure, opened at its OpenPak page (the OpenPak menu's OpenPak settings...).
+    void OnConfigureOpenPak();
     void OnConfigureTas();
     void OnDecreaseVolume();
     void OnIncreaseVolume();
@@ -459,8 +461,7 @@ private:
     LoadingScreen* loading_screen;
     QTimer shutdown_timer;
     OpenPakHost* openpak_host = nullptr;
-    NextendoToast* nextendo_toast = nullptr;
-    OpenPakAccountDialog* nextendo_account_dialog_instance = nullptr;
+    bool configure_at_openpak = false; ///< The next Configure opens at its OpenPak page.
     QString pending_chat_invite_room_id;
     // The room itself lives in this persistent floating overlay (not tied to any
     // menu/toast click's lifetime), same pattern as multiplayer_room_overlay below

@@ -35,6 +35,7 @@
 #include "citron/configuration/configure_input_player.h"
 #include "citron/configuration/configure_neo_themes.h"
 #include "citron/configuration/configure_network.h"
+#include "citron/configuration/configure_openpak.h"
 #include "citron/configuration/configure_profile_manager.h"
 #include "citron/configuration/configure_system.h"
 #include "citron/configuration/configure_ui.h"
@@ -95,6 +96,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
       hotkeys_tab{std::make_unique<ConfigureHotkeys>(registry, system_.HIDCore(), this)},
       input_tab{std::make_unique<ConfigureInput>(system_, this)},
       network_tab{std::make_unique<ConfigureNetwork>(system_, this)},
+      openpak_tab{std::make_unique<ConfigureOpenPak>(system_, this)},
       profile_tab{std::make_unique<ConfigureProfileManager>(system_, this)},
       system_tab{std::make_unique<ConfigureSystem>(system_, nullptr, *builder, this)},
       web_tab{std::make_unique<ConfigureWeb>(this)},
@@ -120,14 +122,18 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
 
     animation_filter = new StyleAnimationEventFilter(this);
 
+    // OpenPak's page (UX spec §3.13) comes right after Network.
+    openpak_tab_button = new QPushButton(tr("OpenPak"));
+    openpak_tab_button->setCheckable(true);
+
     // Explicitly list buttons to ensure correct order in the layout
     const std::vector<QPushButton*> ordered_buttons = {
         ui->generalTabButton,          ui->uiTabButton,       ui->neoThemesTabButton,
         ui->systemTabButton,           ui->cpuTabButton,      ui->graphicsTabButton,
         ui->graphicsAdvancedTabButton, ui->audioTabButton,    ui->inputTabButton,
-        ui->hotkeysTabButton,          ui->networkTabButton,  ui->webTabButton,
-        ui->filesystemTabButton,       ui->profilesTabButton, ui->appletsTabButton,
-        ui->loggingTabButton,
+        ui->hotkeysTabButton,          ui->networkTabButton,  openpak_tab_button,
+        ui->webTabButton,              ui->filesystemTabButton, ui->profilesTabButton,
+        ui->appletsTabButton,          ui->loggingTabButton,
     };
     tab_buttons = ordered_buttons;
 
@@ -181,6 +187,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     tab_button_group->addButton(ui->profilesTabButton, 13);
     tab_button_group->addButton(ui->appletsTabButton, 14);
     tab_button_group->addButton(ui->loggingTabButton, 15);
+    tab_button_group->addButton(openpak_tab_button, 16);
 
     ui->stackedWidget->addWidget(CreateScrollArea(general_tab.get()));
     ui->stackedWidget->addWidget(CreateScrollArea(ui_tab.get()));
@@ -198,6 +205,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->stackedWidget->addWidget(CreateScrollArea(profile_tab.get()));
     ui->stackedWidget->addWidget(CreateScrollArea(applets_tab.get()));
     ui->stackedWidget->addWidget(CreateScrollArea(debug_tab_tab.get()));
+    ui->stackedWidget->addWidget(CreateScrollArea(openpak_tab.get())); // id 16
 
     connect(tab_button_group.get(), qOverload<int>(&QButtonGroup::idClicked), this,
             &ConfigureDialog::SwitchTab);
@@ -486,6 +494,7 @@ void ConfigureDialog::ApplyConfiguration() {
     debug_tab_tab->ApplyConfiguration();
     web_tab->ApplyConfiguration();
     network_tab->ApplyConfiguration();
+    openpak_tab->ApplyConfiguration();
     applets_tab->ApplyConfiguration();
     neo_themes_tab->ApplyConfiguration();
     system.ApplySettings();
@@ -508,6 +517,7 @@ void ConfigureDialog::changeEvent(QEvent* event) {
 void ConfigureDialog::RetranslateUI() {
     const int old_index = ui->stackedWidget->currentIndex();
     ui->retranslateUi(this);
+    openpak_tab_button->setText(tr("OpenPak"));
     SetConfiguration();
     ui->stackedWidget->setCurrentIndex(old_index);
 }
@@ -542,4 +552,9 @@ void ConfigureDialog::SwitchTab(int id) {
         }
     }
     ui->stackedWidget->setCurrentIndex(id);
+}
+
+void ConfigureDialog::SelectOpenPak() {
+    openpak_tab_button->setChecked(true);
+    SwitchTab(16);
 }

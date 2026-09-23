@@ -179,6 +179,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "openpak/qt/online_counts.h"
 #include "openpak/qt/nzp_online_count.h"
 #include "citron/nextendo_population_history.h"
+#include "openpak/qt/strings.h"
 #include "openpak/qt/toast.h"
 #include "citron/play_time_manager.h"
 #include "openpak/account.h"
@@ -1374,7 +1375,6 @@ void GMainWindow::InitializeWidgets() {
     openpak::qt::Host::SetCurrent(openpak_host);
     // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
     openpak::qt::InstallFriendPicker(openpak_host, this);
-    nextendo_toast = new NextendoToast(this);
     Nextendo::OnlineCounts::Start(this);
     Nextendo::NzpOnlineCount::Start(this);
     Nextendo::PopulationHistory::Start(this);
@@ -1445,13 +1445,8 @@ void GMainWindow::InitializeWidgets() {
     multiplayer_room_overlay->hide();
 
     nextendo_room_overlay = new NextendoRoomOverlay(this, openpak_host);
-    connect(nextendo_room_overlay, &NextendoRoomOverlay::InvitePickerRequested, this, [this] {
-        OpenPakAccountDialog dialog(openpak_host, this,
-                                     OpenPakAccountDialog::kFriendsPage);
-        connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
-                [this](u64 pid, const QString& name) { OpenNextendoChatWindow({}, pid, name); });
-        dialog.exec();
-    });
+    connect(nextendo_room_overlay, &NextendoRoomOverlay::InvitePickerRequested, this,
+            [this] { openpak_host->OpenWindow(OpenPakAccountDialog::kFriendsPage); });
 
     vram_overlay = new VramOverlay(this);
     vram_overlay->hide();
@@ -1956,7 +1951,7 @@ void GMainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::BootGame, this, &GMainWindow::BootGameFromList);
     connect(game_list, &GameList::GameChosen, this, &GMainWindow::OnGameListLoadFile);
     connect(game_list, &GameList::OpenOpenPakAccountRequested, this,
-            [this] { ui->action_Nextendo_Open_Account->trigger(); });
+            [this] { openpak_host->OpenWindow(OpenPakAccountDialog::kAccountPage); });
     connect(game_list, &GameList::OpenDirectory, this, &GMainWindow::OnGameListOpenDirectory);
     connect(game_list, &GameList::OpenFolderRequested, this, &GMainWindow::OnGameListOpenFolder);
     connect(game_list, &GameList::OpenTransferableShaderCacheRequested, this,
@@ -2100,135 +2095,47 @@ void GMainWindow::ConnectMenuEvents() {
     connect(ui->action_Leave_Room, &QAction::triggered, multiplayer_state,
             &MultiplayerState::OnCloseRoom);
 
-    // NexTendo
-    // The OpenPak menu (UX spec §3.1), built by the host so Citron's and Eden's are the same;
-    // the top bar's OpenPak button opens this same menu. Open Account Page stays as the hotkey's
-    // action only.
-    openpak_host->PopulateMenu(
-        ui->menu_NexTendo,
-        [this](int page) {
-            OpenPakAccountDialog dialog(openpak_host, this, page);
-            nextendo_account_dialog_instance = &dialog;
-            connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
-                    [this](u64 pid, const QString& name) {
-                        OpenNextendoChatWindow({}, pid, name);
-                    });
-            dialog.exec();
-            nextendo_account_dialog_instance = nullptr;
-        },
-        [this] { OnConfigure(); });
-
-    connect(ui->action_Nextendo_Open_Account, &QAction::triggered, this, [this] {
-        if (!Common::OpenPakAccount::IsLinked()) {
-            openpak_host->SignIn();
-            return;
-        }
-        // Pressing the hotkey again while the dialog is already open closes it instead of
-        // stacking another one on top.
-        if (nextendo_account_dialog_instance) {
-            nextendo_account_dialog_instance->close();
-            return;
-        }
-        OpenPakAccountDialog dialog(openpak_host, this);
-        nextendo_account_dialog_instance = &dialog;
+    // OpenPak
+    // The OpenPak menu (UX spec §3.1), built by the library the way every emulator has it; the top
+    // bar's OpenPak button opens this same menu, and OpenPak settings... opens Configure at its
+    // OpenPak page. The host owns the window and the toasts (§3.10), so nothing OpenPak goes to
+    // the status bar.
+    openpak_host->PopulateMenu(ui->menu_NexTendo, [this] { OnConfigureOpenPak(); });
+    // Citron's chat rooms, an experiment outside the spec, hang off the window's Friends page.
+    openpak_host->decorate_window = [this](OpenPakAccountDialog& dialog) {
         connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
                 [this](u64 pid, const QString& name) { OpenNextendoChatWindow({}, pid, name); });
-        dialog.exec();
-        nextendo_account_dialog_instance = nullptr;
-    });
-    connect(nextendo_toast, &NextendoToast::clicked, this, [this](NextendoToast::Kind kind) {
-        if (!Common::OpenPakAccount::IsLinked()) {
-            return;
+    };
+    // Open OpenPak (UX spec §3.1): the window at its last page, or closed when it is open. No
+    // keyboard default; Home+X on a controller.
+    connect(ui->action_Nextendo_Open_Account, &QAction::triggered, this,
+            [this] { openpak_host->ToggleWindow(); });
+    // Outbound's join is armed by hand while it runs (the guest call in core/nextendo_guest_call):
+    // a game-invitation toast clicked then joins, rather than opening the Invitations page.
+    openpak_host->invitation_clicked = [this] {
+        constexpr u64 OutboundTitleId = 0x0100ED9024EB8000ULL;
+        if (!emulation_running || !system->IsPoweredOn() ||
+            play_time_manager->GetProgramId() != OutboundTitleId) {
+            return false;
         }
-        if (kind == NextendoToast::Kind::Request) {
-            OpenPakAccountDialog dialog(openpak_host, this,
-                                         OpenPakAccountDialog::kFriendsPage);
-            connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
-                    [this](u64 pid, const QString& name) { OpenNextendoChatWindow({}, pid, name); });
-            dialog.exec();
-        } else if (kind == NextendoToast::Kind::ChatRequest) {
-            OpenNextendoChatWindow(pending_chat_invite_room_id);
-        } else if (kind == NextendoToast::Kind::GameInvite) {
-            // [Nextendo] Outbound is the only title this currently supports (see
-            // HANDOFF.md); the invitation itself was already queued into
-            // Common::NextendoFriends by PollInvitations regardless of this click, so a
-            // running Outbound picks it up on its own next poll either way -- this click
-            // only needs to launch it for a joiner who isn't already in it. Real bug found
-            // live: BootGameFromList force-stops whatever is currently running before
-            // starting the new boot, so calling it unconditionally force-killed an
-            // already-running Outbound mid-session (a live Photon connection included) and
-            // rebooting into that torn-down state corrupted guest memory. Never boot if
-            // Outbound is the game already running.
-            constexpr u64 OutboundTitleId = 0x0100ED9024EB8000ULL;
-            if (emulation_running && system->IsPoweredOn() &&
-                play_time_manager->GetProgramId() == OutboundTitleId) {
-                // [Nextendo] Outbound is running: this click is the user ACCEPTING the
-                // invite. Fire the manufactured guest-call join now -- the user has had
-                // the chance to get in position (multiplayer menu inside a loaded save);
-                // auto-firing on delivery instead crashed the game when the invite
-                // arrived at the title/main menu (observed live, twice).
-                if (Core::NextendoGuestCall::ArmPendingInvite(*system->ApplicationProcess())) {
-                    nextendo_toast->Show(tr("Joining your friend's game..."), {}, {},
-                                         NextendoToast::Kind::GameInvite);
-                } else {
-                    nextendo_toast->Show(tr("Could not start the join -- see log for details"),
-                                         {}, {}, NextendoToast::Kind::GameInvite);
-                }
-                return;
-            }
-            const QString path = game_list->GetGamePath(OutboundTitleId);
-            if (!path.isEmpty()) {
-                BootGameFromList(path, StartGameType::Normal);
-            }
+        // Auto-firing on delivery crashed the game when the invitation arrived at the title or
+        // main menu (seen live, twice); the click is the person saying they are ready.
+        if (!Core::NextendoGuestCall::ArmPendingInvite(*system->ApplicationProcess())) {
+            LOG_ERROR(Frontend, "OpenPak: could not arm the Outbound join");
         }
-    });
-    connect(openpak_host, &openpak::qt::Host::StatusChanged, this,
-            [this](const QString& message) {
-                if (!message.isEmpty()) {
-                    statusBar()->showMessage(message, 8000);
-                }
-            });
-    connect(openpak_host, &openpak::qt::Host::FriendCameOnline, this,
-            [this](u64 /*pid*/, const QString& name, const QString& game_name,
-                  const QString& avatar_base64) {
-                const QString detail =
-                    game_name.isEmpty() ? tr("is now online") : tr("is now playing %1").arg(game_name);
-                nextendo_toast->Show(name, detail, avatar_base64, NextendoToast::Kind::Online);
-            });
-    connect(openpak_host, &openpak::qt::Host::FriendWentOffline, this,
-            [this](u64 /*pid*/, const QString& name, const QString& avatar_base64) {
-                nextendo_toast->Show(name, tr("is now offline"), avatar_base64,
-                                     NextendoToast::Kind::Offline);
-            });
-    connect(openpak_host, &openpak::qt::Host::FriendRequestReceived, this,
-            [this](u64 /*pid*/, const QString& name, const QString& avatar_base64) {
-                nextendo_toast->Show(name, tr("sent you a friend request"), avatar_base64,
-                                     NextendoToast::Kind::Request);
-            });
-    connect(openpak_host, &openpak::qt::Host::FriendRequestSent, this,
-            [this](const QString& friend_code) {
-                nextendo_toast->Show(tr("Friend Request Sent!"), friend_code, {},
-                                     NextendoToast::Kind::RequestSent);
-            });
+        return true;
+    };
+    // The chat experiment's own notices, only while it is switched on (OPENPAK_CHAT_HOST).
     connect(openpak_host, &openpak::qt::Host::ChatInviteReceived, this,
             [this](const QString& room_id, const QString& room_name, u64 /*from_pid*/,
                    const QString& from_name) {
-                nextendo_toast->Show(from_name, tr("invited you to \"%1\"").arg(room_name), {},
-                                     NextendoToast::Kind::ChatRequest);
                 pending_chat_invite_room_id = room_id;
-            });
-    connect(openpak_host, &openpak::qt::Host::ChatInviteSent, this, [this](u64 /*target_pid*/) {
-        nextendo_toast->Show(tr("Chat Invite Sent!"), {}, {}, NextendoToast::Kind::RequestSent);
-    });
-    connect(openpak_host, &openpak::qt::Host::ChatMemberJoined, this,
-            [this](const QString& /*room_id*/, u64 /*pid*/, const QString& name) {
-                nextendo_toast->Show(name, tr("joined your chat room"), {},
-                                     NextendoToast::Kind::Online);
-            });
-    connect(openpak_host, &openpak::qt::Host::FriendInvitationReceived, this,
-            [this](u64 /*pid*/, const QString& name) {
-                nextendo_toast->Show(name, tr("invited you to join their game"), {},
-                                     NextendoToast::Kind::GameInvite);
+                if (openpak_host->ChatEnabled()) {
+                    openpak_host->Toasts()->Show(
+                        NextendoToast::Kind::ChatRequest,
+                        tr("%1 invited you to \"%2\"").arg(from_name, room_name), {},
+                        [this] { OpenNextendoChatWindow(pending_chat_invite_room_id); });
+                }
             });
     connect(openpak_host, &openpak::qt::Host::ChatBanned, this, [this](const QString& reason) {
         if (nextendo_room_overlay) {
@@ -4886,6 +4793,12 @@ void GMainWindow::ResetWindowSize1080() {
     ResetWindowSize(Layout::ScreenDocked::Width, Layout::ScreenDocked::Height);
 }
 
+void GMainWindow::OnConfigureOpenPak() {
+    configure_at_openpak = true;
+    OnConfigure();
+    configure_at_openpak = false;
+}
+
 void GMainWindow::OnConfigure() {
     m_is_configuring = true;
     const auto old_theme = UISettings::values.theme;
@@ -4904,6 +4817,9 @@ void GMainWindow::OnConfigure() {
                                      !multiplayer_state->IsHostingPublicRoom());
     connect(&configure_dialog, &ConfigureDialog::LanguageChanged, this,
             &GMainWindow::OnLanguageChanged);
+    if (configure_at_openpak) {
+        configure_dialog.SelectOpenPak();
+    }
 
     const auto result = configure_dialog.exec();
 
@@ -7187,6 +7103,9 @@ void GMainWindow::LoadTranslation() {
     } else {
         UISettings::values.language = std::string("en");
     }
+
+    // OpenPak's words come from the library's own table (UX spec §7), in the same language.
+    openpak::qt::LoadTranslations(QString::fromStdString(UISettings::values.language.GetValue()));
 }
 
 void GMainWindow::OnLanguageChanged(const QString& locale) {
