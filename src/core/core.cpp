@@ -71,6 +71,7 @@
 #include "core/hle/service/am/process_creation.h"
 #include "core/hle/service/apm/apm_controller.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/hle/service/friend/openpak_friends.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/glue/time/static.h"
 #include "core/hle/service/psc/time/static.h"
@@ -459,6 +460,10 @@ struct System::Impl {
         if (metadata.first != nullptr) {
             title_version = metadata.first->GetVersionString();
         }
+
+        // [OpenPak] Presence says what is being played, in the NACP's presence group.
+        Service::Friend::OpenPak::ApplicationStarted(params.program_id, metadata.first.get());
+
         if (auto room_member = room_network.GetRoomMember().lock()) {
             Network::GameInfo game_info;
             game_info.name = name;
@@ -529,6 +534,10 @@ struct System::Impl {
 
         stop_event = {};
         Network::RestartSocketOperations();
+
+        // [OpenPak] Nothing runs any more, which presence says as INACTIVE.
+        Service::Friend::OpenPak::ApplicationStopped();
+
         arp_manager.ResetAll();
 
         if (device_memory) {
