@@ -31,11 +31,4 @@ public:
 
 void LoopProcess(Core::System& system);
 
-// [Nextendo] Signals every live INotificationService that the friends list has (potentially)
-// changed, so it re-fetches and re-renders. Real hardware pushes this whenever presence/friend
-// data actually updates; citron's INotificationService only ever signaled it once, at
-// construction time -- before the background poll had a chance to populate real data -- so
-// nothing ever told a viewer already on-screen to check again. Safe to call from any thread.
-void NotifyFriendsListUpdated();
-
 } // namespace Service::Friend

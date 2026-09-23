@@ -46,7 +46,6 @@
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
-#include "core/hle/service/friend/friend.h"
 #include "hid_core/hid_core.h"
 #include "openpak/account.h"
 #include "openpak/compatible_titles.h"
@@ -195,7 +194,6 @@ void OpenPakHost::ProfileMaybeChanged() {
 
     // Nothing shown for the last profile's account may be shown as this one's.
     Common::NextendoFriends::Set({});
-    Service::Friend::NotifyFriendsListUpdated();
     last_known_status.clear();
     offline_streak.clear();
     last_known_requests.clear();
@@ -678,7 +676,6 @@ void OpenPakHost::SignOut() {
 #endif
     Common::OpenPakAccount::Clear();
     Common::NextendoFriends::Set({});
-    Service::Friend::NotifyFriendsListUpdated();
     last_known_status.clear();
     offline_streak.clear();
     if (chat_client) {
@@ -913,11 +910,9 @@ void OpenPakHost::PollFriends() {
                         {entry.pid, entry.name, entry.presence_status, entry.app_field,
                          std::vector<u8>(decoded_image.begin(), decoded_image.end())});
                 }
+                // This cache feeds the toasts and the host's own lists. The guest reads the
+                // library's BAAS caches instead, whose sync signals its notification queues.
                 Common::NextendoFriends::Set(std::move(cache));
-                // The guest's own INotificationService only signals once, at construction --
-                // before this first real poll has a chance to land. Without this, a Friends
-                // viewer already on-screen never learns that real data showed up.
-                Service::Friend::NotifyFriendsListUpdated();
 
                 const bool suppress_toasts = first_poll;
                 first_poll = false;
