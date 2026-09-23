@@ -377,7 +377,7 @@
   </action>
   <action name="action_Nextendo_Open_Account">
    <property name="text">
-    <string>&amp;Open Account Page</string>
+    <string>Open OpenPak</string>
    </property>
   </action>
   <action name="action_Start_Room">
