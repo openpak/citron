@@ -7,6 +7,9 @@ concurrency:
 on:
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   check-version:
     name: Check if new version available
@@ -58,6 +61,34 @@ jobs:
             echo "should_build=false" >> $GITHUB_OUTPUT
             echo "⏭️ No changes - skipping build"
           fi
+
+      # Artifacts no longer carry the build between jobs: the organisation's artifact quota
+      # filled up and stopped every release (2026-09-23). The release is made here, before the
+      # builds, and each build attaches its own files to it.
+      - name: Replace the nightly release
+        if: steps.compare.outputs.should_build == 'true' && github.ref_name == 'main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = 'nightly-linux';
+            try {
+              const old = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              await github.rest.repos.deleteRelease({ owner, repo, release_id: old.data.id });
+            } catch (e) { if (e.status !== 404) throw e; }
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (e) { if (e.status !== 404 && e.status !== 422) throw e; }
+            const sha = '${{ steps.head.outputs.hash_full }}';
+            const short = '${{ steps.head.outputs.hash_short }}';
+            const date = new Date().toISOString().slice(0, 10);
+            await github.rest.repos.createRelease({
+              owner, repo, tag_name: tag, target_commitish: sha, make_latest: 'false',
+              name: `Continuous Build (Linux Nightly: ${short})`,
+              body: `**Citron Commit:** [\`${short}\`](https://github.com/${owner}/${repo}/commit/${sha})\n\n` +
+                    `**Build Details:**\n- Platform: Linux (x86_64, x86_64_v3, aarch64)\n` +
+                    `- Format: AppImage + tar.zst packages\n- Build Type: Release with optimizations\n- Date: ${date}`,
+            });
 
   build:
     name: "${{ matrix.name }}"
@@ -118,11 +149,15 @@ jobs:
           chmod +x ./package-citron.sh
           ./package-citron.sh
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Attach to the nightly release
+        if: ${{ github.ref_name == 'main' }}
+        uses: softprops/action-gh-release@v2
         with:
-          name: Artifacts${{ matrix.artifact_suffix }}
-          path: dist/
+          tag_name: "nightly-linux"
+          make_latest: false
+          files: |
+            dist/*.AppImage*
+            dist/*.tar.zst
 
   release:
     if: ${{ github.ref_name == 'main' }}
@@ -140,42 +175,6 @@ jobs:
       - name: Set Version
         id: version
         run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: Artifacts*
-          merge-multiple: true
-          path: .
-
-      - name: Del Previous Release
-        run: gh release delete "nightly-linux" --repo "${GITHUB_REPOSITORY}" --cleanup-tag -y && sleep 5
-        env:
-          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-        continue-on-error: true
-
-      - name: Set Build Date
-        run: echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          name: "Continuous Build (Linux Nightly: ${{ steps.version.outputs.sha }})"
-          tag_name: "nightly-linux"
-          prerelease: false
-          draft: false
-          generate_release_notes: false
-          make_latest: false
-          files: |
-            *.AppImage*
-            *.tar.zst
-          body: |
-            **Citron Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/${{ github.repository }}/commit/${{ needs.check-version.outputs.new_hash_full }})
-
-            **Build Details:**
-            - Platform: Linux (x86_64, x86_64_v3, aarch64)
-            - Format: AppImage + tar.zst packages
-            - Build Type: Release with optimizations
-            - Date: ${{ env.BUILD_DATE }}
 
       - name: Update LATEST_VERSION
         if: success()
