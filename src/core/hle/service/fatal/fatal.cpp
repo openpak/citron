@@ -16,6 +16,7 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/server_manager.h"
 #include "core/reporter.h"
+#include "openpak/crash_reports.h"
 
 namespace Service::Fatal {
 
@@ -143,6 +144,18 @@ static void ThrowFatalError(Core::System& system, Result error_code, FatalType f
     const auto module = static_cast<u32>(error_code.GetModule());
     LOG_ERROR(Service_Fatal, "Threw fatal error type {} with error code 0x{:X}", fatal_type,
               error_code.raw);
+
+    // OpenPak: saved for the next launch to offer, never sent from under a running game.
+    const std::string openpak_code =
+        fmt::format("{:04}-{:04d}", 2000 + module, static_cast<u32>(error_code.GetDescription()));
+    openpak::CrashReports::Record(
+        openpak_code, fmt::format("Guest fatal error {}", openpak_code),
+        fmt::format("fatal:u type {} result {:#x} pc {:#x}", static_cast<u32>(fatal_type),
+                    error_code.raw, info.pc),
+        {{"kind", "guest_fatal"},
+         {"result", fmt::format("{:#010x}", error_code.raw)},
+         {"fatal_type", std::to_string(static_cast<u32>(fatal_type))}},
+        system.GetApplicationProcessProgramID());
 
     switch (fatal_type) {
     case FatalType::ErrorReportAndScreen:

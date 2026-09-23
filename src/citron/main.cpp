@@ -130,6 +130,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include <fmt/ranges.h>
 #include "common/detached_tasks.h"
 #include "common/fs/fs.h"
+#include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
 #include "common/logging.h"
@@ -166,6 +167,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/loading_screen.h"
 #include "citron/main.h"
 #include "openpak/compatibility.h"
+#include "openpak/crash_reports.h"
 #include "openpak/log.h"
 #include "openpak/qt/account_dialog.h"
 #include "openpak/session.h"
@@ -1351,6 +1353,14 @@ void GMainWindow::InitializeWidgets() {
             break;
         }
     });
+    // Crash reports: saved on a crash, offered at the next launch (OpenPakHost::RunStartup), sent
+    // only with consent. Here, before any game boots, so the JIT's fastmem handler goes in on top
+    // of this one and still sees its own faults first.
+    if (Settings::values.enable_openpak.GetValue()) {
+        openpak::CrashReports::Install(
+            {"citron", std::string{Common::g_build_version},
+             Common::FS::GetCitronPath(Common::FS::CitronPath::LogDir) / LOG_FILE});
+    }
     openpak_host = new OpenPakHost(*system, this, this);
     openpak::qt::Host::SetCurrent(openpak_host);
     // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
@@ -2646,6 +2656,7 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     }
 
     current_title_id = title_id; // Store ID safely
+    openpak::CrashReports::SetTitleId(title_id);
 
     // [Nextendo] Splatoon 3 refuses to boot with any mod OR cheat active. Updates/DLC are
     // unaffected -- those are PatchType::Update/DLC. Matches Ryujinx-Nextendo's own equivalent
@@ -2957,6 +2968,7 @@ void GMainWindow::OnEmulationStopped() {
     // OpenPak: the save the title just wrote goes up, now that nothing is writing to it -- the
     // emulation thread has exited and the save-data factory has just been rebuilt.
     openpak_host->PushSaveAfterExit(current_title_id);
+    openpak::CrashReports::SetTitleId(0);
 
     // Refresh the game list now that the filesystem is valid again.
     game_list->ClearLaunchOverlays();

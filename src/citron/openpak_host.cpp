@@ -53,6 +53,7 @@
 #include "openpak/platform.h"
 #include "openpak/session.h"
 #include "openpak/qt/chat_client.h"
+#include "openpak/qt/crash_report_prompt.h"
 #include "openpak/qt/account_dialog.h"
 #include "openpak/qt/save_sync.h"
 #include "openpak/qt/sign_in_dialog.h"
@@ -229,6 +230,9 @@ void OpenPakHost::RunStartup(bool interactive) {
             UISettings::values.openpak_setup_offered = true;
             RunSetup(false);
         }
+
+        // A crash last time left a report; it goes nowhere unless somebody says so.
+        openpak::qt::OfferCrashReports(main_window);
     }
 
     GoOnline();
