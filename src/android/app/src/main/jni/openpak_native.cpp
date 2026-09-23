@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <cstdlib>
 #include <chrono>
 #include <filesystem>
 #include <future>
@@ -21,6 +23,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include <common/android/android_common.h>
 #include <common/android/id_cache.h>
