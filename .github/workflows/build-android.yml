@@ -16,28 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check if feature branch exists and get commit hash
+      - name: Get the commit to build
         id: branch_check
         run: |
-          REPO_URL="https://github.com/${{ github.repository }}.git"
-          FEATURE="NULL"
-
-          if git ls-remote --heads "$REPO_URL" "$FEATURE" | grep -q "$FEATURE"; then
-            BRANCH_NAME="$FEATURE"
-            FULL_HASH=$(git ls-remote "$REPO_URL" "$FEATURE" | cut -f1)
-            echo "✅ Using feature branch: $BRANCH_NAME"
-          else
-            BRANCH_NAME="main"
-            FULL_HASH=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
-            echo "⚠️ Feature branch not found, falling back to: $BRANCH_NAME"
-          fi
-
-          SHORT_HASH=$(echo "$FULL_HASH" | cut -c1-7)
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "hash_short=$SHORT_HASH" >> $GITHUB_OUTPUT
+          # What was dispatched: main for the nightly, any other branch for a test build.
+          FULL_HASH=$(git rev-parse HEAD)
+          echo "branch_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          echo "hash_short=$(echo "$FULL_HASH" | cut -c1-7)" >> $GITHUB_OUTPUT
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
-          echo "hash(short): $SHORT_HASH"
-          echo "hash(full):   $FULL_HASH"
 
       - name: Get last built version
         id: last_built
@@ -74,8 +60,39 @@ jobs:
             echo "⏭️ No changes - skipping build"
           fi
 
+      # Artifacts no longer carry the APKs to a release job: the organisation's artifact quota
+      # filled up and stopped every release (2026-09-23). The release is made here, before the
+      # builds, and each build attaches its own APK to it.
+      - name: Replace the nightly release
+        if: steps.compare.outputs.should_build == 'true' && github.ref_name == 'main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = 'nightly-android';
+            try {
+              const old = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              await github.rest.repos.deleteRelease({ owner, repo, release_id: old.data.id });
+            } catch (e) { if (e.status !== 404) throw e; }
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `tags/${tag}` });
+            } catch (e) { if (e.status !== 404 && e.status !== 422) throw e; }
+            const sha = '${{ steps.branch_check.outputs.hash_full }}';
+            const short = '${{ steps.branch_check.outputs.hash_short }}';
+            const date = new Date().toISOString().slice(0, 10);
+            await github.rest.repos.createRelease({
+              owner, repo, tag_name: tag, target_commitish: sha, make_latest: 'false',
+              name: `Continuous Build: (Android Nightly: ${short})`,
+              body: `**Citron Commit:** [\`${short}\`](https://github.com/${owner}/${repo}/commit/${sha})\n\n` +
+                    `**Build Details:**\n- Platform: Android (arm64-v8a)\n- Build Type: Release with LTO enabled\n` +
+                    `- Date: ${date}\n- Includes: Standard build + Snapdragon 8 Elite build with Qualcomm patches\n` +
+                    `- OpenPak: sign-in and profiles, friends, invitations, cloud saves, mods, news and status`,
+            });
+
   build-android:
     name: Build Android APK
+    permissions:
+      contents: write
     needs: [check-version]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: [self-hosted, linux, podman]
@@ -91,6 +108,16 @@ jobs:
         with:
           ref: ${{ needs.check-version.outputs.branch_name }}
           submodules: recursive
+
+      # The container runs as root over a workspace the runner's user owns: git refuses it as
+      # "dubious ownership" unless told otherwise.
+      - name: Add Git Safe Directory
+        run: git config --global --add safe.directory '*'
+
+      # The checkout's submodules are shallow, and vcpkg reads its baseline out of its own history
+      # ("failed to unpack tree object"): the vcpkg submodule needs all of it.
+      - name: Full vcpkg history
+        run: git -C externals/vcpkg fetch --unshallow --tags origin || git -C externals/vcpkg fetch --tags origin
 
       - name: Get Citron Commit Hash
         id: get_hash
@@ -137,14 +164,41 @@ jobs:
           ./gradlew assembleMainlineRelease \
             -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
+          COUNT="$(git -C ../.. rev-list --count HEAD)"
+          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::Build failed: No APK file was found."
+            exit 1
+          fi
+          mkdir -p artifacts
+          mv "$APK_PATH" "artifacts/Citron-${COUNT}-Android.apk"
+
+      - name: Attach to the nightly release
+        if: github.ref_name == 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-android
+          files: src/android/artifacts/*.apk
+
       - name: Upload APK artifact
+        if: github.ref_name != 'main'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: citron-android-nightly
-          path: src/android/app/build/outputs/apk/mainline/release/*.apk
+          path: src/android/artifacts/*.apk
+          retention-days: 3
+
+      # The runner runs this container as root in rootful Docker: what the build left behind is
+      # handed back to the runner's own user, or the next checkout on this runner cannot clean it.
+      - name: Hand the workspace back to the runner
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
 
   build-android-8elite:
     name: Build Android APK (Snapdragon 8 Elite)
+    permissions:
+      contents: write
     needs: [check-version]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: [self-hosted, linux, podman]
@@ -167,6 +221,16 @@ jobs:
         with:
           ref: ${{ needs.check-version.outputs.branch_name }}
           submodules: recursive
+
+      # The container runs as root over a workspace the runner's user owns: git refuses it as
+      # "dubious ownership" unless told otherwise.
+      - name: Add Git Safe Directory
+        run: git config --global --add safe.directory '*'
+
+      # The checkout's submodules are shallow, and vcpkg reads its baseline out of its own history
+      # ("failed to unpack tree object"): the vcpkg submodule needs all of it.
+      - name: Full vcpkg history
+        run: git -C externals/vcpkg fetch --unshallow --tags origin || git -C externals/vcpkg fetch --tags origin
 
       - name: Install Build Dependencies
         run: |
@@ -265,60 +329,45 @@ jobs:
           mkdir -p artifacts
           mv "$APK_PATH" "artifacts/$APK_NAME.apk"
 
+      - name: Attach to the nightly release
+        if: github.ref_name == 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-android
+          files: src/android/artifacts/*.apk
+
       - name: Upload APK artifact
+        if: github.ref_name != 'main'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: citron-android-8elite
           path: src/android/artifacts/*.apk
+          retention-days: 3
+
+      - name: Hand the workspace back to the runner
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
 
   release-android:
     name: "Release Android Nightly"
     needs: [check-version, build-android, build-android-8elite]
-    if: needs.check-version.outputs.should_build == 'true'
+    if: needs.check-version.outputs.should_build == 'true' && github.ref_name == 'main'
     permissions:
       contents: write
     runs-on: [self-hosted, linux, podman]
 
+    # The release was made by check-version and each build attached its APK; what is left is
+    # remembering what was built.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download APK artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: citron-android-*
-          merge-multiple: true
-          path: .
-
-      - name: Get version info for release name
+      - name: Get version info
         shell: bash
         run: |
           echo "DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
           echo "GIT_HASH=${{ needs.build-android.outputs.git_hash }}" >> $GITHUB_ENV
           echo "BRANCH_NAME=${{ needs.check-version.outputs.branch_name }}" >> $GITHUB_ENV
-
-      - name: Delete previous nightly release and tag
-        run: gh release delete "nightly-android" --repo "${{ github.repository }}" --cleanup-tag -y || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create new nightly release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "Continuous Build: (Android Nightly: ${{ env.GIT_HASH }})"
-          tag_name: "nightly-android"
-          prerelease: false
-          files: "*.apk"
-          body: |
-            **Citron Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/${{ github.repository }}/commit/${{ needs.check-version.outputs.new_hash_full }})
-
-            This build is based on the **${{ env.BRANCH_NAME }}** branch.
-
-            **Build Details:**
-            - Platform: Android (arm64-v8a)
-            - Build Type: Release with LTO enabled
-            - Date: ${{ env.DATE }}
-            - Branch: ${{ env.BRANCH_NAME }}
-            - Includes: Standard build + Snapdragon 8 Elite build with Qualcomm patches
 
       - name: Update LATEST_VERSION
         if: success()
