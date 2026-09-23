@@ -70,7 +70,7 @@ class GameAdapter(private val activity: AppCompatActivity, private var tilesMode
             binding.imageGameScreen.scaleType = ImageView.ScaleType.CENTER_CROP
             GameIconUtils.loadGameIcon(model, binding.imageGameScreen)
 
-            binding.textGameTitle.text = model.title.replace("[\\t\\n\\r]+".toRegex(), " ")
+            binding.textGameTitle.text = withOpenPakDot(model)
 
             binding.cardGame.setOnClickListener { onClick(model) }
             binding.cardGame.setOnLongClickListener { onLongClick(model) }
@@ -93,6 +93,30 @@ class GameAdapter(private val activity: AppCompatActivity, private var tilesMode
 
             binding.cardGame.setOnClickListener { handleGameClick(model) }
             binding.cardGame.setOnLongClickListener { handleGameLongClick(model) }
+        }
+    }
+
+    /** The title with a coloured dot in front where OpenPak serves it: green live, amber beta, grey alpha. */
+    private fun withOpenPakDot(model: Game): CharSequence {
+        val title = model.title.replace("[\\t\\n\\r]+".toRegex(), " ")
+        val programId = model.programId.toLongOrNull() ?: return title
+        if (programId == 0L) return title
+        val status = org.citron.citron_emu.utils.OpenPak.compatibility(
+            java.lang.Long.toHexString(programId).padStart(16, '0')
+        )
+        val color = when (status) {
+            "live" -> 0xFF2E7D32.toInt()
+            "beta" -> 0xFFF9A825.toInt()
+            "alpha" -> 0xFF9E9E9E.toInt()
+            else -> return title
+        }
+        return android.text.SpannableString("\u25cf $title").apply {
+            setSpan(
+                android.text.style.ForegroundColorSpan(color),
+                0,
+                1,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
         }
     }
 
