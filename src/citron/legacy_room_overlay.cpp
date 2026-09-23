@@ -21,14 +21,14 @@
 #include <QWindow>
 
 #include "citron/main.h"
-#include "citron/legacy_chat_client.h"
+#include "openpak/qt/chat_client.h"
 #include "citron/legacy_chat_room.h"
-#include "citron/legacy_controller.h"
+#include "openpak/qt/host.h"
 #include "citron/legacy_room_overlay.h"
 #include "citron/uisettings.h"
 #include "openpak/account.h"
 
-OpenPakRoomOverlay::OpenPakRoomOverlay(QWidget* parent, OpenPakController* controller_)
+OpenPakRoomOverlay::OpenPakRoomOverlay(QWidget* parent, openpak::qt::Host* controller_)
     : QWidget(parent), controller(controller_) {
     main_window = qobject_cast<GMainWindow*>(parent->window());
 
@@ -123,7 +123,7 @@ OpenPakRoomOverlay::OpenPakRoomOverlay(QWidget* parent, OpenPakController* contr
     main_layout->setColumnStretch(0, 1);
     setLayout(main_layout);
 
-    connect(controller, &OpenPakController::ChatRawMessage, this,
+    connect(controller, &openpak::qt::Host::ChatRawMessage, this,
             &OpenPakRoomOverlay::OnRawMessage);
 
     UpdateTheme();

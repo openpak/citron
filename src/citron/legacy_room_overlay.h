@@ -23,13 +23,15 @@ class QLabel;
 class QSizeGrip;
 class QToolButton;
 class OpenPakChatRoom;
-class OpenPakController;
+namespace openpak::qt {
+class Host;
+}
 
 class OpenPakRoomOverlay : public QWidget {
     Q_OBJECT
 
 public:
-    explicit OpenPakRoomOverlay(QWidget* parent, OpenPakController* controller);
+    explicit OpenPakRoomOverlay(QWidget* parent, openpak::qt::Host* controller);
     ~OpenPakRoomOverlay() override;
 
     bool IsInRoom() const {
@@ -76,7 +78,7 @@ private:
     void UpdateHeaderText();
 
     GMainWindow* main_window;
-    OpenPakController* controller;
+    openpak::qt::Host* controller;
 
     QLabel* header_label;
     QToolButton* invite_button;

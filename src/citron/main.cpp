@@ -16,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <future>
 #include <thread>
 #include "core/hle/service/am/applet_manager.h"
 #include "core/loader/nca.h"
@@ -163,16 +164,17 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/install_dialog.h"
 #include "citron/loading_screen.h"
 #include "citron/main.h"
-#include "citron/legacy_account_dialog.h"
+#include "openpak/log.h"
+#include "openpak/qt/account_dialog.h"
+#include "openpak/session.h"
 #include "citron/legacy_chat_window.h"
 #include "citron/legacy_room_overlay.h"
 #include "citron/legacy_population_dialog.h"
-#include "citron/legacy_controller.h"
-#include "citron/legacy_online_counts.h"
-#include "citron/nzp_online_count.h"
+#include "citron/openpak_host.h"
+#include "openpak/qt/online_counts.h"
+#include "openpak/qt/nzp_online_count.h"
 #include "citron/legacy_population_history.h"
-#include "citron/legacy_save_sync.h"
-#include "citron/legacy_toast.h"
+#include "openpak/qt/toast.h"
 #include "citron/play_time_manager.h"
 #include "openpak/account.h"
 #include "openpak/friends_cache.h"
@@ -578,6 +580,9 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
     QStringList args = QApplication::arguments();
 
     if (args.size() < 2) {
+        // OpenPak: a plain launch is the interactive one -- which profile, set it up the first
+        // time, then online. The rest of this constructor is for launches with arguments.
+        QTimer::singleShot(0, openpak_host, [this] { openpak_host->RunStartup(true); });
         return;
     }
 
@@ -666,6 +671,14 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
             BootGame(game_path, ApplicationAppletParameters());
         });
     }
+
+    // OpenPak: which profile, set it up the first time, then online -- once the window is up.
+    // Only online when something is already booting or a profile was named with -u: nothing is
+    // asked that would stand between a launcher and its game.
+    const bool openpak_interactive = game_path.isEmpty() && !user_flag_cmd_line;
+    QTimer::singleShot(0, openpak_host, [this, openpak_interactive] {
+        openpak_host->RunStartup(openpak_interactive);
+    });
 }
 
 GMainWindow::~GMainWindow() {
@@ -812,6 +825,21 @@ void GMainWindow::ControllerSelectorRequestExit() {
 
 void GMainWindow::ProfileSelectorSelectProfile(
     const Core::Frontend::ProfileSelectParameters& parameters) {
+    // [OpenPak] The profile is chosen when the emulator opens, and the OpenPak identity and cloud
+    // saves follow it, so a title asking which profile to use gets the one in use rather than the
+    // same question twice. A title ruling profiles out -- a second local player picking another --
+    // still asks, as do the creator and editor modes.
+    if (Settings::values.enable_openpak.GetValue() &&
+        parameters.mode == Service::AM::Frontend::UiMode::UserSelector &&
+        std::ranges::all_of(parameters.invalid_uid_list,
+                            [](const Common::UUID& uuid) { return uuid.IsInvalid(); })) {
+        if (const auto uuid = system->GetProfileManager().GetUser(
+                static_cast<std::size_t>(Settings::values.current_user.GetValue()))) {
+            emit ProfileSelectorFinishedSelection(uuid);
+            return;
+        }
+    }
+
     profile_select_applet = new QtProfileSelectionDialog(*system, this, parameters);
     SCOPE_EXIT {
         profile_select_applet->deleteLater();
@@ -1301,7 +1329,28 @@ void GMainWindow::InitializeWidgets() {
                                              ui->action_Show_Room, *system);
     multiplayer_state->setVisible(false);
 
-    legacy_controller = new OpenPakController(*system, this, this);
+    // OpenPak: the shared client and dialogs (externals/openpak-client), hosted by OpenPakHost.
+    // Core already pointed the client at Citron's directories; its log goes to Citron's log.
+    openpak::SetLogSink([](openpak::LogLevel level, const std::string& message) {
+        switch (level) {
+        case openpak::LogLevel::Trace:
+        case openpak::LogLevel::Debug:
+            LOG_DEBUG(Frontend, "[openpak] {}", message);
+            break;
+        case openpak::LogLevel::Info:
+            LOG_INFO(Frontend, "[openpak] {}", message);
+            break;
+        case openpak::LogLevel::Warning:
+            LOG_WARNING(Frontend, "[openpak] {}", message);
+            break;
+        case openpak::LogLevel::Error:
+        case openpak::LogLevel::Critical:
+            LOG_ERROR(Frontend, "[openpak] {}", message);
+            break;
+        }
+    });
+    openpak_host = new OpenPakHost(*system, this, this);
+    openpak::qt::Host::SetCurrent(openpak_host);
     legacy_toast = new OpenPakToast(this);
     OpenPak::OnlineCounts::Start(this);
     OpenPak::NzpOnlineCount::Start(this);
@@ -1354,9 +1403,9 @@ void GMainWindow::InitializeWidgets() {
     multiplayer_room_overlay = new MultiplayerRoomOverlay(this);
     multiplayer_room_overlay->hide();
 
-    legacy_room_overlay = new OpenPakRoomOverlay(this, legacy_controller);
+    legacy_room_overlay = new OpenPakRoomOverlay(this, openpak_host);
     connect(legacy_room_overlay, &OpenPakRoomOverlay::InvitePickerRequested, this, [this] {
-        OpenPakAccountDialog dialog(legacy_controller, *system, this,
+        OpenPakAccountDialog dialog(openpak_host, this,
                                      OpenPakAccountDialog::kFriendsPage);
         connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
                 [this](u64 pid, const QString& name) { OpenOpenPakChatWindow({}, pid, name); });
@@ -2009,45 +2058,17 @@ void GMainWindow::ConnectMenuEvents() {
             &MultiplayerState::OnCreateRoom);
     connect(ui->action_Leave_Room, &QAction::triggered, multiplayer_state,
             &MultiplayerState::OnCloseRoom);
-    legacy_presence_timer.setInterval(5000);
-    connect(&legacy_presence_timer, &QTimer::timeout, this, [this] {
-#ifdef ENABLE_WEB_SERVICE
-        if (!Common::OpenPakAccount::IsLinked()) {
-            return;
-        }
-        const std::string app_id =
-            emulation_running ? fmt::format("{:016X}", play_time_manager->GetProgramId())
-                              : std::string{};
-        const std::string app_name = emulation_running ? current_game_name : std::string{};
-        const bool app_id_changed = app_id != legacy_last_pushed_app_id;
-
-        s32 status = 0;
-        std::string app_field;
-        const bool have_update = Common::OpenPakFriends::TakeLocalPresenceForPublish(status, app_field);
-        if (!have_update && !app_id_changed) {
-            return;
-        }
-        if (!have_update) {
-            status = Common::OpenPakFriends::GetLocalStatus();
-            app_field = Common::OpenPakFriends::GetLocalAppField();
-        }
-
-        legacy_last_pushed_app_id = app_id;
-        std::thread{[status, app_field, app_id, app_name] {
-            WebService::OpenPakApi::PushPresence(status, app_field, app_id, app_name);
-        }}.detach();
-#endif
-    });
-    legacy_presence_timer.start();
 
     // OpenPak
     ui->action_OpenPak_Sign_In->setEnabled(!Common::OpenPakAccount::IsLinked());
     ui->action_OpenPak_Sign_Out->setEnabled(Common::OpenPakAccount::IsLinked());
     ui->action_OpenPak_Enable_Redirection->setChecked(Settings::values.enable_openpak.GetValue());
+    ui->menu_OpenPak->insertMenu(ui->action_OpenPak_Enable_Redirection,
+                                  openpak_host->CreateStartupMenu(this));
 
     connect(ui->action_OpenPak_Open_Account, &QAction::triggered, this, [this] {
         if (!Common::OpenPakAccount::IsLinked()) {
-            legacy_controller->SignIn();
+            openpak_host->SignIn();
             return;
         }
         // Pressing the hotkey again while the dialog is already open closes it instead of
@@ -2056,7 +2077,7 @@ void GMainWindow::ConnectMenuEvents() {
             legacy_account_dialog_instance->close();
             return;
         }
-        OpenPakAccountDialog dialog(legacy_controller, *system, this);
+        OpenPakAccountDialog dialog(openpak_host, this);
         legacy_account_dialog_instance = &dialog;
         connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
                 [this](u64 pid, const QString& name) { OpenOpenPakChatWindow({}, pid, name); });
@@ -2068,7 +2089,7 @@ void GMainWindow::ConnectMenuEvents() {
             return;
         }
         if (kind == OpenPakToast::Kind::Request) {
-            OpenPakAccountDialog dialog(legacy_controller, *system, this,
+            OpenPakAccountDialog dialog(openpak_host, this,
                                          OpenPakAccountDialog::kFriendsPage);
             connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
                     [this](u64 pid, const QString& name) { OpenOpenPakChatWindow({}, pid, name); });
@@ -2122,25 +2143,25 @@ void GMainWindow::ConnectMenuEvents() {
         }
         OpenOpenPakChatWindow();
     });
-    connect(ui->action_OpenPak_Sign_In, &QAction::triggered, legacy_controller,
-            &OpenPakController::SignIn);
-    connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, legacy_controller,
-            &OpenPakController::SignOut);
+    connect(ui->action_OpenPak_Sign_In, &QAction::triggered, openpak_host,
+            &OpenPakHost::SignIn);
+    connect(ui->action_OpenPak_Sign_Out, &QAction::triggered, openpak_host,
+            &OpenPakHost::SignOut);
     connect(ui->action_OpenPak_Enable_Redirection, &QAction::toggled, this, [](bool checked) {
         Settings::values.enable_openpak.SetValue(checked);
     });
-    connect(legacy_controller, &OpenPakController::AccountLinked, this, [this] {
+    connect(openpak_host, &openpak::qt::Host::AccountLinked, this, [this] {
         ui->action_OpenPak_Sign_In->setEnabled(false);
         ui->action_OpenPak_Sign_Out->setEnabled(true);
     });
-    connect(legacy_controller, &OpenPakController::AccountUnlinked, this, [this] {
+    connect(openpak_host, &openpak::qt::Host::AccountUnlinked, this, [this] {
         ui->action_OpenPak_Sign_In->setEnabled(true);
         ui->action_OpenPak_Sign_Out->setEnabled(false);
     });
     // xdg-open/QDesktopServices::openUrl can both report success without a browser window ever
     // appearing (broken default-browser handoff, remoting failures, etc). Give the user a manual
     // fallback instead of leaving them stuck on a status bar message that vanishes in 8 seconds.
-    connect(legacy_controller, &OpenPakController::SignInUrlReady, this, [this](QString url) {
+    connect(openpak_host, &OpenPakHost::SignInUrlReady, this, [this](QString url) {
         if (!legacy_signin_dialog) {
             legacy_signin_dialog = new QDialog(this);
             legacy_signin_dialog->setWindowTitle(tr("Sign in to OpenPak"));
@@ -2183,60 +2204,60 @@ void GMainWindow::ConnectMenuEvents() {
         legacy_signin_dialog->raise();
         legacy_signin_dialog->activateWindow();
     });
-    connect(legacy_controller, &OpenPakController::SignInFinished, this, [this] {
+    connect(openpak_host, &OpenPakHost::SignInFinished, this, [this] {
         if (legacy_signin_dialog) {
             legacy_signin_dialog->close();
         }
     });
-    connect(legacy_controller, &OpenPakController::StatusChanged, this,
+    connect(openpak_host, &openpak::qt::Host::StatusChanged, this,
             [this](const QString& message) {
                 if (!message.isEmpty()) {
                     statusBar()->showMessage(message, 8000);
                 }
             });
-    connect(legacy_controller, &OpenPakController::FriendCameOnline, this,
+    connect(openpak_host, &openpak::qt::Host::FriendCameOnline, this,
             [this](u64 /*pid*/, const QString& name, const QString& game_name,
                   const QString& avatar_base64) {
                 const QString detail =
                     game_name.isEmpty() ? tr("is now online") : tr("is now playing %1").arg(game_name);
                 legacy_toast->Show(name, detail, avatar_base64, OpenPakToast::Kind::Online);
             });
-    connect(legacy_controller, &OpenPakController::FriendWentOffline, this,
+    connect(openpak_host, &openpak::qt::Host::FriendWentOffline, this,
             [this](u64 /*pid*/, const QString& name, const QString& avatar_base64) {
                 legacy_toast->Show(name, tr("is now offline"), avatar_base64,
                                      OpenPakToast::Kind::Offline);
             });
-    connect(legacy_controller, &OpenPakController::FriendRequestReceived, this,
+    connect(openpak_host, &openpak::qt::Host::FriendRequestReceived, this,
             [this](u64 /*pid*/, const QString& name, const QString& avatar_base64) {
                 legacy_toast->Show(name, tr("sent you a friend request"), avatar_base64,
                                      OpenPakToast::Kind::Request);
             });
-    connect(legacy_controller, &OpenPakController::FriendRequestSent, this,
+    connect(openpak_host, &openpak::qt::Host::FriendRequestSent, this,
             [this](const QString& friend_code) {
                 legacy_toast->Show(tr("Friend Request Sent!"), friend_code, {},
                                      OpenPakToast::Kind::RequestSent);
             });
-    connect(legacy_controller, &OpenPakController::ChatInviteReceived, this,
+    connect(openpak_host, &openpak::qt::Host::ChatInviteReceived, this,
             [this](const QString& room_id, const QString& room_name, u64 /*from_pid*/,
                    const QString& from_name) {
                 legacy_toast->Show(from_name, tr("invited you to \"%1\"").arg(room_name), {},
                                      OpenPakToast::Kind::ChatRequest);
                 pending_chat_invite_room_id = room_id;
             });
-    connect(legacy_controller, &OpenPakController::ChatInviteSent, this, [this](u64 /*target_pid*/) {
+    connect(openpak_host, &openpak::qt::Host::ChatInviteSent, this, [this](u64 /*target_pid*/) {
         legacy_toast->Show(tr("Chat Invite Sent!"), {}, {}, OpenPakToast::Kind::RequestSent);
     });
-    connect(legacy_controller, &OpenPakController::ChatMemberJoined, this,
+    connect(openpak_host, &openpak::qt::Host::ChatMemberJoined, this,
             [this](const QString& /*room_id*/, u64 /*pid*/, const QString& name) {
                 legacy_toast->Show(name, tr("joined your chat room"), {},
                                      OpenPakToast::Kind::Online);
             });
-    connect(legacy_controller, &OpenPakController::FriendInvitationReceived, this,
+    connect(openpak_host, &openpak::qt::Host::FriendInvitationReceived, this,
             [this](u64 /*pid*/, const QString& name) {
                 legacy_toast->Show(name, tr("invited you to join their game"), {},
                                      OpenPakToast::Kind::GameInvite);
             });
-    connect(legacy_controller, &OpenPakController::ChatBanned, this, [this](const QString& reason) {
+    connect(openpak_host, &openpak::qt::Host::ChatBanned, this, [this](const QString& reason) {
         if (legacy_room_overlay) {
             legacy_room_overlay->hide();
         }
@@ -2246,7 +2267,7 @@ void GMainWindow::ConnectMenuEvents() {
                                  : tr("You have been banned from using this feature.\n\nReason: %1")
                                        .arg(reason));
     });
-    connect(legacy_controller, &OpenPakController::QuickStartRequested, this, [this](u64 title_id) {
+    connect(openpak_host, &openpak::qt::Host::QuickStartRequested, this, [this](u64 title_id) {
         const QString path = game_list->GetGamePath(title_id);
         if (!path.isEmpty()) {
             BootGameFromList(path, StartGameType::Normal);
@@ -2585,6 +2606,7 @@ bool GMainWindow::SelectAndSetCurrentUser(
     }
 
     Settings::values.current_user = dialog.GetIndex();
+    openpak_host->ProfileMaybeChanged();
     return true;
 }
 
@@ -2712,9 +2734,6 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     }
 
     OfferOpenPakByamlDownload(title_id);
-    if (Settings::values.openpak_cloud_sync_enabled.GetValue()) {
-        OpenPak::SaveSync::Pull(*system, title_id);
-    }
 
     if (type == StartGameType::Normal) {
         // Load per game settings if it is a normal boot
@@ -2774,6 +2793,9 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
     }
 
     user_flag_cmd_line = false;
+
+    // OpenPak: the newest cloud save, before the title reads the one on disk.
+    openpak_host->PullSaveBeforeLaunch(title_id);
 
     // The core ROM loading logic. If this fails, we must not proceed.
     if (!LoadROM(filename, params)) {
@@ -2978,18 +3000,9 @@ void GMainWindow::OnEmulationStopped() {
     // This is necessary to reset the in-memory state for the next launch.
     system->GetFileSystemController().InitializeContentSystem(*vfs, true);
 
-#ifdef ENABLE_WEB_SERVICE
-    // Only safe past this point: emu_thread has fully exited (no more concurrent guest access to
-    // the VFS) and InitializeContentSystem() just rebuilt a fresh save-data factory.
-    if (Settings::values.openpak_cloud_sync_enabled.GetValue()) {
-        auto save_zip = OpenPak::SaveSync::CaptureForPush(*system, current_title_id);
-        if (!save_zip.empty()) {
-            std::thread{[title_id = current_title_id, zip = std::move(save_zip)]() mutable {
-                OpenPak::SaveSync::UploadCaptured(title_id, std::move(zip));
-            }}.detach();
-        }
-    }
-#endif
+    // OpenPak: the save the title just wrote goes up, now that nothing is writing to it -- the
+    // emulation thread has exited and the save-data factory has just been rebuilt.
+    openpak_host->PushSaveAfterExit(current_title_id);
 
     // Refresh the game list now that the filesystem is valid again.
     game_list->ClearLaunchOverlays();
@@ -4919,6 +4932,10 @@ void GMainWindow::OnConfigure() {
 
     const auto result = configure_dialog.exec();
 
+    // OpenPak: the profile manager page changes the current user as soon as one is picked,
+    // applied or not; each profile is its own OpenPak account.
+    openpak_host->ProfileMaybeChanged();
+
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied &&
         !UISettings::values.reset_to_defaults) {
         // Runs if the user hit Cancel or closed the window
@@ -6779,6 +6796,19 @@ void GMainWindow::closeEvent(QCloseEvent* event) {
 
     render_window->close();
     multiplayer_state->Close();
+
+    // OpenPak: say we are going, so friends see us leave now rather than when the presence
+    // lease lapses. Waited on for three seconds at most, as Ryujinx does; a crash or a kill is
+    // covered by the lease instead.
+    {
+        auto said = std::make_shared<std::promise<void>>();
+        auto done = said->get_future();
+        std::thread{[said] {
+            openpak::client::session::GoOffline();
+            said->set_value();
+        }}.detach();
+        done.wait_for(std::chrono::seconds(3));
+    }
 
     if (system) {
         system->GetRoomNetwork().Shutdown();

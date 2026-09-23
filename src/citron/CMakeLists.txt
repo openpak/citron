@@ -260,13 +260,6 @@ add_executable(citron
     multiplayer/validation.h
     play_time_manager.cpp
     play_time_manager.h
-    legacy_account_dialog.cpp
-    legacy_account_dialog.h
-    legacy_account_page_p.h
-    legacy_avatar_cache.cpp
-    legacy_avatar_cache.h
-    legacy_chat_client.cpp
-    legacy_chat_client.h
     legacy_chat_room.cpp
     legacy_chat_room.h
     legacy_chat_room.ui
@@ -274,30 +267,16 @@ add_executable(citron
     legacy_chat_room_member_delegate.h
     legacy_chat_window.cpp
     legacy_chat_window.h
-    legacy_controller.cpp
     legacy_room_overlay.cpp
     legacy_room_overlay.h
-    legacy_controller.h
-    legacy_friend_delegate.cpp
-    legacy_friend_delegate.h
-    legacy_history_delegate.cpp
-    legacy_history_delegate.h
+    openpak_host.cpp
+    openpak_host.h
     legacy_ldn_counts.cpp
     legacy_ldn_counts.h
-    legacy_network_probe.cpp
-    legacy_network_probe.h
-    legacy_online_counts.cpp
-    legacy_online_counts.h
     legacy_population_dialog.cpp
     legacy_population_dialog.h
     legacy_population_history.cpp
     legacy_population_history.h
-    nzp_online_count.cpp
-    nzp_online_count.h
-    legacy_save_sync.cpp
-    legacy_save_sync.h
-    legacy_toast.cpp
-    legacy_toast.h
     precompiled_headers.h
     qt_common.cpp
     qt_common.h
@@ -629,9 +608,9 @@ endif()
 target_link_libraries(citron PRIVATE Boost::headers glad nlohmann_json::nlohmann_json Qt6::Widgets Qt6::Network Qt6::Svg)
 target_link_libraries(citron PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 
-# [OpenPak] The account, the friend cache and the OpenPak web API come from the shared client
-# (externals/openpak-client), as they do for core.
-target_link_libraries(citron PRIVATE openpak::client)
+# [OpenPak] The shared account dialog, sign-in, toasts and cloud saves (externals/openpak-client),
+# hosted by OpenPakHost. The Qt half brings the client half with it.
+target_link_libraries(citron PRIVATE openpak::qt)
 
 # Add libarchive for updater functionality
 if (TARGET LibArchive::LibArchive)

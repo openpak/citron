@@ -29,8 +29,8 @@
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
-#include "citron/legacy_avatar_cache.h"
-#include "citron/legacy_chat_client.h"
+#include "openpak/qt/avatar_cache.h"
+#include "openpak/qt/chat_client.h"
 #include "citron/legacy_chat_room.h"
 #include "citron/legacy_chat_room_member_delegate.h"
 #include "citron/theme.h"

@@ -8,7 +8,7 @@
 #include <QPainter>
 #include <QPainterPath>
 
-#include "citron/legacy_avatar_cache.h"
+#include "openpak/qt/avatar_cache.h"
 #include "citron/uisettings.h"
 
 namespace {
