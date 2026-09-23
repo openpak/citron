@@ -197,12 +197,12 @@ public:
         : ServiceFramework{system_, "npns:u"}, service_context{system, "npns:u"} {
         // clang-format off
         static const FunctionInfo functions[] = {
-            {1, nullptr, "ListenAll"},
-            {2, nullptr, "ListenTo"},
+            {1, C<&INpnsUser::ListenAll>, "ListenAll"},
+            {2, C<&INpnsUser::ListenTo>, "ListenTo"},
             {3, nullptr, "Receive"},
             {4, nullptr, "ReceiveRaw"},
             {5, C<&INpnsUser::GetReceiveEvent>, "GetReceiveEvent"},
-            {7, nullptr, "GetStateChangeEvent"},
+            {7, C<&INpnsUser::GetStateChangeEvent>, "GetStateChangeEvent"},
             {8, C<&INpnsUser::ListenToByName>, "ListenToByName"},
             {21, C<&INpnsUser::CreateToken>, "CreateToken"},
             {23, nullptr, "DestroyToken"},
@@ -224,13 +224,35 @@ public:
         RegisterHandlers(functions);
 
         get_receive_event = service_context.CreateEvent("npns:u:GetReceiveEvent");
+        get_state_change_event = service_context.CreateEvent("npns:u:GetStateChangeEvent");
     }
 
     ~INpnsUser() override {
         service_context.CloseEvent(get_receive_event);
+        service_context.CloseEvent(get_state_change_event);
     }
 
 private:
+    // [OpenPak] The subscriptions ACNH makes on its way online (26 right after its web-API
+    // handshake), ported from Eden and Ryujinx: they succeed, and the receive and state-change
+    // events exist but never fire, so the game polls its servers instead of waiting on pushes no
+    // backend sends.
+    Result ListenAll() {
+        LOG_DEBUG(Service_NPNS, "called");
+        R_SUCCEED();
+    }
+
+    Result ListenTo(u64 program_id) {
+        LOG_DEBUG(Service_NPNS, "called, program_id={:016X}", program_id);
+        R_SUCCEED();
+    }
+
+    Result GetStateChangeEvent(OutCopyHandle<Kernel::KReadableEvent> out_event) {
+        LOG_DEBUG(Service_NPNS, "called");
+        *out_event = &get_state_change_event->GetReadableEvent();
+        R_SUCCEED();
+    }
+
     Result ListenToByName(InBuffer<BufferAttr_HipcMapAlias> name_buffer) {
         const std::string name(reinterpret_cast<const char*>(name_buffer.data()),
                                name_buffer.size());
@@ -251,8 +273,8 @@ private:
         R_SUCCEED();
     }
 
-    Result ListenToMyApplicationId() {
-        LOG_WARNING(Service_NPNS, "(STUBBED) called");
+    Result ListenToMyApplicationId(u64 unknown, ClientProcessId process_id) {
+        LOG_DEBUG(Service_NPNS, "called, unknown={:016X}, pid={}", unknown, process_id.pid);
         R_SUCCEED();
     }
 
@@ -263,6 +285,7 @@ private:
 
     KernelHelpers::ServiceContext service_context;
     Kernel::KEvent* get_receive_event;
+    Kernel::KEvent* get_state_change_event;
 };
 
 class INotificationReceiver : public ServiceFramework<INotificationReceiver> {
