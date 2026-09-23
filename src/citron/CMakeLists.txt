@@ -277,8 +277,6 @@ add_executable(citron
     openpak_online_status.h
     nextendo_ldn_counts.cpp
     nextendo_ldn_counts.h
-    nextendo_population_dialog.cpp
-    nextendo_population_dialog.h
     nextendo_population_history.cpp
     nextendo_population_history.h
     precompiled_headers.h
@@ -327,8 +325,6 @@ add_executable(citron
     ui/game_carousel_view.h
     ui/system_audio_loopback.cpp
     ui/system_audio_loopback.h
-    ui/population_bar_chart.cpp
-    ui/population_bar_chart.h
     ui/nextendo_profile_chip.cpp
     ui/nextendo_profile_chip.h
     ui/nextendo_status_cluster.cpp
