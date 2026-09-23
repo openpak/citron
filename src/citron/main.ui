@@ -153,7 +153,6 @@
      <string>&amp;OpenPak</string>
     </property>
     <addaction name="action_Nextendo_Open_Account"/>
-    <addaction name="action_Nextendo_Population"/>
     <addaction name="action_Nextendo_Sign_In"/>
     <addaction name="action_Nextendo_Sign_Out"/>
     <addaction name="separator"/>
@@ -384,11 +383,6 @@
   <action name="action_Nextendo_Open_Account">
    <property name="text">
     <string>&amp;Open Account Page</string>
-   </property>
-  </action>
-  <action name="action_Nextendo_Population">
-   <property name="text">
-    <string>&amp;Population</string>
    </property>
   </action>
   <action name="action_Nextendo_Sign_In">

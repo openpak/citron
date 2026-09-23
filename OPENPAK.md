@@ -67,6 +67,12 @@ Settings: `enable_openpak`, `openpak_server_ip`, `openpak_nat_ip`. Environment o
 `CITRON_SSL_TRACE=1` (guest TLS in the clear), `SSLKEYLOGFILE`; and the research redirects and
 probes (`NEXTENDO_*`) in `sfdnsres.cpp` and `bsd.cpp`, all off unless set.
 
+Menu: a top-level **OpenPak** menu with the same items, in the same order, as Eden's — Open
+Account Page, Sign In, Sign Out, OpenPak account at startup, Enable Network Redirection. The
+library's dialogs are the only OpenPak dialogs in the menu; the Nextendo-era Population dialog
+and the Chat Rooms prototype are no longer offered there (the chat overlay is still reachable
+from the account window's invite-to-chat and a chat-invite toast, pending the UX spec).
+
 ## Builds and releases
 
 Continuous builds from `main`: `.github/workflows/build-linux.yml` builds this tree (x86_64,

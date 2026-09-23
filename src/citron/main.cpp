@@ -171,7 +171,6 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "openpak/session.h"
 #include "citron/nextendo_chat_window.h"
 #include "citron/nextendo_room_overlay.h"
-#include "citron/nextendo_population_dialog.h"
 #include "citron/openpak_host.h"
 #include "openpak/qt/friend_picker.h"
 #include "openpak/qt/online_counts.h"
@@ -2086,6 +2085,7 @@ void GMainWindow::ConnectMenuEvents() {
     ui->action_Nextendo_Sign_In->setEnabled(!Common::OpenPakAccount::IsLinked());
     ui->action_Nextendo_Sign_Out->setEnabled(Common::OpenPakAccount::IsLinked());
     ui->action_Nextendo_Enable_Redirection->setChecked(Settings::values.enable_openpak.GetValue());
+    // The OpenPak menu: the same items, in the same order, as Eden's; only the library's dialogs.
     ui->menu_NexTendo->insertMenu(ui->action_Nextendo_Enable_Redirection,
                                   openpak_host->CreateStartupMenu(this));
 
@@ -2153,19 +2153,6 @@ void GMainWindow::ConnectMenuEvents() {
             }
         }
     });
-    connect(ui->action_Nextendo_Population, &QAction::triggered, this,
-            [this] { NextendoPopulationDialog(this).exec(); });
-    // Prototype: no .ui entry yet (still being pitched for real integration), added here
-    // instead of the designer file to keep this easy to pull out later.
-    auto* action_chat_rooms = ui->menu_NexTendo->addAction(tr("Chat Rooms (Prototype)"));
-    connect(action_chat_rooms, &QAction::triggered, this, [this] {
-        if (!Common::OpenPakAccount::IsLinked()) {
-            QMessageBox::information(this, tr("Chat Rooms"),
-                                     tr("Sign in to OpenPak first."));
-            return;
-        }
-        OpenNextendoChatWindow();
-    });
     connect(ui->action_Nextendo_Sign_In, &QAction::triggered, openpak_host,
             &OpenPakHost::SignIn);
     connect(ui->action_Nextendo_Sign_Out, &QAction::triggered, openpak_host,
@@ -2180,57 +2167,6 @@ void GMainWindow::ConnectMenuEvents() {
     connect(openpak_host, &openpak::qt::Host::AccountUnlinked, this, [this] {
         ui->action_Nextendo_Sign_In->setEnabled(true);
         ui->action_Nextendo_Sign_Out->setEnabled(false);
-    });
-    // xdg-open/QDesktopServices::openUrl can both report success without a browser window ever
-    // appearing (broken default-browser handoff, remoting failures, etc). Give the user a manual
-    // fallback instead of leaving them stuck on a status bar message that vanishes in 8 seconds.
-    connect(openpak_host, &OpenPakHost::SignInUrlReady, this, [this](QString url) {
-        if (!nextendo_signin_dialog) {
-            nextendo_signin_dialog = new QDialog(this);
-            nextendo_signin_dialog->setWindowTitle(tr("Sign in to OpenPak"));
-            auto* layout = new QVBoxLayout(nextendo_signin_dialog);
-            auto* label = new QLabel(tr("Finish signing in in your browser, then come back here.\n"
-                                        "If nothing opened, copy this link into any browser:"));
-            label->setWordWrap(true);
-            auto* url_field = new QLineEdit;
-            url_field->setReadOnly(true);
-            url_field->setObjectName(QStringLiteral("nextendo_signin_url"));
-            auto* button_row = new QHBoxLayout;
-            auto* copy_button = new QPushButton(tr("Copy Link"));
-            auto* open_button = new QPushButton(tr("Open in Browser"));
-            auto* close_button = new QPushButton(tr("Close"));
-            button_row->addWidget(copy_button);
-            button_row->addWidget(open_button);
-            button_row->addStretch(1);
-            button_row->addWidget(close_button);
-            layout->addWidget(label);
-            layout->addWidget(url_field);
-            layout->addLayout(button_row);
-            connect(copy_button, &QPushButton::clicked, nextendo_signin_dialog, [url_field] {
-                QGuiApplication::clipboard()->setText(url_field->text());
-            });
-            connect(open_button, &QPushButton::clicked, nextendo_signin_dialog, [url_field] {
-                QDesktopServices::openUrl(QUrl(url_field->text()));
-            });
-            connect(close_button, &QPushButton::clicked, nextendo_signin_dialog, &QDialog::close);
-            nextendo_signin_dialog->setAttribute(Qt::WA_DeleteOnClose);
-            connect(nextendo_signin_dialog, &QObject::destroyed, this,
-                    [this] { nextendo_signin_dialog = nullptr; });
-        }
-        auto* url_field = nextendo_signin_dialog->findChild<QLineEdit*>(
-            QStringLiteral("nextendo_signin_url"));
-        if (url_field) {
-            url_field->setText(url);
-            url_field->selectAll();
-        }
-        nextendo_signin_dialog->show();
-        nextendo_signin_dialog->raise();
-        nextendo_signin_dialog->activateWindow();
-    });
-    connect(openpak_host, &OpenPakHost::SignInFinished, this, [this] {
-        if (nextendo_signin_dialog) {
-            nextendo_signin_dialog->close();
-        }
     });
     connect(openpak_host, &openpak::qt::Host::StatusChanged, this,
             [this](const QString& message) {
