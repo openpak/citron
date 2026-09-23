@@ -905,6 +905,15 @@ if (NOT APPLE AND NOT MSVC AND (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR (CITRON
     endif()
 endif()
 
+# OpenPak client and its Qt dialogs (submodule). Added here rather than in externals/ because the
+# dialogs find Qt themselves, and on Windows Qt is only found above. A build without the Qt
+# frontend (Android) takes the client half only, which is where the sign-in chain, presence and
+# invitations live anyway.
+if (NOT ENABLE_QT)
+    set(OPENPAK_BUILD_QT OFF CACHE BOOL "" FORCE)
+endif()
+add_subdirectory(externals/openpak-client)
+
 add_subdirectory(src)
 
 # Build all shipped executables in one graph.
