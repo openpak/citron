@@ -63,6 +63,9 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # One leg at a time: the self-hosted runners are the owner's workstation (2026-09-23: two
+      # legs at -j16 each pinned it at 100%).
+      max-parallel: 1
       matrix:
         include:
           - name: "Citron Build (Normal x86_64)"
