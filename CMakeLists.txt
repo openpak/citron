@@ -913,6 +913,12 @@ if (NOT ENABLE_QT)
     set(OPENPAK_BUILD_QT OFF CACHE BOOL "" FORCE)
 endif()
 add_subdirectory(externals/openpak-client)
+if (ANDROID)
+    # The library loads its public roots from <openssl/cert.h> on Android, which vcpkg's
+    # OpenSSL does not ship.
+    include(OpenPakAndroidCaRoots)
+    target_include_directories(openpak_client PRIVATE "${OPENPAK_CA_INCLUDE_DIR}")
+endif()
 
 add_subdirectory(src)
 
