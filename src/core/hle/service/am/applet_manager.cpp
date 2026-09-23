@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
+
 #include "common/settings.h"
 #include "common/uuid.h"
 #include "core/core.h"
@@ -259,6 +261,31 @@ void AppletManager::OperationModeChanged() {
     if (window) {
         window->OnOperationModeChanged();
     }
+}
+
+bool AppletManager::PushFriendInvitation(const Common::UUID& user,
+                                         std::span<const u8> application_data) {
+    WindowSystem* window;
+    {
+        std::scoped_lock lk{m_lock};
+        window = m_window_system;
+    }
+    const std::shared_ptr<Applet> applet = window ? window->GetMainApplet() : nullptr;
+    if (!applet) {
+        return false;
+    }
+
+    std::vector<u8> storage(user.uuid.size() + application_data.size());
+    std::memcpy(storage.data(), user.uuid.data(), user.uuid.size());
+    std::memcpy(storage.data() + user.uuid.size(), application_data.data(),
+                application_data.size());
+
+    {
+        std::scoped_lock lk{applet->lock};
+        applet->friend_invitation_storage_channel.push_back(std::move(storage));
+    }
+    applet->friend_invitation_storage_channel_event.Signal();
+    return true;
 }
 
 void AppletManager::SetWindowSystem(WindowSystem* window_system) {

@@ -93,6 +93,9 @@ struct Applet {
     // Channels
     std::deque<std::vector<u8>> user_channel_launch_parameter{};
     std::deque<std::vector<u8>> preselected_user_launch_parameter{};
+    // [OpenPak] Accepted invitations waiting for the application, oldest first: [Uid 0x10][the
+    // sender's application data], as qlaunch leaves them on a console.
+    std::deque<std::vector<u8>> friend_invitation_storage_channel{};
 
     // Process winding context (IProcessWindingController::PushContext/PopContext)
     std::optional<std::vector<u8>> wound_context{};
