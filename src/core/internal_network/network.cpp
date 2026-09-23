@@ -510,6 +510,48 @@ SockAddrIn TranslateToSockAddrIn(sockaddr_in input, size_t input_len) {
     return result;
 }
 
+// [OpenPak] A dual-mode v6 socket (see Socket::Initialize) reports its IPv4 peers in the mapped
+// form ::ffff:a.b.c.d, whose last four bytes are the address everything else in this layer
+// speaks; ::1 is loopback. Anything else is a real IPv6 address this layer cannot express, and
+// comes back as 0.0.0.0. Ported from Eden.
+SockAddrIn TranslateToSockAddrIn(const sockaddr_storage& input, size_t input_len) {
+    if (input.ss_family != AF_INET6) {
+        return TranslateToSockAddrIn(reinterpret_cast<const sockaddr_in&>(input), input_len);
+    }
+
+    const auto& addr_in6 = reinterpret_cast<const sockaddr_in6&>(input);
+    const u8* const bytes = reinterpret_cast<const u8*>(&addr_in6.sin6_addr);
+
+    SockAddrIn result{};
+    result.family = Domain::INET;
+    result.portno = ntohs(addr_in6.sin6_port);
+
+    const bool leading_zeros =
+        std::all_of(bytes, bytes + 10, [](u8 byte) { return byte == 0; });
+    if (leading_zeros && bytes[10] == 0xff && bytes[11] == 0xff) {
+        std::memcpy(result.ip.data(), bytes + 12, result.ip.size());
+    } else if (leading_zeros && bytes[10] == 0 && bytes[11] == 0 && bytes[12] == 0 &&
+               bytes[13] == 0 && bytes[14] == 0 && bytes[15] == 1) {
+        result.ip = {127, 0, 0, 1};
+    }
+    return result;
+}
+
+// [OpenPak] The IPv4 address a dual-mode v6 socket is given, in the mapped form: 0.0.0.0 becomes
+// :: (so a bind takes both families) and 127.0.0.1 stays ::ffff:127.0.0.1.
+sockaddr_in6 TranslateToMappedV6(const SockAddrIn& input) {
+    sockaddr_in6 result{};
+    result.sin6_family = AF_INET6;
+    result.sin6_port = htons(input.portno);
+    if (input.ip != IPv4Address{}) {
+        u8* const bytes = reinterpret_cast<u8*>(&result.sin6_addr);
+        bytes[10] = 0xff;
+        bytes[11] = 0xff;
+        std::memcpy(bytes + 12, input.ip.data(), input.ip.size());
+    }
+    return result;
+}
+
 short TranslatePollEvents(PollEvents events) {
     short result = 0;
 
@@ -787,6 +829,7 @@ Socket::~Socket() {
 
 Socket::Socket(Socket&& rhs) noexcept {
     fd = std::exchange(rhs.fd, INVALID_SOCKET);
+    is_v6 = rhs.is_v6;
 }
 
 template <typename T>
@@ -855,6 +898,19 @@ Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
         return GetAndLogLastError();
     }
 
+    // [OpenPak] A title's IPv6 socket is dual-mode, so it reaches the IPv4 world: an NPLN
+    // title's gRPC stack dials its AF_INET6 socket first, with the v4-mapped form of the
+    // resolver's IPv4 answer, and a family it cannot use poisons the whole channel. Ported from
+    // Eden (the Ryujinx builds carry the same repair).
+    is_v6 = domain == Domain::INET6;
+    if (is_v6) {
+        const int v6_only = 0;
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6_only),
+                       sizeof(v6_only)) == SOCKET_ERROR) {
+            LOG_WARNING(Network, "Could not make an IPv6 socket dual-mode");
+        }
+    }
+
     // Stay ahead of NAT/firewall idle-connection drops regardless of whether the game asked.
     if (type == Type::STREAM) {
         EnableAggressiveTcpKeepAlive(fd);
@@ -864,7 +920,7 @@ Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
 }
 
 std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
-    sockaddr_in addr;
+    sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
 
     const bool wait_for_accept = !is_non_blocking;
@@ -902,8 +958,16 @@ std::pair<SocketBase::AcceptResult, Errno> Socket::Accept() {
 }
 
 Errno Socket::Connect(SockAddrIn addr_in) {
-    const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
-    if (connect(fd, &host_addr_in, sizeof(host_addr_in)) != SOCKET_ERROR) {
+    int connect_result;
+    if (is_v6) {
+        const sockaddr_in6 host_addr_in6 = TranslateToMappedV6(addr_in);
+        connect_result = connect(fd, reinterpret_cast<const sockaddr*>(&host_addr_in6),
+                                 sizeof(host_addr_in6));
+    } else {
+        const sockaddr host_addr_in = TranslateFromSockAddrIn(addr_in);
+        connect_result = connect(fd, &host_addr_in, sizeof(host_addr_in));
+    }
+    if (connect_result != SOCKET_ERROR) {
         return Errno::SUCCESS;
     }
 
@@ -950,7 +1014,7 @@ Errno Socket::Connect(SockAddrIn addr_in) {
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetPeerName() {
-    sockaddr_in addr;
+    sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
     if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == SOCKET_ERROR) {
         return {SockAddrIn{}, GetAndLogLastError()};
@@ -960,7 +1024,7 @@ std::pair<SockAddrIn, Errno> Socket::GetPeerName() {
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetSockName() {
-    sockaddr_in addr;
+    sockaddr_storage addr{};
     socklen_t addrlen = sizeof(addr);
     if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &addrlen) == SOCKET_ERROR) {
         return {SockAddrIn{}, GetAndLogLastError()};
@@ -970,8 +1034,16 @@ std::pair<SockAddrIn, Errno> Socket::GetSockName() {
 }
 
 Errno Socket::Bind(SockAddrIn addr) {
-    const sockaddr addr_in = TranslateFromSockAddrIn(addr);
-    if (bind(fd, &addr_in, sizeof(addr_in)) != SOCKET_ERROR) {
+    int bind_result;
+    if (is_v6) {
+        const sockaddr_in6 addr_in6 = TranslateToMappedV6(addr);
+        bind_result =
+            bind(fd, reinterpret_cast<const sockaddr*>(&addr_in6), sizeof(addr_in6));
+    } else {
+        const sockaddr addr_in = TranslateFromSockAddrIn(addr);
+        bind_result = bind(fd, &addr_in, sizeof(addr_in));
+    }
+    if (bind_result != SOCKET_ERROR) {
         return Errno::SUCCESS;
     }
 
@@ -1026,7 +1098,7 @@ std::pair<s32, Errno> Socket::RecvFrom(int flags, std::span<u8> message, SockAdd
     ASSERT(flags == 0);
     ASSERT(message.size() < static_cast<size_t>(std::numeric_limits<int>::max()));
 
-    sockaddr_in addr_in{};
+    sockaddr_storage addr_in{};
     socklen_t addrlen = sizeof(addr_in);
     socklen_t* const p_addrlen = addr ? &addrlen : nullptr;
     sockaddr* const p_addr_in = addr ? reinterpret_cast<sockaddr*>(&addr_in) : nullptr;
@@ -1087,12 +1159,18 @@ std::pair<s32, Errno> Socket::SendTo(u32 flags, std::span<const u8> message,
     }
 
     const sockaddr* to = nullptr;
-    const int to_len = addr ? sizeof(sockaddr) : 0;
+    int to_len = 0;
     sockaddr host_addr_in;
+    sockaddr_in6 host_addr_in6;
 
-    if (addr) {
+    if (addr && is_v6) {
+        host_addr_in6 = TranslateToMappedV6(*addr);
+        to = reinterpret_cast<const sockaddr*>(&host_addr_in6);
+        to_len = sizeof(host_addr_in6);
+    } else if (addr) {
         host_addr_in = TranslateFromSockAddrIn(*addr);
         to = &host_addr_in;
+        to_len = sizeof(host_addr_in);
     }
 
     const auto result = sendto(fd, reinterpret_cast<const char*>(message.data()),

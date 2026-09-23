@@ -220,6 +220,9 @@ private:
     // requests; ping_id_bound makes that bind happen once, on the first request.
     bool is_ping_socket = false;
     bool ping_id_bound = false;
+    // [OpenPak] Created AF_INET6 (dual-mode): the IPv4 addresses this layer speaks are handed to
+    // the host in the v4-mapped form. See Socket::Initialize.
+    bool is_v6 = false;
 };
 
 std::pair<s32, Errno> Poll(std::vector<PollFD>& poll_fds, s32 timeout);
