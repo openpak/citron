@@ -5,7 +5,14 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      aarch64:
+        # Under qemu the aarch64 leg holds a self-hosted runner for hours, and the org's two
+        # runners also build every server release; it runs only when asked for.
+        description: 'Also build aarch64 (qemu, several hours on a self-hosted runner)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -172,7 +179,7 @@ jobs:
   build-aarch64:
     name: "Citron Build (aarch64, qemu)"
     needs: [check-version]
-    if: needs.check-version.outputs.should_build == 'true'
+    if: needs.check-version.outputs.should_build == 'true' && inputs.aarch64
     runs-on: [self-hosted, linux, podman]
     timeout-minutes: 600
     env:
