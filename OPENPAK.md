@@ -45,6 +45,20 @@ Surfaces:
   the catalogue's live/beta/alpha (`openpak::compatibility`, refreshed from the site at startup;
   backend in the tooltip) for every title it lists (`src/citron/openpak_online_status.*`). The
   twelve-title version table in the library only flags an installed version the servers refuse.
+- **Push** — besides the heartbeat's poll, the library holds the Penne push connection a
+  console holds (`openpak/push.h`): a delivered friend request, acceptance, removal, invitation
+  or presence change re-reads the list it concerns at once. Downlink only; presence stays on
+  the REST PATCH. `OPENPAK_NO_PUSH=1` turns it off.
+- **Blocking** — friend:m 30400–30403 block and 30402 unblocks against BAAS
+  (`baas::BlockUser`/`UnblockUser`); the block list, friend list and request boxes re-sync
+  after the write.
+- **BCAT** — with OpenPak on, a title's `RequestSyncDeliveryCache` fills its delivery cache from
+  the news service's dataset (`openpak::bcat`, `/api/emulator/v1/bcat/titles/<tid>`,
+  sha256-checked, cached for offline launches), through the OpenPak BCAT backend in
+  `bcat/service_creator.cpp`.
+- **NAT type** — the account window's NAT pill runs the console's own Test Connection exchange
+  (`openpak::nat`) against nncs1/nncs2 and shows the letter A–F, mapping and filtering in the
+  tooltip.
 - **Cloud saves** — pulled before a title boots and pushed when it stops, every title, from the
   active profile's save folder, versioned (the Cloud saves page resolves conflicts).
 - **Redirection** — Nintendo's online hostnames resolve to the OpenPak server, following the
