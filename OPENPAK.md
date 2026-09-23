@@ -17,8 +17,9 @@ Surfaces:
   service walks the library's console chain (dauth, BAAS device account, login bound to the
   running title) and hands titles the id_token OpenPak issued.
 - **Profiles** — each Citron user profile is its own OpenPak account, one active at a time. A
-  plain launch picks the profile (last used, ask, or one profile; the choice gets its UI on
-  the spec's Configure → OpenPak page), offers the setup once (sign in, create an account, play offline), then goes online.
+  plain launch picks the profile (last used, ask, or one profile: *Account at startup* on
+  Configure → OpenPak), offers the setup once (sign in, create an account, play offline), then
+  goes online.
   `acc` answers only the active profile; deleting a profile forgets its account.
 - **Presence** — the library's heartbeat keeps the account online, keeps the friends caches warm
   and polls the invitation inbox; closing the window says goodbye (three seconds at most). What
@@ -82,14 +83,25 @@ Settings: `enable_openpak`, `openpak_server_ip`, `openpak_nat_ip`. Environment o
 probes (`NEXTENDO_*`) in `sfdnsres.cpp` and `bsd.cpp`, all off unless set.
 
 Menu: the top-level **OpenPak** menu (and the top bar's OpenPak button, the same menu) as the
-UX spec has it (`emulators/prds/openpak-ux-spec.md` §3.1, built by `OpenPakHost::PopulateMenu`,
-identical in Eden): *Sign in to OpenPak...* or *Signed in as {name}*, Friends, Invitations,
+UX spec has it (`emulators/prds/openpak-ux-spec.md` §3.1, the library's `PopulateOpenPakMenu`,
+the same in Eden): *Sign in to OpenPak...* or *Signed in as {name}*, Friends, Invitations,
 Cloud saves, Mods, News, Status, *OpenPak settings...*, *OpenPak website*, *Sign out...* (with
-the §3.5 confirmation). Population, the Chat Rooms prototype, the redirect toggle and the
-startup submenu are no longer in it; the startup choice and redirect move to the spec's
-Configure → OpenPak page (C2, not done yet), and the chat overlay is still reachable from the
-account window's invite-to-chat and a chat-invite toast. The *Toggle OpenPak account* hotkey
-still opens the window.
+the §3.5 confirmation). The *Open OpenPak* hotkey (no keyboard default any more, Home+X on a
+controller) opens the window at its last page, or closes it.
+
+Settings: Configure → **OpenPak** (§3.13, `configuration/configure_openpak.*`, the library's
+settings section): Connect this emulator to OpenPak, the account row, Open OpenPak..., Account
+at startup, cloud sync, Show notifications and the notification corner, and under Advanced the
+website, Server IP and NAT IP (moved from Network), Refresh network settings and crash reports.
+Keys: `enable_openpak`, `openpak_server_ip`, `openpak_nat_ip`, `openpak_cloud_sync_enabled`, and
+the UI keys `openpak/notificationsEnabled`, `openpak/notificationCorner` (renamed from
+`nextendo/*`), `openpak/startupProfile`, `openpak/setupOffered` -- the same as Eden's.
+
+Toasts: the host shows the spec's set (§3.10: friend online or playing, friend request, game
+invitation, signed in and out, an expired sign-in, cloud saves pulled, pushed, failed or in
+conflict), each opening its page; nothing OpenPak goes to the status bar. The Population window
+is gone (Status → Players has the counts). The chat rooms stay a Citron experiment outside the
+spec: offered in a friend's menu and toasted only while `OPENPAK_CHAT_HOST` names a server.
 
 ## Android
 
