@@ -596,7 +596,7 @@ public:
             {30400, D<&OpenPakFriendService::BlockUser>, "BlockUser"},
             {30401, D<&OpenPakFriendService::BlockUserWithApplicationInfo>, "BlockUserWithApplicationInfoV1"},
             {30402, D<&OpenPakFriendService::UnblockUser>, "UnblockUser"},
-            {30403, nullptr, "BlockUserWithApplicationInfoV2"}, // 20.0.0+
+            {30403, D<&OpenPakFriendService::BlockUserWithApplicationInfoV2>, "BlockUserWithApplicationInfoV2"}, // 20.0.0+
             {30500, D<&OpenPakFriendService::GetProfileExtraFromFriendCode>, "GetProfileExtraFromFriendCodeV1"},
             {30501, nullptr, "GetProfileExtraFromFriendCodeV2"}, // 19.0.0+
             {30700, D<&OpenPakFriendService::DeletePlayHistory>, "DeletePlayHistory"},
@@ -1769,19 +1769,92 @@ private:
         R_SUCCEED();
     }
 
-    Result BlockUser() {
-        LOG_WARNING(Service_Friend, "(STUBBED) called");
-        R_SUCCEED();
+    Result BlockUser(s32 reason, Uid user, NetworkServiceAccountId friend_id) {
+        R_TRY(RequireManager());
+
+        if (!AvailableFor(user)) {
+            LOG_WARNING(Service_Friend, "(STUBBED) called, uuid=0x{}, friend_id={:016x}, reason={}",
+                        KeyOf(user), friend_id, reason);
+            R_SUCCEED();
+        }
+
+        // BlockUser names the reason itself: 1 a bad friend request, 2 a bad friend (§B.4).
+        R_UNLESS(reason == 1 || reason == 2, ResultInvalidArgument);
+        R_RETURN(Block(friend_id, reason, std::nullopt));
     }
 
-    Result BlockUserWithApplicationInfo() {
-        LOG_WARNING(Service_Friend, "(STUBBED) called");
+    Result BlockUserWithApplicationInfo(
+        s32 reason, Uid user, NetworkServiceAccountId friend_id,
+        friends::ApplicationInfo application_info,
+        InLargeData<friends::InAppScreenName, BufferAttr_HipcPointer> name) {
+        R_TRY(RequireManager());
+
+        if (!AvailableFor(user)) {
+            LOG_WARNING(Service_Friend, "(STUBBED) called, uuid=0x{}, friend_id={:016x}, reason={}",
+                        KeyOf(user), friend_id, reason);
+            R_SUCCEED();
+        }
+
+        // A block from inside a title is IN_APP (3) whatever the caller passed, and carries the
+        // title and the in-app name the blocked person went by there (§A.8).
+        baas::Route route;
+        route.application_id = application_info.application_id;
+        route.presence_group_id = application_info.presence_group_id;
+        std::tie(route.name, route.language) = friends::ScreenName(*name);
+        R_RETURN(Block(friend_id, 3, std::move(route)));
+    }
+
+    Result BlockUserWithApplicationInfoV2(
+        s32 reason, Uid user, NetworkServiceAccountId friend_id,
+        friends::ApplicationInfoV2 application_info,
+        InLargeData<friends::InAppScreenName, BufferAttr_HipcPointer> name) {
+        R_TRY(RequireManager());
+
+        if (!AvailableFor(user)) {
+            LOG_WARNING(Service_Friend, "(STUBBED) called, uuid=0x{}, friend_id={:016x}, reason={}",
+                        KeyOf(user), friend_id, reason);
+            R_SUCCEED();
+        }
+
+        baas::Route route;
+        route.application_id = application_info.application_id;
+        route.acd_index = application_info.acd_index;
+        route.presence_group_id = application_info.presence_group_id;
+        std::tie(route.name, route.language) = friends::ScreenName(*name);
+        R_RETURN(Block(friend_id, 3, std::move(route)));
+    }
+
+    /// Fire and forget, as the other writes are: the POST is a network call and this is the
+    /// game's thread. The library caches the block before the request leaves, so a title reading
+    /// the list or the relationship straight after sees it, and re-syncs blocks, friends and the
+    /// request boxes after the write.
+    Result Block(NetworkServiceAccountId friend_id, s32 reason, std::optional<baas::Route> route) {
+        R_UNLESS(friend_id != 0, ResultInvalidArgument);
+
+        baas::RunInBackground([friend_id, reason, route = std::move(route)] {
+            if (const int error = baas::BlockUser(friend_id, reason, route); error != baas::Ok) {
+                LOG_WARNING(Service_Friend, "[OpenPak] Blocking {:016x} failed: 2121-{:04}",
+                            friend_id, error);
+            }
+        });
         R_SUCCEED();
     }
 
     Result UnblockUser(Uid user, NetworkServiceAccountId friend_id) {
-        LOG_WARNING(Service_Friend, "(STUBBED) called, uuid=0x{}, friend_id={:016x}", KeyOf(user),
-                    friend_id);
+        R_TRY(RequireManager());
+
+        if (!AvailableFor(user)) {
+            LOG_WARNING(Service_Friend, "(STUBBED) called, uuid=0x{}, friend_id={:016x}",
+                        KeyOf(user), friend_id);
+            R_SUCCEED();
+        }
+
+        baas::RunInBackground([friend_id] {
+            if (const int error = baas::UnblockUser(friend_id); error != baas::Ok) {
+                LOG_WARNING(Service_Friend, "[OpenPak] Unblocking {:016x} failed: 2121-{:04}",
+                            friend_id, error);
+            }
+        });
         R_SUCCEED();
     }
 
