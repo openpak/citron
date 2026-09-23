@@ -2,17 +2,29 @@
 // SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <memory>
 #include <mutex>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <fmt/format.h>
 
 #include "common/error.h"
 #include "common/fs/file.h"
 #include "common/hex_util.h"
+#include "common/settings.h"
 #include "common/string_util.h"
 
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
+#include "openpak/session.h"
 
 namespace {
 
@@ -33,10 +45,16 @@ CredHandle cred_handle;
 
 static void OneTimeInit() {
     schannel_cred.dwVersion = SCHANNEL_CRED_VERSION;
+    // [OpenPak] Schannel validates nothing itself: the server's chain and name are checked by
+    // VerifyServerCertificate once the handshake completes, against the host's roots plus the
+    // OpenPak CA and as the title's verify option asks -- the same rule the OpenSSL backend
+    // applies. Schannel alone could only check against the Windows store, which does not (and
+    // must not) hold the OpenPak CA.
     schannel_cred.dwFlags =
-        SCH_USE_STRONG_CRYPTO |        // don't allow insecure protocols
-        SCH_CRED_NO_SERVERNAME_CHECK | // don't validate server names
-        SCH_CRED_NO_DEFAULT_CREDS;     // don't automatically present a client certificate
+        SCH_USE_STRONG_CRYPTO |           // don't allow insecure protocols
+        SCH_CRED_MANUAL_CRED_VALIDATION | // the chain is checked by VerifyServerCertificate
+        SCH_CRED_NO_SERVERNAME_CHECK |    // and so is the name
+        SCH_CRED_NO_DEFAULT_CREDS;        // don't automatically present a client certificate
     // ^ I'm assuming that nobody would want to connect Citron to a
     // service that requires some OS-provided corporate client
     // certificate, and presenting one to some arbitrary server
@@ -59,6 +77,108 @@ static void OneTimeInit() {
     }
 
     one_time_init_success = true;
+}
+
+// [OpenPak] NPLN (gRPC over HTTP/2) needs the title's own ALPN list; everyone else gets
+// http/1.1 only, because NEX rides a WebSocket Upgrade that h2 breaks. The same rule as the
+// OpenSSL backend's.
+bool IsNplnHost(std::string_view hostname) {
+    const std::string lower = Common::ToLower(std::string(hostname));
+    return lower.find("npln") != std::string::npos ||
+           lower.find("gs.nintendo.net") != std::string::npos;
+}
+
+// ALPN protocol list in wire form: one length byte per name.
+std::vector<u8> BuildAlpnProtocolList(std::span<const std::string> requested, bool npln) {
+    std::vector<u8> list;
+    if (npln) {
+        for (const std::string& proto : requested) {
+            if (proto != "h2" && proto != "http/1.1") {
+                continue;
+            }
+            list.push_back(static_cast<u8>(proto.size()));
+            list.insert(list.end(), proto.begin(), proto.end());
+        }
+    }
+    if (list.empty()) {
+        static constexpr std::string_view http11 = "http/1.1";
+        list.push_back(static_cast<u8>(http11.size()));
+        list.insert(list.end(), http11.begin(), http11.end());
+    }
+    return list;
+}
+
+// SEC_APPLICATION_PROTOCOLS for one ALPN list: {u32 ProtocolListsSize, u32 ProtoNegoExt,
+// u16 ProtocolListSize, protocol list}, little-endian.
+std::vector<u8> BuildAlpnSecBuffer(const std::vector<u8>& protocol_list) {
+    std::vector<u8> buf;
+    const auto put = [&buf](u32 value, size_t bytes) {
+        for (size_t i = 0; i < bytes; ++i) {
+            buf.push_back(static_cast<u8>(value >> (8 * i)));
+        }
+    };
+    put(static_cast<u32>(4 + 2 + protocol_list.size()), 4); // ProtocolListsSize
+    put(static_cast<u32>(SecApplicationProtocolNegotiationExt_ALPN), 4);
+    put(static_cast<u32>(protocol_list.size()), 2); // ProtocolListSize
+    buf.insert(buf.end(), protocol_list.begin(), protocol_list.end());
+    return buf;
+}
+
+// fdwChecks bits for SSL_EXTRA_CERT_CHAIN_POLICY_PARA (defined by wininet.h, which this file
+// does not otherwise need).
+constexpr DWORD kIgnoreUnknownCa = 0x00000100;     // SECURITY_FLAG_IGNORE_UNKNOWN_CA
+constexpr DWORD kIgnoreCertCnInvalid = 0x00001000; // SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+
+struct CertStoreCloser {
+    void operator()(void* store) const {
+        CertCloseStore(static_cast<HCERTSTORE>(store), 0);
+    }
+};
+using UniqueCertStore = std::unique_ptr<void, CertStoreCloser>;
+
+struct CertContextFreer {
+    void operator()(const CERT_CONTEXT* cert) const {
+        CertFreeCertificateContext(cert);
+    }
+};
+using UniqueCertContext = std::unique_ptr<const CERT_CONTEXT, CertContextFreer>;
+
+struct ChainContextFreer {
+    void operator()(const CERT_CHAIN_CONTEXT* chain) const {
+        CertFreeCertificateChain(chain);
+    }
+};
+using UniqueChainContext = std::unique_ptr<const CERT_CHAIN_CONTEXT, ChainContextFreer>;
+
+// Whether the certificate names this IPv4 address in an iPAddress subjectAltName -- how a title
+// that dials a game server by address and names it by that address is matched (RFC 6125 6.2.1;
+// the OpenSSL backend's X509_VERIFY_PARAM_set1_ip_asc). Done by hand rather than trusting the
+// SSL policy's pwszServerName to understand IP literals.
+bool CertificateHasIpSan(PCCERT_CONTEXT cert, const std::array<u8, 4>& ip) {
+    const PCERT_EXTENSION extension =
+        CertFindExtension(szOID_SUBJECT_ALT_NAME2, cert->pCertInfo->cExtension,
+                          cert->pCertInfo->rgExtension);
+    if (extension == nullptr) {
+        return false;
+    }
+
+    PCERT_ALT_NAME_INFO names = nullptr;
+    DWORD names_size = 0;
+    if (!CryptDecodeObjectEx(X509_ASN_ENCODING, X509_ALTERNATE_NAME, extension->Value.pbData,
+                             extension->Value.cbData, CRYPT_DECODE_ALLOC_FLAG, nullptr, &names,
+                             &names_size)) {
+        return false;
+    }
+
+    bool found = false;
+    for (DWORD i = 0; i < names->cAltEntry && !found; ++i) {
+        const CERT_ALT_NAME_ENTRY& entry = names->rgAltEntry[i];
+        found = entry.dwAltNameChoice == CERT_ALT_NAME_IP_ADDRESS &&
+                entry.IPAddress.cbData == ip.size() &&
+                std::memcmp(entry.IPAddress.pbData, ip.data(), ip.size()) == 0;
+    }
+    LocalFree(names);
+    return found;
 }
 
 } // namespace
@@ -86,6 +206,11 @@ public:
 
     Result SetHostName(const std::string& hostname_in) override {
         std::string effective_host = hostname_in;
+        // nsd's environment, as the OpenSSL backend substitutes it.
+        for (auto pos = effective_host.find('%'); pos != std::string::npos;
+             pos = effective_host.find('%', pos + 3)) {
+            effective_host.replace(pos, 1, "lp1");
+        }
         if (socket) {
             auto [peer_addr, err] = socket->GetPeerName();
             if (err == Network::Errno::SUCCESS) {
@@ -105,16 +230,25 @@ public:
         return ResultSuccess;
     }
 
-    Result SetVerifyOption(u32 verify_option) override {
-        // [Nextendo] Always bypass, matching the OpenSSL backend; a title requesting real
-        // verification would otherwise fail the self-signed cert against the Windows trust store.
-        skip_cert_verification = true;
-        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, bypassing cert verification for OpenPak",
-                  verify_option);
+    // [OpenPak] Remembered and applied once the handshake completes (VerifyServerCertificate):
+    // nn::ssl's PeerCa bit checks the chain, its HostName bit the name, as the OpenSSL backend
+    // interprets them. This used to skip verification unconditionally.
+    Result SetVerifyOption(u32 option) override {
+        verify_option = option;
+        LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}", option);
         return ResultSuccess;
     }
 
-    Result DoHandshake() override {
+    Result DoHandshake(std::span<const std::string> requested_alpn_protos) override {
+        if (handshake_state == HandshakeState::Initial) {
+            const bool npln = hostname.has_value() && IsNplnHost(*hostname);
+            alpn_protocol_list = BuildAlpnProtocolList(requested_alpn_protos, npln);
+            if (npln) {
+                LOG_INFO(Service_SSL,
+                         "[OpenPak] NPLN host '{}': honoring game-requested ALPN ({} byte(s))",
+                         *hostname, alpn_protocol_list.size());
+            }
+        }
         while (1) {
             Result r;
             switch (handshake_state) {
@@ -200,40 +334,23 @@ public:
     }
 
     Result CallInitializeSecurityContext() {
-        unsigned long req = ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONFIDENTIALITY |
-                            ISC_REQ_INTEGRITY | ISC_REQ_REPLAY_DETECT |
-                            ISC_REQ_SEQUENCE_DETECT | ISC_REQ_STREAM |
-                            ISC_REQ_USE_SUPPLIED_CREDS;
-
-        // When certificate verification is disabled, use manual credential validation
-        // This allows the handshake to succeed even with invalid/self-signed certificates
-        if (skip_cert_verification) {
-            req |= ISC_REQ_MANUAL_CRED_VALIDATION;
-        }
+        // Manual validation always: the chain and the name are checked by
+        // VerifyServerCertificate once Schannel reports the handshake complete.
+        const unsigned long req = ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_CONFIDENTIALITY |
+                                  ISC_REQ_INTEGRITY | ISC_REQ_REPLAY_DETECT |
+                                  ISC_REQ_SEQUENCE_DETECT | ISC_REQ_STREAM |
+                                  ISC_REQ_USE_SUPPLIED_CREDS | ISC_REQ_MANUAL_CRED_VALIDATION;
         unsigned long attr;
         bool initial_call_done = handshake_state != HandshakeState::Initial;
 
         // [Nextendo] NEX (MK8/Splatoon 2) uses PRUDP over WebSocket which requires HTTP/1.1
-        // Upgrade. Force ALPN to http/1.1 only so HTTP/2 is never negotiated, matching the
-        // OpenSSL backend. Only valid in the client's first ClientHello.
-        static constexpr u8 kAlpnProtocolList[] = "\x08http/1.1";
-        std::array<u8, 4 + 4 + 2 + (sizeof(kAlpnProtocolList) - 1)> alpn_buf;
+        // Upgrade, so everyone but NPLN is offered http/1.1 only (see DoHandshake). Only valid
+        // in the client's first ClientHello.
+        std::vector<u8> alpn_buf;
         if (!initial_call_done) {
-            size_t off = 0;
-            const u32 list_size = static_cast<u32>(4 + 2 + (sizeof(kAlpnProtocolList) - 1));
-            const auto put_u32 = [&](u32 v) {
-                alpn_buf[off + 0] = static_cast<u8>(v);
-                alpn_buf[off + 1] = static_cast<u8>(v >> 8);
-                alpn_buf[off + 2] = static_cast<u8>(v >> 16);
-                alpn_buf[off + 3] = static_cast<u8>(v >> 24);
-                off += 4;
-            };
-            put_u32(list_size);                                 // ProtocolListsSize
-            put_u32(SecApplicationProtocolNegotiationExt_ALPN);  // ProtoNegoExt
-            alpn_buf[off + 0] = static_cast<u8>(sizeof(kAlpnProtocolList) - 1);
-            alpn_buf[off + 1] = 0; // ProtocolListSize (u16 LE)
-            off += 2;
-            std::memcpy(alpn_buf.data() + off, kAlpnProtocolList, sizeof(kAlpnProtocolList) - 1);
+            alpn_buf = BuildAlpnSecBuffer(alpn_protocol_list.empty()
+                                              ? BuildAlpnProtocolList({}, false)
+                                              : alpn_protocol_list);
         }
 
         // https://learn.microsoft.com/en-us/windows/win32/secauthn/initializesecuritycontext--schannel
@@ -339,6 +456,12 @@ public:
         case SEC_E_OK:
             LOG_DEBUG(Service_SSL, "InitializeSecurityContext => SEC_E_OK");
             ciphertext_read_buf.clear();
+            // [OpenPak] Nothing more goes to the server until its certificate has passed.
+            if (const Result verified = VerifyServerCertificate(); verified != ResultSuccess) {
+                ciphertext_write_buf.clear();
+                handshake_state = HandshakeState::Error;
+                return verified;
+            }
             handshake_state = HandshakeState::DoneAfterFlush;
             return GrabStreamSizes();
         default:
@@ -348,6 +471,164 @@ public:
             handshake_state = HandshakeState::Error;
             return ResultInternalError;
         }
+    }
+
+    // [OpenPak] The server's certificate, checked as the title's verify option asks and against
+    // what the OpenSSL backend trusts: the host's roots (the Windows store here) plus the OpenPak
+    // CA, which OpenPak's certificates for Nintendo's own names chain to and which no public
+    // store holds. The chain is built once with the system engine and the OpenPak CA as an extra
+    // store; it passes if it is trusted outright, or if its only fault is an untrusted root and
+    // that root is exactly the OpenPak CA. The name is the SSL policy's to check, except for an
+    // IP literal, which is matched against the iPAddress subjectAltNames by hand. Any failure is
+    // ResultInternalError, the result the OpenSSL backend's failed handshake gives.
+    Result VerifyServerCertificate() {
+        constexpr u32 PeerCa = 1;
+        constexpr u32 HostName = 2;
+
+        if ((verify_option & PeerCa) == 0) {
+            LOG_DEBUG(Service_SSL, "host={} option={} verify=false", hostname.value_or(""),
+                      verify_option);
+            return ResultSuccess;
+        }
+
+        const std::string host = hostname.value_or("");
+        const auto fail = [&host](std::string_view why) {
+            LOG_ERROR(Service_SSL, "SSL cert verification of {} failed because: {}", host, why);
+            return ResultInternalError;
+        };
+
+        PCCERT_CONTEXT remote_raw = nullptr;
+        const SECURITY_STATUS query =
+            QueryContextAttributes(&ctxt, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &remote_raw);
+        if (query != SEC_E_OK || remote_raw == nullptr) {
+            return fail(fmt::format("no server certificate ({})",
+                                    Common::NativeErrorToString(query)));
+        }
+        const UniqueCertContext remote{remote_raw};
+
+        // The certificates the server sent, plus the OpenPak CA, as one store for chain building.
+        const UniqueCertStore extra{
+            CertOpenStore(CERT_STORE_PROV_COLLECTION, 0, 0, 0, nullptr)};
+        const UniqueCertStore openpak_store{
+            CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, nullptr)};
+        if (!extra || !openpak_store) {
+            return fail("could not open a certificate store");
+        }
+        CertAddStoreToCollection(static_cast<HCERTSTORE>(extra.get()), remote->hCertStore, 0, 0);
+
+        UniqueCertContext openpak_ca;
+        if (Settings::values.enable_openpak.GetValue()) {
+            const std::vector<u8> der = openpak::client::session::CaCertificateDer();
+            PCCERT_CONTEXT added = nullptr;
+            if (!der.empty() &&
+                CertAddEncodedCertificateToStore(
+                    static_cast<HCERTSTORE>(openpak_store.get()), X509_ASN_ENCODING, der.data(),
+                    static_cast<DWORD>(der.size()), CERT_STORE_ADD_ALWAYS, &added)) {
+                openpak_ca.reset(added);
+                CertAddStoreToCollection(static_cast<HCERTSTORE>(extra.get()),
+                                         static_cast<HCERTSTORE>(openpak_store.get()), 0, 0);
+            } else {
+                LOG_WARNING(Service_SSL,
+                            "[OpenPak] No CA to trust; redirected hosts will fail to verify");
+            }
+        }
+
+        std::array<LPSTR, 1> usages{const_cast<LPSTR>(szOID_PKIX_KP_SERVER_AUTH)};
+        CERT_CHAIN_PARA chain_para{};
+        chain_para.cbSize = sizeof(chain_para);
+        chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_AND;
+        chain_para.RequestedUsage.Usage.cUsageIdentifier = static_cast<DWORD>(usages.size());
+        chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = usages.data();
+
+        PCCERT_CHAIN_CONTEXT chain_raw = nullptr;
+        if (!CertGetCertificateChain(nullptr, remote.get(), nullptr,
+                                     static_cast<HCERTSTORE>(extra.get()), &chain_para, 0,
+                                     nullptr, &chain_raw) ||
+            chain_raw == nullptr) {
+            return fail(fmt::format("CertGetCertificateChain failed ({})",
+                                    Common::NativeErrorToString(static_cast<int>(GetLastError()))));
+        }
+        const UniqueChainContext chain{chain_raw};
+
+        DWORD policy_checks = 0;
+        const DWORD chain_errors = chain->TrustStatus.dwErrorStatus;
+        if (chain_errors != CERT_TRUST_NO_ERROR) {
+            // Trusted only through the OpenPak CA: an untrusted root and nothing else wrong, and
+            // that root is the OpenPak CA itself, byte for byte.
+            bool rooted_in_openpak = false;
+            if (chain_errors == CERT_TRUST_IS_UNTRUSTED_ROOT && openpak_ca &&
+                chain->cChain > 0 && chain->rgpChain[0]->cElement > 0) {
+                const PCERT_SIMPLE_CHAIN simple = chain->rgpChain[0];
+                const PCCERT_CONTEXT root = simple->rgpElement[simple->cElement - 1]->pCertContext;
+                rooted_in_openpak = root->cbCertEncoded == openpak_ca->cbCertEncoded &&
+                                    std::memcmp(root->pbCertEncoded, openpak_ca->pbCertEncoded,
+                                                root->cbCertEncoded) == 0;
+            }
+            if (!rooted_in_openpak) {
+                return fail(fmt::format("the chain is not trusted (trust errors {:#x})",
+                                        chain_errors));
+            }
+            policy_checks |= kIgnoreUnknownCa;
+        }
+
+        // The name: the SSL policy for a DNS name, the iPAddress SANs for an IP literal, nothing
+        // when the title did not ask (or named no host, as the OpenSSL backend skips it too).
+        const bool check_name = (verify_option & HostName) != 0 && !host.empty();
+        Network::IPv4Address ip{};
+        const bool is_ip = Network::TryParseIPv4Literal(host, ip);
+        std::wstring server_name;
+        if (check_name && !is_ip) {
+            server_name = Common::UTF8ToUTF16W(host);
+        } else {
+            policy_checks |= kIgnoreCertCnInvalid;
+        }
+
+        SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl_para{};
+        ssl_para.cbStruct = sizeof(ssl_para); // cbStruct: the name every SDK spells
+        ssl_para.dwAuthType = AUTHTYPE_SERVER;
+        ssl_para.fdwChecks = policy_checks;
+        ssl_para.pwszServerName = server_name.empty() ? nullptr : server_name.data();
+
+        CERT_CHAIN_POLICY_PARA policy_para{};
+        policy_para.cbSize = sizeof(policy_para);
+        policy_para.pvExtraPolicyPara = &ssl_para;
+
+        CERT_CHAIN_POLICY_STATUS policy_status{};
+        policy_status.cbSize = sizeof(policy_status);
+
+        if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain.get(), &policy_para,
+                                              &policy_status)) {
+            return fail(fmt::format("CertVerifyCertificateChainPolicy failed ({})",
+                                    Common::NativeErrorToString(static_cast<int>(GetLastError()))));
+        }
+        if (policy_status.dwError != 0) {
+            return fail(fmt::format("the SSL policy refused it ({})",
+                                    Common::NativeErrorToString(
+                                        static_cast<int>(policy_status.dwError))));
+        }
+
+        if (check_name && is_ip && !CertificateHasIpSan(remote.get(), ip)) {
+            return fail("the certificate does not name this IP address");
+        }
+
+        LOG_DEBUG(Service_SSL, "host={} ip={} option={} verify=true via={}", host, is_ip,
+                  verify_option, policy_checks & kIgnoreUnknownCa ? "OpenPak CA" : "system roots");
+        return ResultSuccess;
+    }
+
+    std::vector<u8> GetNegotiatedAlpnProto() override {
+        if (handshake_state != HandshakeState::Connected &&
+            handshake_state != HandshakeState::DoneAfterFlush) {
+            return {};
+        }
+        SecPkgContext_ApplicationProtocol protocol{};
+        if (QueryContextAttributes(&ctxt, SECPKG_ATTR_APPLICATION_PROTOCOL, &protocol) !=
+                SEC_E_OK ||
+            protocol.ProtoNegoStatus != SecApplicationProtocolNegotiationStatus_Success ||
+            protocol.ProtocolIdSize == 0) {
+            return {};
+        }
+        return std::vector<u8>(protocol.ProtocolId, protocol.ProtocolId + protocol.ProtocolIdSize);
     }
 
     Result GrabStreamSizes() {
@@ -611,7 +892,8 @@ public:
     std::vector<u8> cleartext_write_buf;
 
     bool got_read_eof = false;
-    bool skip_cert_verification = false;
+    u32 verify_option = 0;
+    std::vector<u8> alpn_protocol_list; ///< Offered in the first ClientHello; see DoHandshake.
     size_t read_buf_fill_size = 0;
 };
 
