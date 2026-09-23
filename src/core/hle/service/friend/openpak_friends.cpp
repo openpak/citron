@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "common/logging.h"
+#include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -464,7 +465,9 @@ void NotificationEventHandler::Run(std::stop_token stop) {
         Change change;
         {
             std::unique_lock lock{pending_mutex};
-            if (!wake.wait(lock, stop, [this] { return !pending.empty(); })) {
+            // Android's libc++ has no stop_token overload of wait; the polyfill covers both.
+            Common::CondvarWait(wake, lock, stop, [this] { return !pending.empty(); });
+            if (pending.empty()) {
                 return;
             }
             change = pending.front();
