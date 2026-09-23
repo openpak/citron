@@ -273,6 +273,8 @@ add_executable(citron
     openpak_host.h
     openpak_friend_picker.cpp
     openpak_friend_picker.h
+    openpak_online_status.cpp
+    openpak_online_status.h
     legacy_ldn_counts.cpp
     legacy_ldn_counts.h
     legacy_population_dialog.cpp
