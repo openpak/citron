@@ -6,6 +6,9 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <span>
+
+#include "common/uuid.h"
 
 #include "core/file_sys/registered_cache.h"
 #include "core/hle/service/am/am_types.h"
@@ -52,6 +55,11 @@ public:
     }
 
     void SetWindowSystem(WindowSystem* window_system);
+
+    /// [OpenPak] An accepted invitation, left for the running application as qlaunch leaves it on
+    /// a console (IApplicationAccessor 180): [Uid 0x10][the sender's application data]. False
+    /// when no application is running.
+    bool PushFriendInvitation(const Common::UUID& user, std::span<const u8> application_data);
     void SetHomeMenuRequestCallback(std::function<void()> callback);
 
 private:

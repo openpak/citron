@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "openpak/friends_cache.h"
 #include "common/settings.h"
 #include "common/uuid.h"
 #include "core/file_sys/control_metadata.h"
@@ -28,16 +27,6 @@ namespace Service::AM {
 
 IApplicationFunctions::IApplicationFunctions(Core::System& system_, std::shared_ptr<Applet> applet)
     : ServiceFramework{system_, "IApplicationFunctions"}, m_applet{std::move(applet)} {
-    // [Nextendo] Weak-bound so a callback firing after this application (and its Applet) has
-    // been torn down is a harmless no-op rather than a signal into a dead object. The next
-    // application's own constructor overwrites this registration, so there is nothing to
-    // explicitly unregister on exit.
-    std::weak_ptr<Applet> weak_applet = m_applet;
-    Common::NextendoFriends::SetInvitationSignalCallback([weak_applet] {
-        if (const auto applet = weak_applet.lock()) {
-            applet->friend_invitation_storage_channel_event.Signal();
-        }
-    });
     // clang-format off
     static const FunctionInfo functions[] = {
         {1, D<&IApplicationFunctions::PopLaunchParameter>, "PopLaunchParameter"},
@@ -533,59 +522,44 @@ Result IApplicationFunctions::GetFriendInvitationStorageChannelEvent(
     R_SUCCEED();
 }
 
-namespace {
-// [Nextendo] Same deterministic pid->Uid derivation as friend.cpp's UidForPid (kept local
-// rather than shared across a header for one 5-line pure function) -- needed here because real
-// hardware's storage-channel payload is NOT a bare byte blob: switchbrew documents the popped
-// IStorage as a 0x10-byte sender Uid followed by the actual application-defined payload at
-// offset 0x10. We were previously pushing app_param at offset 0 with no Uid header at all --
-// if the receiving game validates/reads that leading Uid before trusting the payload that
-// follows (as its own PushInData-to-MyPage capture already showed it constructing a real
-// version/length-prefixed parameter, i.e. it does structured parsing, not a raw copy), a
-// missing header would explain a clean pop with no visible in-game effect afterward.
-Common::UUID InvitationUidForPid(u64 pid) {
-    std::array<u8, 16> raw{};
-    std::memcpy(raw.data(), &pid, sizeof(pid));
-    const u64 high = 0x1100000000000000ULL;
-    std::memcpy(raw.data() + 8, &high, sizeof(high));
-    return Common::UUID{raw};
-}
-} // namespace
-
 // [Nextendo] RAW ctx handler -- see the header comment for why this is not D<>:
 // ctx.GetThread() is the REAL requesting guest thread, while the D<>/cmif path
 // executes on a ServerManager host thread whose GetCurrentThreadPointer() is a
 // per-thread DUMMY KThread -- arming against that dummy never fires.
 void IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
     HLERequestContext& ctx) {
-    // [Nextendo] Real data now: SendFriendInvitation (friend.cpp) relays a sender's invite
-    // through nextendo-account's own mailbox; NextendoController polls it in the background
-    // (same pattern as the friends-list poll) into Common::NextendoFriends's pending-
-    // invitation cache, which this call only ever reads synchronously -- never a network call
-    // from an IPC handler. The storage content is the sender's Uid (0x10 bytes, real hardware's
-    // documented header) followed by the app_param bytes verbatim, exactly as the sending game
-    // constructed them via its own StartSendingFriendInvitation call: this channel relays the
-    // payload byte-for-byte, so the receiving game's own parsing of its own format is what
-    // actually needs to succeed, not anything decoded on our end -- only the Uid header itself
-    // is our own construction, since real hardware's channel always carries one.
-    const auto invitation = Common::NextendoFriends::PopPendingInvitation();
-    if (!invitation) {
-        LOG_DEBUG(Service_AM, "called, no invitation waiting");
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(AM::ResultNoDataInChannel);
-        return;
+    // [OpenPak] What the frontend left in the channel -- an invitation accepted from the native
+    // inbox, or a friend's session joined from the account dialog -- oldest first. The event
+    // stays signalled only while something is still queued, so a title waiting on it wakes once
+    // per invitation (as Ryujinx does). The storage is [Uid 0x10][the sender's application data],
+    // relayed byte for byte: the receiving game parses its own format.
+    std::vector<u8> storage_data;
+    {
+        std::scoped_lock lk{m_applet->lock};
+        auto& channel = m_applet->friend_invitation_storage_channel;
+        m_applet->friend_invitation_storage_channel_event.Clear();
+
+        if (channel.empty()) {
+            LOG_DEBUG(Service_AM, "called, no invitation waiting");
+            IPC::ResponseBuilder rb{ctx, 2};
+            rb.Push(AM::ResultNoDataInChannel);
+            return;
+        }
+
+        storage_data = std::move(channel.front());
+        channel.pop_front();
+
+        if (!channel.empty()) {
+            m_applet->friend_invitation_storage_channel_event.Signal();
+        }
     }
 
-    LOG_INFO(Service_AM,
-             "[OpenPak] TryPopFromFriendInvitationStorageChannel: from_pid={} "
-             "from_name='{}' app_param_size={}",
-             invitation->from_pid, invitation->from_name, invitation->app_param.size());
-
-    const auto uid = InvitationUidForPid(invitation->from_pid);
-    std::vector<u8> storage_data(sizeof(uid) + invitation->app_param.size());
-    std::memcpy(storage_data.data(), &uid, sizeof(uid));
-    std::memcpy(storage_data.data() + sizeof(uid), invitation->app_param.data(),
-                invitation->app_param.size());
+    constexpr std::size_t UidSize = sizeof(Common::UUID);
+    const std::span<const u8> app_param =
+        storage_data.size() > UidSize ? std::span<const u8>{storage_data}.subspan(UidSize)
+                                      : std::span<const u8>{};
+    LOG_INFO(Service_AM, "[OpenPak] TryPopFromFriendInvitationStorageChannel: app_param_size={}",
+             app_param.size());
 
     // [Nextendo] Outbound's own mailbox-consumption path can never join by itself (its
     // JoinSessionRequest is built from a hardcoded empty PlatformSessionID and
@@ -596,7 +570,6 @@ void IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
     // this invitation's application parameter instead. See nextendo_guest_call.h.
     // ... and arm the guest-call injection against ctx.GetThread() -- the REAL
     // requesting guest thread (Unity main).
-    const auto& app_param = invitation->app_param;
     if (app_param.size() >= 6 && app_param.size() == 5 + app_param[4]) {
         const char* code_bytes = reinterpret_cast<const char*>(app_param.data()) + 5;
         const std::string_view room_code(code_bytes, app_param[4]);
