@@ -67,6 +67,8 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          # openpak-client is private: GITHUB_TOKEN reads only this repo.
+          token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
 
       - name: Add Git Safe Directory
@@ -127,6 +129,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # openpak-client is private: GITHUB_TOKEN reads only this repo.
+          token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
 
       - name: Check that arm64 binaries can run here

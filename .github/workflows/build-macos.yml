@@ -37,6 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # openpak-client is private: GITHUB_TOKEN reads only this repo.
+          token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
 
       - name: Install System Dependencies via Homebrew
