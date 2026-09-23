@@ -1,0 +1,31 @@
+name: Release
+
+# The one place a vX.Y.Z tag's release is created. The build workflows start on the same tag
+# and only attach their files to it (.github/scripts/attach-to-release.js waits for it to
+# exist); when each of them created it too, they raced and made two releases for one tag.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  create:
+    name: Create the release
+    runs-on: [self-hosted, linux, podman]
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace('refs/tags/', '');
+            try {
+              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              core.info(`${tag} already has a release`);
+              return;
+            } catch (e) { if (e.status !== 404) throw e; }
+            await github.rest.repos.createRelease({
+              owner, repo, tag_name: tag, name: `Citron ${tag} (OpenPak)`,
+              generate_release_notes: true,
+            });

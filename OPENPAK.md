@@ -121,7 +121,10 @@ runner; aarch64 under qemu only in a manual run that sets `aarch64: true`, becau
 runner for hours) and attaches the AppImages to the release named after the tag, without
 artifacts; the announcement runs for whichever legs made it. `build-windows.yml`,
 `build-macos.yml` (GitHub-hosted runners) and `build-android.yml` (standard and Snapdragon 8 Elite
-APKs) attach to the same release. No `vX.Y.Z` tag yet. Local desktop build: `build-openpak/` (system libraries,
+APKs, one after the other) attach to the same release. Only `release.yml` creates the release;
+the builds wait for it and upload through `.github/scripts/attach-to-release.js` (when every
+workflow created it, v0.1.0 got two releases). Self-hosted builds are capped at 8 CPUs and run
+one at a time. Local desktop build: `build-openpak/` (system libraries,
 nlohmann_json in `build-openpak/deps`).
 
 PRDs: [`../prds/`](../prds/README.md) — emulator-wide PRDs live at `emulators/prds/` in the
