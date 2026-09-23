@@ -10,7 +10,7 @@ on:
 jobs:
   check-version:
     name: Check if new version available
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
     outputs:
       should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.head.outputs.hash_short }}
@@ -70,12 +70,12 @@ jobs:
       matrix:
         include:
           - name: "Citron Build (Normal x86_64)"
-            os: ubuntu-latest
+            os: [self-hosted, linux, podman]
             artifact_suffix: "_x86_64"
             script_suffix: ""
             build_arg: ""
           - name: "Citron Build (Optimized x86_64)"
-            os: ubuntu-latest
+            os: [self-hosted, linux, podman]
             artifact_suffix: "_v3"
             script_suffix: "_v3"
             build_arg: "v3"
@@ -132,7 +132,7 @@ jobs:
       actions: read
       security-events: write
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, podman]
 
     steps:
       - uses: actions/checkout@v4
