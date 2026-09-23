@@ -29,8 +29,8 @@
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
-#include "citron/nextendo_avatar_cache.h"
-#include "citron/nextendo_chat_client.h"
+#include "openpak/qt/avatar_cache.h"
+#include "openpak/qt/chat_client.h"
 #include "citron/nextendo_chat_room.h"
 #include "citron/nextendo_chat_room_member_delegate.h"
 #include "citron/theme.h"

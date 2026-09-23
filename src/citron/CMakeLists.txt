@@ -260,13 +260,6 @@ add_executable(citron
     multiplayer/validation.h
     play_time_manager.cpp
     play_time_manager.h
-    nextendo_account_dialog.cpp
-    nextendo_account_dialog.h
-    nextendo_account_page_p.h
-    nextendo_avatar_cache.cpp
-    nextendo_avatar_cache.h
-    nextendo_chat_client.cpp
-    nextendo_chat_client.h
     nextendo_chat_room.cpp
     nextendo_chat_room.h
     nextendo_chat_room.ui
@@ -274,30 +267,16 @@ add_executable(citron
     nextendo_chat_room_member_delegate.h
     nextendo_chat_window.cpp
     nextendo_chat_window.h
-    nextendo_controller.cpp
     nextendo_room_overlay.cpp
     nextendo_room_overlay.h
-    nextendo_controller.h
-    nextendo_friend_delegate.cpp
-    nextendo_friend_delegate.h
-    nextendo_history_delegate.cpp
-    nextendo_history_delegate.h
+    openpak_host.cpp
+    openpak_host.h
     nextendo_ldn_counts.cpp
     nextendo_ldn_counts.h
-    nextendo_network_probe.cpp
-    nextendo_network_probe.h
-    nextendo_online_counts.cpp
-    nextendo_online_counts.h
     nextendo_population_dialog.cpp
     nextendo_population_dialog.h
     nextendo_population_history.cpp
     nextendo_population_history.h
-    nzp_online_count.cpp
-    nzp_online_count.h
-    nextendo_save_sync.cpp
-    nextendo_save_sync.h
-    nextendo_toast.cpp
-    nextendo_toast.h
     precompiled_headers.h
     qt_common.cpp
     qt_common.h
@@ -629,9 +608,9 @@ endif()
 target_link_libraries(citron PRIVATE Boost::headers glad nlohmann_json::nlohmann_json Qt6::Widgets Qt6::Network Qt6::Svg)
 target_link_libraries(citron PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 
-# [OpenPak] The account, the friend cache and the OpenPak web API come from the shared client
-# (externals/openpak-client), as they do for core.
-target_link_libraries(citron PRIVATE openpak::client)
+# [OpenPak] The shared account dialog, sign-in, toasts and cloud saves (externals/openpak-client),
+# hosted by OpenPakHost. The Qt half brings the client half with it.
+target_link_libraries(citron PRIVATE openpak::qt)
 
 # Add libarchive for updater functionality
 if (TARGET LibArchive::LibArchive)

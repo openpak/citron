@@ -169,6 +169,13 @@ namespace UISettings {
                                     // 0 = top-right, 1 = top-left, 2 = bottom-right, 3 = bottom-left. See NextendoToast::Corner.
                                     Setting<int> nextendo_notification_corner{linkage, 0, "nextendo/notificationCorner", Category::Ui};
 
+                                    // [OpenPak] Which profile goes online at startup: empty for the last used, "ask"
+                                    // for the picker, or one profile's UUID.
+                                    Setting<std::string> openpak_startup_profile{linkage, "", "openpak/startupProfile", Category::Ui};
+                                    // [OpenPak] The one-time setup (sign in, create an account, or play offline) has
+                                    // been offered, and is never offered again.
+                                    Setting<bool> openpak_setup_offered{linkage, false, "openpak/setupOffered", Category::Ui};
+
                                     // 0 = Gradient, 1 = Wave, 2 = None, 3 = Reactive. See CinematicCarousel::BackdropTheme.
                                     Setting<int> carousel_backdrop_theme{linkage, 0, "carouselBackdropTheme", Category::Ui};
                                     // Static image or GIF shown behind the carousel when carousel_backdrop_theme == Image.

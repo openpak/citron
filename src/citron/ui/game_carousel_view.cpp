@@ -27,7 +27,7 @@
 #include "citron/custom_metadata.h"
 #include "openpak/compatible_titles.h"
 #include "citron/nextendo_ldn_counts.h"
-#include "citron/nextendo_online_counts.h"
+#include "openpak/qt/online_counts.h"
 #include "citron/util/image_cache.h"
 #include "openpak/account.h"
 

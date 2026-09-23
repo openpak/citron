@@ -17,7 +17,7 @@
 #include <QTimeZone>
 #include <QVBoxLayout>
 
-#include "citron/nextendo_online_counts.h"
+#include "openpak/qt/online_counts.h"
 #include "citron/nextendo_population_history.h"
 #include "citron/theme.h"
 #include "citron/ui/population_bar_chart.h"

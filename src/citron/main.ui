@@ -150,7 +150,7 @@
    </widget>
    <widget class="QMenu" name="menu_NexTendo">
     <property name="title">
-     <string>Nex&amp;Tendo</string>
+     <string>&amp;OpenPak</string>
     </property>
     <addaction name="action_Nextendo_Open_Account"/>
     <addaction name="action_Nextendo_Population"/>

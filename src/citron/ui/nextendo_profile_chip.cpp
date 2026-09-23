@@ -10,7 +10,7 @@
 #include <QPainter>
 #include <QPainterPath>
 
-#include "citron/nextendo_avatar_cache.h"
+#include "openpak/qt/avatar_cache.h"
 #include "citron/uisettings.h"
 #include "openpak/account.h"
 #include "openpak/avatar.h"

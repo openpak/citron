@@ -23,13 +23,15 @@ class QLabel;
 class QSizeGrip;
 class QToolButton;
 class NextendoChatRoom;
-class NextendoController;
+namespace openpak::qt {
+class Host;
+}
 
 class NextendoRoomOverlay : public QWidget {
     Q_OBJECT
 
 public:
-    explicit NextendoRoomOverlay(QWidget* parent, NextendoController* controller);
+    explicit NextendoRoomOverlay(QWidget* parent, openpak::qt::Host* controller);
     ~NextendoRoomOverlay() override;
 
     bool IsInRoom() const {
@@ -76,7 +78,7 @@ private:
     void UpdateHeaderText();
 
     GMainWindow* main_window;
-    NextendoController* controller;
+    openpak::qt::Host* controller;
 
     QLabel* header_label;
     QToolButton* invite_button;

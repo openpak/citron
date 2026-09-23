@@ -21,14 +21,14 @@
 #include <QWindow>
 
 #include "citron/main.h"
-#include "citron/nextendo_chat_client.h"
+#include "openpak/qt/chat_client.h"
 #include "citron/nextendo_chat_room.h"
-#include "citron/nextendo_controller.h"
+#include "openpak/qt/host.h"
 #include "citron/nextendo_room_overlay.h"
 #include "citron/uisettings.h"
 #include "openpak/account.h"
 
-NextendoRoomOverlay::NextendoRoomOverlay(QWidget* parent, NextendoController* controller_)
+NextendoRoomOverlay::NextendoRoomOverlay(QWidget* parent, openpak::qt::Host* controller_)
     : QWidget(parent), controller(controller_) {
     main_window = qobject_cast<GMainWindow*>(parent->window());
 
@@ -123,7 +123,7 @@ NextendoRoomOverlay::NextendoRoomOverlay(QWidget* parent, NextendoController* co
     main_layout->setColumnStretch(0, 1);
     setLayout(main_layout);
 
-    connect(controller, &NextendoController::ChatRawMessage, this,
+    connect(controller, &openpak::qt::Host::ChatRawMessage, this,
             &NextendoRoomOverlay::OnRawMessage);
 
     UpdateTheme();
