@@ -16,6 +16,7 @@ add_executable(tests
     common/uint128.cpp
     core/core_timing.cpp
     core/internal_network/network.cpp
+    core/loader/openpak_code_patches.cpp
     precompiled_headers.h
     video_core/memory_tracker.cpp
     input_common/calibration_configuration_job.cpp

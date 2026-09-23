@@ -20,6 +20,7 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/loader/nextendo_s3_patches.h"
 #include "core/loader/nso.h"
+#include "core/loader/openpak_code_patches.h"
 #include "core/memory.h"
 
 #ifdef HAS_NCE
@@ -148,8 +149,20 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         codeset.segments[i].size = PageAlignSizeNSO(codeset.segments[i].size);
     }
 
-    // Apply patches if necessary
     const auto name = nso_file.GetName();
+
+    // OpenPak's built-in instruction changes, before any user patch so the originals are checked
+    // against the module as shipped. The image here starts at module_start (past any NCE pre-text
+    // area) with no NSO header in front, which is the basis the table's offsets use.
+    if (pm) {
+        Loader::OpenPakCodePatches::Apply(
+            Settings::values.enable_openpak.GetValue(), pm->GetTitleID(), name,
+            Common::HexToString(nso_header.build_id),
+            std::span<u8>(program_image.data() + module_start,
+                          program_image.size() - module_start));
+    }
+
+    // Apply patches if necessary
     const bool has_nso_patch = pm && pm->HasNSOPatch(nso_header.build_id, name);
     const bool should_patch_nso =
         has_nso_patch || (load_into_process && Settings::values.dump_nso);
