@@ -18,9 +18,7 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
-#include "core/loader/nextendo_s3_patches.h"
 #include "core/loader/nso.h"
-#include "core/loader/openpak_code_patches.h"
 #include "core/memory.h"
 
 #ifdef HAS_NCE
@@ -149,20 +147,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         codeset.segments[i].size = PageAlignSizeNSO(codeset.segments[i].size);
     }
 
-    const auto name = nso_file.GetName();
-
-    // OpenPak's built-in instruction changes, before any user patch so the originals are checked
-    // against the module as shipped. The image here starts at module_start (past any NCE pre-text
-    // area) with no NSO header in front, which is the basis the table's offsets use.
-    if (pm) {
-        Loader::OpenPakCodePatches::Apply(
-            Settings::values.enable_openpak.GetValue(), pm->GetTitleID(), name,
-            Common::HexToString(nso_header.build_id),
-            std::span<u8>(program_image.data() + module_start,
-                          program_image.size() - module_start));
-    }
-
     // Apply patches if necessary
+    const auto name = nso_file.GetName();
     const bool has_nso_patch = pm && pm->HasNSOPatch(nso_header.build_id, name);
     const bool should_patch_nso =
         has_nso_patch || (load_into_process && Settings::values.dump_nso);
@@ -192,91 +178,6 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         }
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
-    }
-
-    // [Nextendo] Stardew Valley 1.6.15.13 / update 0.20.0 clean-room interoperability patch.
-    // The game's userspace OpenSSL stack accepts Nintendo's CA but rejects Nextendo's replacement
-    // CA before it emits TLS Finished. Offline analysis of this exact build identified
-    // X509_verify_cert at 0x79B4C10. Scope the bypass to the title, module, build ID, and expected
-    // original prologue so another revision can never be patched accidentally.
-    if (pm && pm->GetTitleID() == 0x0100E65002BB8000ULL && name == "main") {
-        constexpr std::string_view stardew_build =
-            "E7F845093E8CBC68DACF011CCB620D6667B5A20B";
-        constexpr size_t verify_offset = 0x79B4C10;
-        constexpr std::array<u8, 8> expected{{0xFE, 0x57, 0xBE, 0xA9,
-                                              0xF4, 0x4F, 0x01, 0xA9}};
-        // mov w0, #1; ret
-        constexpr std::array<u8, 8> replacement{{0x20, 0x00, 0x80, 0x52,
-                                                 0xC0, 0x03, 0x5F, 0xD6}};
-        // The SDK's SSL-context setup reads a never-set certificate-acceptance flag and selects
-        // between an always-accept verify callback (flag set) and a real-check callback that only
-        // tolerates expiry-class errors (flag clear). With the real-check callback installed the
-        // handshake is followed by a client-side gRPC UNAVAILABLE cancel before any HTTP/2
-        // HEADERS (nn::Result 2321-4992) -- the same symptom Splatoon 3 shows without its
-        // certificate-bypass patch. Force the flag read to 1 (identical to the S3 fix).
-        constexpr size_t accept_flag_offset = 0x782F5D0;
-        constexpr std::array<u8, 4> flag_expected{{0xAA, 0xE2, 0x40, 0x39}}; // ldrb w10,[x21,#0x38]
-        constexpr std::array<u8, 4> flag_replacement{{0x2A, 0x00, 0x80, 0x52}}; // mov w10, #1
-        const auto build_raw = Common::HexToString(nso_header.build_id);
-        const auto build = build_raw.substr(0, build_raw.find_last_not_of('0') + 1);
-        std::span<u8> image(program_image.data() + module_start,
-                            program_image.size() - module_start);
-        if (build != stardew_build) {
-            LOG_ERROR(Loader,
-                      "[OpenPak] Stardew: unsupported main build {}; certificate patch skipped",
-                      build);
-        } else if (verify_offset + expected.size() > image.size() ||
-                   !std::equal(expected.begin(), expected.end(), image.begin() + verify_offset)) {
-            LOG_ERROR(Loader,
-                      "[OpenPak] Stardew: X509 verification prologue mismatch; certificate "
-                      "patch skipped");
-        } else {
-            std::copy(replacement.begin(), replacement.end(), image.begin() + verify_offset);
-            LOG_INFO(Loader,
-                     "[OpenPak] Stardew: build-scoped X509 certificate compatibility patch "
-                     "applied");
-        }
-        if (build != stardew_build) {
-            // Build mismatch already logged above; nothing further to do.
-        } else if (accept_flag_offset + flag_expected.size() > image.size() ||
-                   !std::equal(flag_expected.begin(), flag_expected.end(),
-                               image.begin() + accept_flag_offset)) {
-            LOG_ERROR(Loader,
-                      "[OpenPak] Stardew: certificate-acceptance flag read mismatch; "
-                      "pin-bypass patch skipped");
-        } else {
-            std::copy(flag_replacement.begin(), flag_replacement.end(),
-                      image.begin() + accept_flag_offset);
-            LOG_INFO(Loader,
-                     "[OpenPak] Stardew: build-scoped certificate-acceptance flag bypass "
-                     "applied");
-        }
-    }
-
-    // [Nextendo] Splatoon 3's built-in patches (certificate-pinning bypass, peer hostname fix)
-    // run unconditionally here, independent of should_patch_nso above: they must apply even when
-    // no mod patches exist, and must never go through the mod-patch path at all, since Splatoon 3
-    // refuses to boot with any mod enabled (see main.cpp) and these patches need to survive that
-    // ban rather than be blocked by it.
-    if (pm && pm->GetTitleID() == 0x0100C2500FC20000ULL) {
-        std::span<u8> patchable_section(program_image.data() + module_start,
-                                        program_image.size() - module_start);
-        std::vector<u8> pi_header(sizeof(NSOHeader) + patchable_section.size());
-        std::memcpy(pi_header.data(), &nso_header, sizeof(NSOHeader));
-        std::memcpy(pi_header.data() + sizeof(NSOHeader), patchable_section.data(),
-                    patchable_section.size());
-
-        pi_header = Loader::NextendoS3Patches::ApplyIfMatch(nso_header.build_id,
-                                                            std::move(pi_header), name);
-
-        if (pi_header.size() >= sizeof(NSOHeader) &&
-            pi_header.size() - sizeof(NSOHeader) == patchable_section.size()) {
-            std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(),
-                      patchable_section.data());
-        } else {
-            LOG_ERROR(Loader, "[OpenPak] Splatoon 3 built-in patch changed the image size "
-                              "unexpectedly; skipped");
-        }
     }
 
 #ifdef HAS_NCE
