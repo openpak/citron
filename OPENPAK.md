@@ -80,7 +80,8 @@ still opens the window.
 ## Builds and releases
 
 Continuous builds from `main`: `.github/workflows/build-linux.yml` builds this tree (x86_64,
-x86_64-v3, and aarch64 under qemu, all on the self-hosted runner) and attaches the AppImages to
+x86_64-v3 on the self-hosted runner; aarch64 under qemu only when the dispatch sets
+`aarch64: true`, because it holds a runner for hours) and attaches the AppImages to
 the `nightly-linux` release without artifacts; the release step runs for whichever legs made it.
 `build-windows.yml` and `build-macos.yml` publish their own nightlies the same way (GitHub-hosted
 runners). No `openpak-v*` tag yet. Local desktop build: `build-openpak/` (system libraries,
