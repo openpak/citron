@@ -700,6 +700,8 @@ add_library(core STATIC
     hle/service/friend/friend.h
     hle/service/friend/friend_interface.cpp
     hle/service/friend/friend_interface.h
+    hle/service/friend/openpak_friends.cpp
+    hle/service/friend/openpak_friends.h
     hle/service/glue/arp.cpp
     hle/service/glue/arp.h
     hle/service/glue/bgtc.cpp
