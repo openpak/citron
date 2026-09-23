@@ -49,7 +49,8 @@ QT_PRIVATE_INCLUDE_DIR=$(dirname "$(dirname "$HEADER_PATH")")
 CXX_FLAGS_EXTRA="-I${QT_PRIVATE_INCLUDE_DIR}"
 
 # --- Build Process ---
-JOBS=$(nproc --all)
+# The CI caps this (the runners share one workstation); a local run takes every core.
+JOBS=${JOBS:-$(nproc --all)}
 
 mkdir -p build && cd build
 
@@ -87,7 +88,7 @@ cmake .. -GNinja \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
 # Compile and install the project
-ninja -j${JOBS}
+nice -n 10 ninja -j${JOBS}
 sudo ninja install
 
 # --- Output Version Info ---
