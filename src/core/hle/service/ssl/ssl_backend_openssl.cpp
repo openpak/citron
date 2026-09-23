@@ -10,18 +10,21 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
+#include "common/settings.h"
 #include "common/string_util.h"
 
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
+#include "openpak/session.h"
 
 using namespace Common::FS;
 
@@ -37,11 +40,6 @@ std::once_flag one_time_init_flag;
 bool one_time_init_success = false;
 
 SSL_CTX* ssl_ctx;
-// [OpenPak] True once the OpenPak CA (config/openpak/ca.pem) is in the trust store. With it,
-// the redirected Nintendo names are verified like any other host; without it the old
-// verify-nothing behaviour stays, loudly, so an install that has not fetched the CA yet still
-// plays.
-bool openpak_ca_loaded = false;
 IOFile key_log_file; // only open if SSLKEYLOGFILE set in environment
 BIO_METHOD* bio_meth;
 
@@ -82,6 +80,8 @@ public:
                       "Can't create SSL connection because OpenSSL one-time initialization failed");
             return ResultInternalError;
         }
+
+        TrustOpenPakCa();
 
         ssl = SSL_new(ssl_ctx);
         if (!ssl) {
@@ -132,33 +132,82 @@ public:
                 }
             }
         }
-        if (!effective_host.empty()) {
-            if (!SSL_set1_host(ssl, effective_host.c_str())) {
-                LOG_ERROR(Service_SSL, "SSL_set1_host({}) failed", effective_host);
-                return CheckOpenSSLErrors();
-            }
-            if (!SSL_set_tlsext_host_name(ssl, effective_host.c_str())) {
-                LOG_ERROR(Service_SSL, "SSL_set_tlsext_host_name({}) failed", effective_host);
-                return CheckOpenSSLErrors();
-            }
-        }
+        // The name and the verify option arrive in either order, so both are only remembered
+        // here and applied together when the handshake starts.
+        host_name = std::move(effective_host);
         return ResultSuccess;
     }
 
-    Result SetVerifyOption(u32 verify_option) override {
-        // [OpenPak] With the OpenPak CA pinned, the redirected servers are verified against it
-        // like anything else. Without it, verification is off, as it was before.
-        skip_cert_verification = !openpak_ca_loaded;
-        if (skip_cert_verification) {
-            LOG_DEBUG(Service_SSL, "SetVerifyOption: option={}, no OpenPak CA pinned; verification off", verify_option);
-            SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
-        }
+    Result SetVerifyOption(u32 option) override {
+        verify_option = option;
         return ResultSuccess;
+    }
+
+    // [OpenPak] A title dials a game server by address and names it by that address: what it
+    // sets as the host name is then "145.241.199.19", to be matched against the certificate's
+    // IP SAN and never sent as SNI, which carries names only (RFC 6066). Ported from Eden.
+    static bool IsIpLiteral(const std::string& name) {
+        ASN1_OCTET_STRING* const ip = a2i_IPADDRESS(name.c_str());
+        ASN1_OCTET_STRING_free(ip);
+        return ip != nullptr;
+    }
+
+    // [OpenPak] What the title asked for is what it gets: nn::ssl's PeerCa bit turns chain
+    // verification on and its HostName bit checks the name, against the roots below (the host's
+    // own plus the OpenPak CA). This replaces the old rule of verifying nothing until a CA file
+    // had been fetched, which left a first launch unverified.
+    Result ApplyVerification() {
+        constexpr u32 PeerCa = 1;
+        constexpr u32 HostName = 2;
+
+        const bool is_ip = IsIpLiteral(host_name);
+        skip_cert_verification = (verify_option & PeerCa) == 0;
+        SSL_set_verify(ssl, skip_cert_verification ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, nullptr);
+
+        X509_VERIFY_PARAM* const param = SSL_get0_param(ssl);
+        SSL_set1_host(ssl, nullptr);
+        if (!skip_cert_verification && (verify_option & HostName) != 0 && !host_name.empty()) {
+            const int ok = is_ip ? X509_VERIFY_PARAM_set1_ip_asc(param, host_name.c_str())
+                                 : SSL_set1_host(ssl, host_name.c_str());
+            if (!ok) {
+                LOG_ERROR(Service_SSL, "Could not set {} as the name to verify", host_name);
+                return CheckOpenSSLErrors();
+            }
+        }
+        if (!host_name.empty() && !is_ip && !SSL_set_tlsext_host_name(ssl, host_name.c_str())) {
+            LOG_ERROR(Service_SSL, "SSL_set_tlsext_host_name({}) failed", host_name);
+            return CheckOpenSSLErrors();
+        }
+        LOG_DEBUG(Service_SSL, "host={} ip={} option={} verify={}", host_name, is_ip,
+                  verify_option, !skip_cert_verification);
+        return ResultSuccess;
+    }
+
+    // [OpenPak] OpenPak answers to Nintendo's own names, which no public CA can issue for, so its
+    // CA joins the roots a guest connection is checked against -- fetched once and cached by
+    // openpak-client if it is not on disk yet. Nothing else is loosened: a chain that reaches
+    // neither it nor a public root is refused.
+    static void TrustOpenPakCa() {
+        if (!Settings::values.enable_openpak.GetValue()) {
+            return;
+        }
+        const std::vector<u8> der = openpak::client::session::CaCertificateDer();
+        const u8* cursor = der.data();
+        X509* const ca =
+            der.empty() ? nullptr : d2i_X509(nullptr, &cursor, static_cast<long>(der.size()));
+        if (!ca) {
+            LOG_WARNING(Service_SSL,
+                        "[OpenPak] No CA to trust; redirected hosts will fail to verify");
+            return;
+        }
+        // Every call, not once: adding a certificate the store already holds is a no-op.
+        X509_STORE_add_cert(SSL_CTX_get_cert_store(ssl_ctx), ca);
+        X509_free(ca);
     }
 
     Result DoHandshake(std::span<const std::string> requested_alpn_protos) override {
-        // If SNI host is not set, try recovering host from peer IP
-        if (socket && !SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)) {
+        // If no host was named, try recovering it from the peer IP.
+        if (socket && host_name.empty()) {
             auto [peer_addr, err] = socket->GetPeerName();
             if (err == Network::Errno::SUCCESS) {
                 std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
@@ -169,10 +218,15 @@ public:
                         last_host.replace(pos, 1, "lp1");
                     }
                     LOG_INFO(Service_SSL, "[OpenPak] DoHandshake SNI injection host '{}' for IP {}", last_host, ip_str);
-                    SSL_set1_host(ssl, last_host.c_str());
-                    SSL_set_tlsext_host_name(ssl, last_host.c_str());
+                    host_name = last_host;
                 }
             }
+        }
+
+        // Once: a non-blocking handshake is called again until it completes.
+        if (!verification_applied) {
+            R_TRY(ApplyVerification());
+            verification_applied = true;
         }
 
         static constexpr unsigned char kHttp11Only[] = "\x08http/1.1";
@@ -189,11 +243,7 @@ public:
             SSL_set_alpn_protos(ssl, kHttp11Only, sizeof(kHttp11Only) - 1);
         }
 
-        if (!openpak_ca_loaded) {
-            // No CA to pin: verify nothing, as before the CA existed.
-            SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
-            SSL_set_verify_result(ssl, X509_V_OK);
-        }
+        SSL_set_verify_result(ssl, X509_V_OK);
         const int ret = SSL_do_handshake(ssl);
 
         if (ret <= 0) {
@@ -352,6 +402,9 @@ public:
     BIO* bio = nullptr;
     bool got_read_eof = false;
     bool skip_cert_verification = false;
+    bool verification_applied = false;
+    u32 verify_option = 0;
+    std::string host_name;
 
     std::shared_ptr<Network::SocketBase> socket;
 };
@@ -405,24 +458,14 @@ void OneTimeInit() {
 
     SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
 
+    // A non-blocking write that would block is retried by the guest from a fresh IPC buffer:
+    // the same bytes at another address, which OpenSSL otherwise refuses as a bad retry.
+    SSL_CTX_set_mode(ssl_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+
     if (!SSL_CTX_set_default_verify_paths(ssl_ctx)) {
         LOG_ERROR(Service_SSL, "SSL_CTX_set_default_verify_paths failed");
         CheckOpenSSLErrors();
         return;
-    }
-
-    // [OpenPak] Pin the OpenPak CA when it is present. The account layer fetches it from
-    // openpak.org over public TLS at sign-in; a hand-placed copy works too.
-    {
-        const auto ca_path = GetCitronPath(CitronPath::ConfigDir) / "openpak" / "ca.pem";
-        const std::string ca_str = PathToUTF8String(ca_path);
-        if (Common::FS::Exists(ca_path) && SSL_CTX_load_verify_locations(ssl_ctx, ca_str.c_str(), nullptr) == 1) {
-            openpak_ca_loaded = true;
-            LOG_INFO(Service_SSL, "[OpenPak] Pinned CA {}", ca_str);
-        } else {
-            ERR_clear_error();
-            LOG_WARNING(Service_SSL, "[OpenPak] No CA at {}: redirected servers are not verified. Sign in once to fetch it.", ca_str);
-        }
     }
 
     OneTimeInitLogFile();
