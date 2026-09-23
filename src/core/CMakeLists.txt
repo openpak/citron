@@ -436,6 +436,8 @@ add_library(core STATIC
     hle/service/am/frontend/applet_general.h
     hle/service/am/frontend/applet_mii_edit.cpp
     hle/service/am/frontend/applet_mii_edit.h
+    hle/service/am/frontend/applet_my_page.cpp
+    hle/service/am/frontend/applet_my_page.h
     hle/service/am/frontend/applet_mii_edit_types.h
     hle/service/am/frontend/applet_profile_select.cpp
     hle/service/am/frontend/applet_profile_select.h

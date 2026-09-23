@@ -22,6 +22,7 @@
 #include "core/hle/service/am/frontend/applet_error.h"
 #include "core/hle/service/am/frontend/applet_general.h"
 #include "core/hle/service/am/frontend/applet_mii_edit.h"
+#include "core/hle/service/am/frontend/applet_my_page.h"
 #include "core/hle/service/am/frontend/applet_profile_select.h"
 #include "core/hle/service/am/frontend/applet_software_keyboard.h"
 #include "core/hle/service/am/frontend/applet_web_browser.h"
@@ -230,6 +231,8 @@ std::shared_ptr<FrontendApplet> FrontendAppletHolder::GetApplet(std::shared_ptr<
         return std::make_shared<WebBrowser>(system, applet, mode, *frontend.web_browser);
     case AppletId::PhotoViewer:
         return std::make_shared<PhotoViewer>(system, applet, mode, *frontend.photo_viewer);
+    case AppletId::MyPage:
+        return std::make_shared<MyPage>(system, applet, mode); // [OpenPak] invitations
     default:
         UNIMPLEMENTED_MSG(
             "No backend implementation exists for applet_id={:02X}! Falling back to stub applet.",
