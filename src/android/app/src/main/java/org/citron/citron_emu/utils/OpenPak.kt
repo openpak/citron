@@ -38,8 +38,18 @@ object OpenPak {
         data class FriendOnline(val name: String, val game: String) : Event()
         data class FriendRequest(val name: String) : Event()
         data class Invitation(val name: String, val game: String) : Event()
-        data class InvitationOffer(val id: String, val name: String, val game: String) : Event()
+        data class InvitationOffer(
+            val id: String,
+            val name: String,
+            val game: String,
+            val message: String,
+            val createdAt: Long
+        ) : Event()
         data class Message(val text: String) : Event()
+        data class SavesPulled(val game: String) : Event()
+        data class SavesPushed(val game: String) : Event()
+        data class SavesPushFailed(val game: String, val error: String) : Event()
+        data class SavesConflict(val game: String) : Event()
         data class PickFriends(val max: Int, val friends: List<PickableFriend>) : Event()
     }
 
@@ -87,7 +97,7 @@ object OpenPak {
     private val preferences
         get() = PreferenceManager.getDefaultSharedPreferences(CitronApplication.appContext)
 
-    /** Toasts for a friend coming online, a friend request and an invitation. */
+    /** Snackbars and notifications for friends, requests, invitations and saves (spec: Show notifications). */
     var notificationsEnabled: Boolean
         get() = preferences.getBoolean(PREF_NOTIFICATIONS, true)
         set(value) = preferences.edit { putBoolean(PREF_NOTIFICATIONS, value) }
@@ -113,6 +123,12 @@ object OpenPak {
     /** Once, from Application.onCreate: no network, only who is asking and where files live. */
     fun init() {
         nativeInit()
+        scope.launch {
+            call(
+                "set_device_name",
+                JSONObject().put("name", "${CitronApplication.appContext.applicationInfo.loadLabel(CitronApplication.appContext.packageManager)} on ${android.os.Build.MODEL}")
+            )
+        }
         scope.launch { call("cloud_sync", JSONObject().put("enabled", cloudSyncEnabled)) }
     }
 
@@ -162,9 +178,15 @@ object OpenPak {
             "invitation_offer" -> Event.InvitationOffer(
                 json.optString("id"),
                 json.optString("name"),
-                json.optString("game")
+                json.optString("game"),
+                json.optString("message"),
+                json.optLong("created_at")
             )
             "message" -> Event.Message(json.optString("text"))
+            "saves_pulled" -> Event.SavesPulled(json.optString("game"))
+            "saves_pushed" -> Event.SavesPushed(json.optString("game"))
+            "saves_push_failed" -> Event.SavesPushFailed(json.optString("game"), json.optString("error"))
+            "saves_conflict" -> Event.SavesConflict(json.optString("game"))
             else -> null
         }
 
@@ -243,6 +265,13 @@ object OpenPak {
 
     suspend fun signOut() {
         call("sign_out")
+    }
+
+    /** The "Connect this emulator to OpenPak" switch: on goes online, off says goodbye. */
+    suspend fun setEnabled(enabled: Boolean) {
+        call("set_enabled", JSONObject().put("enabled", enabled))
+        withContext(Dispatchers.IO) { NativeConfig.saveGlobalConfig() }
+        if (enabled) start() else goOffline()
     }
 
     /** Anything that may have changed the current profile: the session follows it. */

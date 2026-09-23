@@ -3,6 +3,9 @@
 
 package org.citron.citron_emu.fragments
 
+import org.citron.citron_emu.utils.OpenPak
+import kotlinx.coroutines.launch
+import androidx.lifecycle.lifecycleScope
 import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -68,6 +71,9 @@ class HomeSettingsFragment : Fragment() {
         return binding.root
     }
 
+    // [OpenPak] The first row's subtitle: who is signed in (openpak-ux-spec.md 4.1).
+    private val openPakDetails = kotlinx.coroutines.flow.MutableStateFlow("")
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         homeViewModel.setNavigationVisibility(visible = true, animated = true)
@@ -77,12 +83,13 @@ class HomeSettingsFragment : Fragment() {
         val optionsList: MutableList<HomeSetting> = mutableListOf<HomeSetting>().apply {
             add(
                 HomeSetting(
-                    R.string.openpak_title,
-                    R.string.openpak_description,
-                    R.drawable.ic_network,
+                    R.string.openpak_menu_title,
+                    R.string.openpak_android_home_description,
+                    R.drawable.ic_openpak,
                     {
-                        OpenPakFragment().show(parentFragmentManager, OpenPakFragment.TAG)
-                    }
+                        OpenPakFragment.newInstance().show(parentFragmentManager, OpenPakFragment.TAG)
+                    },
+                    details = openPakDetails
                 )
             )
             add(
@@ -283,6 +290,14 @@ class HomeSettingsFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val status = OpenPak.status()
+            openPakDetails.value = if (status.websiteSignedIn) {
+                getString(R.string.openpak_menu_signed_in_as, status.username)
+            } else {
+                getString(R.string.openpak_android_home_signed_out)
+            }
+        }
         driverViewModel.updateDriverNameForGame(null)
     }
 

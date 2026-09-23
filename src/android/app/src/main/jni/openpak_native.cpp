@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <map>
 #include <memory>
@@ -104,7 +105,7 @@ void Queue(json event) {
     Poll().events.push_back(std::move(event));
 }
 
-void Message(const std::string& text) {
+[[maybe_unused]] void Message(const std::string& text) {
     Queue({{"type", "message"}, {"text", text}});
 }
 
@@ -288,6 +289,15 @@ void PollFriends() {
     state.last_requests = std::move(requests);
 }
 
+/// What the sender's game wrote: English when it wrote English, else the first language it did.
+std::string FirstMessage(const Session::Invitation& invitation) {
+    if (invitation.messages.empty()) {
+        return {};
+    }
+    const auto en = invitation.messages.find("en-US");
+    return en != invitation.messages.end() ? en->second : invitation.messages.begin()->second;
+}
+
 /// What the heartbeat last read from the native inbox, offered as Ryujinx offers it: an invitation
 /// to the running game asks Join or Ignore; one to another game is announced once and offered when
 /// that game runs.
@@ -317,7 +327,9 @@ void PollInvitations() {
         state.events.push_back({{"type", "invitation_offer"},
                                 {"id", invitation.id},
                                 {"name", invitation.sender_name},
-                                {"game", game}});
+                                {"game", game},
+                                {"message", FirstMessage(invitation)},
+                                {"created_at", invitation.created_at}});
     }
 }
 
@@ -683,11 +695,7 @@ json Invitations() {
     json out = json::array();
     const std::string running = Common::ToLower(RunningTitleId());
     for (const auto& invitation : Session::Invitations()) {
-        std::string message;
-        if (!invitation.messages.empty()) {
-            const auto en = invitation.messages.find("en-US");
-            message = en != invitation.messages.end() ? en->second : invitation.messages.begin()->second;
-        }
+        const std::string message = FirstMessage(invitation);
         out.push_back({{"source", "console"},
                        {"id", invitation.id},
                        {"from", invitation.sender_name},
@@ -695,6 +703,7 @@ json Invitations() {
                        {"game", GameName(ParseHex(invitation.title_id))},
                        {"message", message},
                        {"expires_at", invitation.expires_at},
+                       {"created_at", invitation.created_at},
                        {"joinable", !running.empty() &&
                                         running == Common::ToLower(invitation.title_id)}});
     }
@@ -706,7 +715,7 @@ json Invitations() {
                            {"title_id", invitation.title_id},
                            {"game", GameName(ParseHex(invitation.title_id))},
                            {"message", ""},
-                           {"expires_at", invitation.expires_at},
+                           {"expires_text", invitation.expires_at},
                            {"joinable", false}});
         }
     }
@@ -759,11 +768,20 @@ json CloudSaves() {
             versions.push_back({{"id", v.id}, {"number", v.number}, {"conflict", v.conflict},
                                 {"size", v.size}, {"device", v.device}, {"saved_at", v.saved_at}});
         }
+        u64 size = 0;
+        bool conflict = false;
+        for (const auto& v : save.versions) {
+            size += v.size;
+            conflict = conflict || v.conflict;
+        }
         titles.push_back({{"title_id", Hex(title_id)},
                           {"name", GameName(title_id, save.name)},
                           {"newest", newest},
+                          {"size", size},
+                          {"conflict", conflict || local.state == Nextendo::SaveSync::LocalState::NoHistory},
                           {"local", LocalStateName(local.state)},
                           {"local_written", local.last_written},
+                          {"local_version", local.version},
                           {"versions", versions}});
     }
     return {{"ok", saves.ok}, {"error", saves.error}, {"titles", titles},
@@ -775,10 +793,21 @@ std::string CloudSaveAction(const json& args) {
     const std::string action = args.value("action", std::string{});
     const u64 title_id = ParseHex(args.value("title_id", std::string{}));
     if (action == "delete") {
-        return Api::DeleteSaveVersion(args.value("version_id", static_cast<s64>(0)));
+        // Delete from cloud: every stored version of the title.
+        for (const auto& save : Api::GetCloudSaves().saves) {
+            if (ParseHex(save.title_id) != title_id) {
+                continue;
+            }
+            for (const auto& v : save.versions) {
+                if (std::string error = Api::DeleteSaveVersion(v.id); !error.empty()) {
+                    return error;
+                }
+            }
+        }
+        return {};
     }
-    // Writing into a save folder a running game has mounted is what breaks it.
-    if (g_running_title.load() != 0) {
+    // Writing into the save folder of the game that runs is what breaks it.
+    if (action == "download" && title_id != 0 && g_running_title.load() == title_id) {
         return "Stop the running game first.";
     }
     if (action == "download") {
@@ -801,6 +830,7 @@ json Mods(const std::string& title) {
                        {"name", mod.name},
                        {"version", mod.version},
                        {"author", mod.author},
+                       {"licence", mod.licence},
                        {"summary", mod.summary},
                        {"installed",
                         std::filesystem::is_directory(ModDirectory(title_id) / ModDirName(mod), ec)},
@@ -830,14 +860,15 @@ std::string ModAction(const json& args) {
         }
         // Verified against the catalogue's sha256, then unpacked in place of any older version:
         // files the new one dropped would otherwise keep being applied.
+        // "refused" and "failed" are the screen's to word (mods.refused, mods.install_failed).
         const auto package = Api::DownloadModPackage(mod);
         if (!package) {
-            return "The mod could not be downloaded, or it did not match what the catalogue published.";
+            return "refused";
         }
         std::filesystem::remove_all(dir, ec);
         if (!openpak::ZipStore::UnzipToDirectory(*package, dir)) {
             std::filesystem::remove_all(dir, ec);
-            return "The mod's package could not be unpacked.";
+            return "failed";
         }
         return {};
     }
@@ -851,6 +882,24 @@ json News(const std::string& title) {
         files.push_back({{"path", file.path}, {"size", file.size}});
     }
     return {{"ok", manifest.ok}, {"valid_from", manifest.valid_from}, {"files", files}};
+}
+
+/// News > Save to disk: every file of the title's dataset under dir, never outside it.
+json NewsSave(const std::string& title, const std::string& dir) {
+    int written = 0;
+    for (const auto& file : Api::GetNewsManifest(title).files) {
+        const auto target = openpak::Platform::ContainedPath(dir, file.path);
+        const auto data = target.empty() ? std::nullopt : Api::DownloadNewsFile(file);
+        if (!data) {
+            continue;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(target.parent_path(), ec);
+        std::ofstream out{target, std::ios::binary | std::ios::trunc};
+        out.write(reinterpret_cast<const char*>(data->data()), static_cast<std::streamsize>(data->size()));
+        written += out.good() ? 1 : 0;
+    }
+    return {{"written", written}};
 }
 
 json NetworkStatus() {
@@ -875,7 +924,34 @@ json NetworkStatus() {
             {"network_ok", network.ok},
             {"players_online", network.players_online},
             {"titles", titles},
-            {"online", Session::Beating()}};
+            {"online", Session::Beating()},
+            {"account", Common::OpenPakAccount::IsLinked() ? Common::OpenPakAccount::GetUsername()
+                                                           : std::string{}},
+            {"console_linked", Session::Linked()},
+            {"console_name", Session::Nickname()},
+            {"console_friend_code", Session::FriendCode()},
+            {"presence", Session::Beating() ? Session::PresenceBody() : std::string{}}};
+}
+
+json Account() {
+    const Api::Profile profile = Api::GetProfile();
+    json platforms = json::array();
+    for (const auto& platform : profile.linked_platforms) {
+        platforms.push_back(platform);
+    }
+    const std::string friend_code =
+        Session::FriendCode().empty() ? Common::OpenPakAccount::GetFriendCode() : Session::FriendCode();
+    return {{"ok", profile.ok},
+            {"error", profile.error},
+            {"name", profile.name.empty() ? Common::OpenPakAccount::GetUsername() : profile.name},
+            {"avatar", profile.image_base64},
+            {"friend_code", friend_code.empty() ? profile.friend_code : friend_code},
+            {"pid", Common::OpenPakAccount::GetPid() == 0 ? std::string{}
+                                                           : std::to_string(Common::OpenPakAccount::GetPid())},
+            {"linked_platforms", platforms},
+            {"console_linked", Session::Linked()},
+            {"console_name", Session::Nickname()},
+            {"running", RunningTitleId()}};
 }
 
 json Catalogue() {
@@ -957,8 +1033,28 @@ json Call(const std::string& method, const json& args) {
     if (method == "news") {
         return News(args.value("title_id", std::string{}));
     }
+    if (method == "news_save") {
+        return NewsSave(args.value("title_id", std::string{}), args.value("dir", std::string{}));
+    }
     if (method == "network_status") {
         return NetworkStatus();
+    }
+    if (method == "account") {
+        return Account();
+    }
+    if (method == "set_username") {
+        return {{"error", Api::SetUsername(args.value("name", std::string{}))}};
+    }
+    if (method == "set_picture") {
+        return {{"error", Api::PushProfilePicture(args.value("image", std::string{}))}};
+    }
+    if (method == "set_enabled") {
+        Settings::values.enable_openpak.SetValue(args.value("enabled", true));
+        return json::object();
+    }
+    if (method == "set_device_name") {
+        Api::SetDeviceName(args.value("name", std::string{}));
+        return json::object();
     }
     if (method == "catalogue") {
         return Catalogue();
@@ -989,13 +1085,10 @@ void OpenPakPullSaveBeforeLaunch(u64 title_id) {
     }
     switch (Nextendo::SaveSync::PullBeforeLaunch(SaveDirectory(title_id), title_id)) {
     case Nextendo::SaveSync::PullOutcome::Pulled:
-        Message(fmt::format("Cloud save for {} downloaded; the previous local copy was kept beside it.",
-                            GameName(title_id)));
+        Queue({{"type", "saves_pulled"}, {"game", GameName(title_id)}});
         break;
     case Nextendo::SaveSync::PullOutcome::BothExist:
-        Message(fmt::format("{} has a save both here and in the cloud. Choose one on the OpenPak "
-                            "Cloud saves page.",
-                            GameName(title_id)));
+        Queue({{"type", "saves_conflict"}, {"game", GameName(title_id)}});
         break;
     case Nextendo::SaveSync::PullOutcome::Nothing:
         break;
@@ -1013,8 +1106,11 @@ void OpenPakPushSaveAfterExit(u64 title_id) {
     }
     std::thread{[directory, title_id, zip = std::move(zip)]() mutable {
         const std::string error = Nextendo::SaveSync::PushCaptured(directory, title_id, std::move(zip));
-        Message(error.empty() ? fmt::format("Save for {} uploaded to OpenPak.", GameName(title_id))
-                              : error);
+        if (error.empty()) {
+            Queue({{"type", "saves_pushed"}, {"game", GameName(title_id)}});
+        } else {
+            Queue({{"type", "saves_push_failed"}, {"game", GameName(title_id)}, {"error", error}});
+        }
     }}.detach();
 }
 
