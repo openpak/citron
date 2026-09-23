@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <string>
+
 #include "core/hle/service/service.h"
 
 namespace Core {
@@ -11,6 +13,10 @@ class System;
 }
 
 namespace Service::Sockets {
+
+/// nsd's name resolution, the '%' -> environment substitution included. sfdnsres calls this when
+/// a request asks for nsd resolution (or names a '%'), the way hardware routes it through nsd.
+std::string NsdResolve(const std::string& fqdn_in);
 
 class NSD final : public ServiceFramework<NSD> {
 public:

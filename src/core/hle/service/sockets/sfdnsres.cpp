@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <mutex>
@@ -17,6 +18,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/svc/nextendo_deadline_watch.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/sockets/nsd.h"
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets.h"
 #include "core/hle/service/sockets/sockets_translate.h"
@@ -397,10 +399,12 @@ static std::optional<std::string> GetMinecraftDungeonsRedirectIp(const std::stri
     return std::string(env);
 }
 
-// [Nextendo] Optional delay before the first "npln" host resolution, against a hypothesized
-// startup deadlock. Disabled by default (max_wait_ms=0) -- unconfirmed benefit, and a nonzero
-// delay now blocks every other socket IPC call too (bsdsocket is single-threaded).
-// NEXTENDO_NPLN_DELAY_MS opts back into a fixed wait if ever needed.
+// [OpenPak] Hold the FIRST npln resolution of the session until the startup translation burst
+// has passed. A title's NPLN channel that comes up mid-burst parks without ever sending its first
+// RPC -- the title looks online and freezes. Eden holds 3000 ms, verified live against the Stardew
+// tenant (and the Ryujinx side of this integration measured the same), so that is the default
+// here too. The resolver shares the bsdsocket service with two extra host threads, so the hold
+// parks one of three, not the only one. NEXTENDO_NPLN_DELAY_MS overrides it (0 turns it off).
 static std::once_flag g_npln_delay_once;
 
 static void MaybeDelayNplnInit(const std::string& host) {
@@ -408,12 +412,15 @@ static void MaybeDelayNplnInit(const std::string& host) {
         return;
     }
     std::call_once(g_npln_delay_once, [] {
-        int max_wait_ms = 0;
+        constexpr int default_wait_ms = 3000;
+        int max_wait_ms = default_wait_ms;
+        bool overridden = false;
         if (const char* env = std::getenv("NEXTENDO_NPLN_DELAY_MS"); env && *env) {
             try {
                 const int parsed = std::stoi(env);
                 if (parsed >= 0) {
                     max_wait_ms = parsed;
+                    overridden = true;
                 }
             } catch (const std::exception&) {
                 // Malformed override -- keep the default rather than fail resolution over it.
@@ -424,9 +431,8 @@ static void MaybeDelayNplnInit(const std::string& host) {
         }
 
         LOG_INFO(Service,
-                 "[OpenPak] Holding the first npln host resolution until the JIT/shader-compile "
-                 "burst settles before gRPC's connection setup starts ({} ms) (see "
-                 "MaybeDelayNplnInit)",
+                 "[OpenPak] Holding the first npln host resolution for {} ms while the startup "
+                 "burst passes (see MaybeDelayNplnInit)",
                  max_wait_ms);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(max_wait_ms));
@@ -434,12 +440,58 @@ static void MaybeDelayNplnInit(const std::string& host) {
         LOG_INFO(Service, "[OpenPak] npln hold finished after {} ms", max_wait_ms);
 
         // [Nextendo][DIAG] Arm a short window during which any finite, non-trivial
-        // WaitSynchronization timeout gets logged -- see nextendo_deadline_watch.h. This is
-        // trying to directly OBSERVE the game's gRPC call deadline (if it's implemented as a
-        // timed kernel wait) rather than continuing to guess at it via static binary analysis.
-        Kernel::Svc::ArmNextendoDeadlineWatch(90000);
-        LOG_INFO(Service, "[OpenPak][DIAG] Deadline watch armed for 90000 ms");
+        // WaitSynchronization timeout gets logged -- see nextendo_deadline_watch.h. Research
+        // only: armed when the hold was asked for explicitly, never by the default.
+        if (overridden) {
+            Kernel::Svc::ArmNextendoDeadlineWatch(90000);
+            LOG_INFO(Service, "[OpenPak][DIAG] Deadline watch armed for 90000 ms");
+        }
     });
+}
+
+// [OpenPak] The answer shaped the way a console's own resolver shapes it: one entry per address,
+// socket type and protocol left "any". The hints a title passes are ignored, so the host's
+// getaddrinfo is free to answer with one entry per socket type -- stream, datagram and raw for a
+// single address. A title that walks that list looking only for what it asked for finds nothing
+// it can use and gives up before it opens a socket: Stardew stops at 2318-0007 with the address
+// resolved and no connection attempted. Ryujinx has always written "0 = Any" here. Ported from
+// Eden; off with the integration, so nothing else changes shape.
+static std::vector<Network::AddrInfo> AnySocketTypeAddrInfo(
+    const std::vector<Network::AddrInfo>& vec) {
+    if (!RedirectionNextendoActive()) {
+        return vec;
+    }
+
+    std::vector<Network::AddrInfo> out;
+    for (const Network::AddrInfo& entry : vec) {
+        const bool already =
+            std::any_of(out.begin(), out.end(), [&](const Network::AddrInfo& seen) {
+                return seen.addr.ip == entry.addr.ip && seen.addr.portno == entry.addr.portno;
+            });
+        if (already) {
+            continue;
+        }
+        Network::AddrInfo copy = entry;
+        copy.socket_type = Network::Type::Unspecified;
+        copy.protocol = Network::Protocol::Unspecified;
+        out.push_back(std::move(copy));
+    }
+    return out;
+}
+
+// [OpenPak] nsd's substitution, the way hardware routes a name through nsd first: when the
+// request asks for it, or when the name carries the '%' only nsd can fill in. Skipping it leaves
+// distinct services sharing one name -- the NAT check's two probes above all, which must land on
+// two different addresses.
+static void ApplyNsdResolve(bool use_nsd_resolve, std::string& host) {
+    if (!use_nsd_resolve && host.find('%') == std::string::npos) {
+        return;
+    }
+    std::string resolved = NsdResolve(host);
+    if (resolved != host) {
+        LOG_INFO(Service, "[sfdnsres] NSD resolved '{}' -> '{}'", host, resolved);
+        host = std::move(resolved);
+    }
 }
 
 enum class NetDbError : s32 {
@@ -576,10 +628,8 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     IPC::RequestParser rp{ctx};
     const auto parameters = rp.PopRaw<InputParameters>();
 
-    LOG_WARNING(
-        Service,
-        "called with ignored parameters: use_nsd_resolve={}, cancel_handle={}, process_id={}",
-        parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
+    LOG_DEBUG(Service, "called: use_nsd_resolve={}, cancel_handle={}, process_id={}",
+              parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
 
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
@@ -589,16 +639,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     // [Nextendo] See MaybeDelayNplnInit's declaration comment.
     MaybeDelayNplnInit(host);
 
-    if (parameters.use_nsd_resolve || host.find('%') != std::string::npos) {
-        auto pos = host.find('%');
-        if (pos != std::string::npos) {
-            host.replace(pos, 1, "lp1");
-        }
-        if (host == "api.accounts.nintendo.com" || host == "accounts.nintendo.com") {
-            host = "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
-        }
-        LOG_INFO(Service, "[sfdnsres] NSD resolved host to '{}'", host);
-    }
+    ApplyNsdResolve(parameters.use_nsd_resolve != 0, host);
 
     std::string query_host = host;
     auto redirect = GetNplnDebugProxyIp(host);
@@ -754,10 +795,8 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     IPC::RequestParser rp{ctx};
     const auto parameters = rp.PopRaw<InputParameters>();
 
-    LOG_WARNING(
-        Service,
-        "called with ignored parameters: use_nsd_resolve={}, cancel_handle={}, process_id={}",
-        parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
+    LOG_DEBUG(Service, "called: use_nsd_resolve={}, cancel_handle={}, process_id={}",
+              parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
 
     const auto host_buffer = ctx.ReadBuffer(0);
     std::string host = Common::StringFromBuffer(host_buffer);
@@ -795,22 +834,13 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         // literal IP carries no hostname to record, and recording one would corrupt the
         // reverse lookup table used elsewhere for this exact purpose (see
         // GetLastHostForIp's declaration comment).
-        const std::vector<u8> data = SerializeAddrInfo({entry}, host);
+        const std::vector<u8> data = SerializeAddrInfo(AnySocketTypeAddrInfo({entry}), host);
         const u32 data_size = static_cast<u32>(data.size());
         ctx.WriteBuffer(data, 0);
         return {data_size, GetAddrInfoError::SUCCESS};
     }
 
-    if (parameters.use_nsd_resolve || host.find('%') != std::string::npos) {
-        auto pos = host.find('%');
-        if (pos != std::string::npos) {
-            host.replace(pos, 1, "lp1");
-        }
-        if (host == "api.accounts.nintendo.com" || host == "accounts.nintendo.com") {
-            host = "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
-        }
-        LOG_INFO(Service, "[sfdnsres] NSD resolved host to '{}'", host);
-    }
+    ApplyNsdResolve(parameters.use_nsd_resolve != 0, host);
 
     std::string query_host = host;
     auto redirect = GetNplnDebugProxyIp(host);
@@ -904,7 +934,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         }
     }
 
-    const std::vector<u8> data = SerializeAddrInfo(res.value(), host);
+    const std::vector<u8> data = SerializeAddrInfo(AnySocketTypeAddrInfo(res.value()), host);
     const u32 data_size = static_cast<u32>(data.size());
     ctx.WriteBuffer(data, 0);
 

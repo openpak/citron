@@ -125,19 +125,36 @@ NSD::NSD(Core::System& system_, const char* name) : ServiceFramework{system_, na
     RegisterHandlers(functions);
 }
 
-static std::string ResolveImpl(const std::string& fqdn_in) {
-    std::string fqdn = fqdn_in;
-    if (fqdn == "api.accounts.nintendo.com" || fqdn == "accounts.nintendo.com") {
-        fqdn = "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
-    } else if (fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb-api.accounts.nintendo.com" ||
-               fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb.accounts.nintendo.com") {
-        fqdn = "e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com";
-    } else {
-        auto pos = fqdn.find('%');
-        if (pos != std::string::npos) {
-            fqdn.replace(pos, 1, "lp1");
-        }
+std::string NsdResolve(const std::string& fqdn_in) {
+    // [OpenPak] A console asks for names with a '%' where the environment goes, and nsd is what
+    // fills it in before anything resolves them -- so "nncs2-%.n.n.srv.nintendo.net" is a
+    // different host from "nncs1-%..." only after this runs. Every '%' is substituted, not just
+    // the first. The names below are passed through untouched, as hardware does. Ported from
+    // Eden; Citron's api.accounts / -sb-api aliases are kept.
+    if (fqdn_in == "api.sect.srv.nintendo.net" || fqdn_in == "ctest.cdn.nintendo.net" ||
+        fqdn_in == "ctest.cdn.n.nintendoswitch.cn" || fqdn_in == "unknown.dummy.nintendo.net") {
+        return fqdn_in;
     }
+
+    std::string fqdn = fqdn_in;
+    for (std::size_t pos = fqdn.find('%'); pos != std::string::npos;
+         pos = fqdn.find('%', pos + 3)) {
+        fqdn.replace(pos, 1, "lp1");
+    }
+
+    if (fqdn == "api.accounts.nintendo.com" || fqdn == "accounts.nintendo.com") {
+        return "e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com";
+    }
+    if (fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb-api.accounts.nintendo.com" ||
+        fqdn == "e97b8a9d672e4ce4845ec6947cd66ef6-sb.accounts.nintendo.com") {
+        return "e97b8a9d672e4ce4845ec6947cd66ef6-sb.baas.nintendo.com";
+    }
+
+    return fqdn;
+}
+
+static std::string ResolveImpl(const std::string& fqdn_in) {
+    const std::string fqdn = NsdResolve(fqdn_in);
     LOG_INFO(Service, "[NSD] ResolveImpl: fqdn_in='{}' -> fqdn_out='{}'", fqdn_in, fqdn);
     return fqdn;
 }
