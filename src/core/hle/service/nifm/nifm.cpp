@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include "common/cityhash.h"
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_event.h"
@@ -841,12 +842,32 @@ void IGeneralService::IsEthernetCommunicationEnabled(HLERequestContext& ctx) {
     }
 }
 
+// [OpenPak] A request is accepted whenever the host actually has a network and the player has
+// not turned it off: airplane mode hands every title an offline socket, so answering "accepted"
+// there sends it online into sockets that can never connect. As Eden has it.
+static bool IsNetworkRequestAccepted() {
+    return Network::GetHostIPv4Address().has_value() &&
+           !Settings::values.airplane_mode.GetValue();
+}
+
 void IGeneralService::IsAnyInternetRequestAccepted(HLERequestContext& ctx) {
-    LOG_DEBUG(Service_NIFM, "called");
+    const bool is_accepted = IsNetworkRequestAccepted();
+
+    LOG_DEBUG(Service_NIFM, "called, is_accepted={}", is_accepted);
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u8>(1);
+    rb.Push<u8>(is_accepted ? 1 : 0);
+}
+
+void IGeneralService::SetExclusiveClient(HLERequestContext& ctx) {
+    // [OpenPak] One client owning the network is a console power-management idea; emulation has
+    // nothing to arbitrate, so the claim is accepted and forgotten. Left unimplemented it answers
+    // the title with an error at the point it is trying to go online. Ported from Eden.
+    LOG_DEBUG(Service_NIFM, "called");
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
 }
 
 void IGeneralService::AcceptSetting(HLERequestContext& ctx) {
@@ -859,7 +880,7 @@ void IGeneralService::AcceptSetting(HLERequestContext& ctx) {
 }
 
 void IGeneralService::IsAnyForegroundRequestAccepted(HLERequestContext& ctx) {
-    const bool is_accepted = Network::GetHostIPv4Address().has_value();
+    const bool is_accepted = IsNetworkRequestAccepted();
 
     LOG_INFO(Service_NIFM, "called, is_accepted={}", is_accepted);
 
@@ -1085,7 +1106,7 @@ IGeneralService::IGeneralService(Core::System& system_)
         {23, nullptr, "PutToSleep"},
         {24, nullptr, "WakeUp"},
         {25, &IGeneralService::GetSsidListVersion, "GetSsidListVersion"},
-        {26, nullptr, "SetExclusiveClient"},
+        {26, &IGeneralService::SetExclusiveClient, "SetExclusiveClient"},
         {27, nullptr, "GetDefaultIpSetting"},
         {28, &IGeneralService::AcceptSetting, "SetDefaultIpSetting"},
         {29, &IGeneralService::AcceptSetting, "SetWirelessCommunicationEnabledForTest"},
