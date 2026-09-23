@@ -732,10 +732,16 @@ struct Values {
                                            Category::Network};
     Setting<std::string> lobby_api_url{linkage, "api.ynet-fun.xyz", "lobby_api_url",
                                        Category::Network};
-    Setting<bool> enable_openpak{linkage, false, "enable_openpak", Category::Network};
+    // [OpenPak] This build is the OpenPak client -- on by default, no setup step for the user, as
+    // Eden has it. The knob stays so a session can be pointed elsewhere, or turned off to test
+    // against stock.
+    Setting<bool> enable_openpak{linkage, true, "enable_openpak", Category::Network};
     Setting<std::string> openpak_server_ip{linkage, "145.241.199.19", "openpak_server_ip",
                                             Category::Network};
-    Setting<std::string> openpak_nat_ip{linkage, "", "openpak_nat_ip",
+    // The NAT check needs a SECOND address, not the same one twice: a console probes nncs1 and
+    // nncs2 from one socket and compares what each of them saw, which is how it decides its NAT
+    // type. This is the peer OpenPak runs its second responder on.
+    Setting<std::string> openpak_nat_ip{linkage, "145.241.228.207", "openpak_nat_ip",
                                          Category::Network};
     Setting<std::string> openpak_pid{linkage, "", "openpak_pid", Category::Network};
     // Governs the automatic pull-on-boot/push-on-stop cloud save sync only -- the manual

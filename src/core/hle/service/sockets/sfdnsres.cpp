@@ -22,6 +22,7 @@
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/internal_network/network.h"
 #include "core/memory.h"
+#include "openpak/network_profile.h"
 
 namespace Service::Sockets {
 
@@ -71,7 +72,8 @@ std::optional<Network::IPv4Address> GetLastIpForPort(u16 port) {
     return std::nullopt;
 }
 
-// No server address is baked in: unconfigured builds fall back to loopback and redirect nowhere.
+// The setting, then the environment; empty when neither names an address, which redirects
+// nothing (as Eden has it).
 static std::string GetConfiguredIp(const std::string& setting, const char* env_var) {
     if (!setting.empty()) {
         return setting;
@@ -79,7 +81,7 @@ static std::string GetConfiguredIp(const std::string& setting, const char* env_v
     if (const char* env = std::getenv(env_var); env && *env) {
         return env;
     }
-    return "127.0.0.1";
+    return {};
 }
 
 // [Nextendo] La redirection est-elle active ?
@@ -122,16 +124,36 @@ static std::optional<std::string> GetNextendoRedirectIp(const std::string& host)
 
     const std::string server_ip =
         GetConfiguredIp(Settings::values.openpak_server_ip.GetValue(), "OPENPAK_SERVER_IP");
-    // OpenPak does not serve the NAT check; a console that cannot check its NAT falls back
-    // sensibly, so the host stays on real DNS unless an address is configured for it.
+    if (server_ip.empty()) {
+        return std::nullopt;
+    }
+
+    // [OpenPak] The profile OpenPak publishes decides which names are redirected and where,
+    // because it is generated from the live routing: a title served on a new hostname works
+    // without a new build. Two things it says that a wildcard cannot: a name with an address of
+    // its own (the NAT check compares what two addresses observe of one console, so its second
+    // probe must not collapse onto the first), and a name that must be left alone entirely --
+    // the console's own connection test measures OpenPak instead of the internet if redirected.
+    // The same lookup as Eden's.
+    if (const auto from_profile = openpak::client::profile::RedirectFor(host, server_ip);
+        from_profile.has_value()) {
+        LOG_INFO(Service, "[OpenPak] Redirecting '{}' -> '{}' (network profile)", host,
+                 *from_profile);
+        return from_profile;
+    }
+
+    if (openpak::client::profile::Loaded()) {
+        // A profile in hand and no match means the name is not ours to answer.
+        return std::nullopt;
+    }
+
+    // No profile yet (none stored, none fetched): the built-in list.
     if (host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net")) {
         const std::string nat_ip =
             GetConfiguredIp(Settings::values.openpak_nat_ip.GetValue(), "OPENPAK_NAT_IP");
-        if (nat_ip == "127.0.0.1") {
-            return std::nullopt;
-        }
-        LOG_INFO(Service, "[OpenPak] Redirecting NAT check host '{}' -> '{}'", host, nat_ip);
-        return nat_ip;
+        const std::string& target = nat_ip.empty() ? server_ip : nat_ip;
+        LOG_INFO(Service, "[OpenPak] Redirecting NAT check host '{}' -> '{}'", host, target);
+        return target;
     }
 
     if (host == "nintendo.net" || host.ends_with(".nintendo.net") ||
