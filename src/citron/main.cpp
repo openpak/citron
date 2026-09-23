@@ -18,6 +18,7 @@
 #include <string_view>
 #include <future>
 #include <thread>
+#include <QPointer>
 #include "core/hle/service/am/applet_manager.h"
 #include "core/loader/nca.h"
 #include "core/tools/renderdoc.h"
@@ -164,6 +165,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/install_dialog.h"
 #include "citron/loading_screen.h"
 #include "citron/main.h"
+#include "openpak/compatibility.h"
 #include "openpak/log.h"
 #include "openpak/qt/account_dialog.h"
 #include "openpak/session.h"
@@ -1357,6 +1359,24 @@ void GMainWindow::InitializeWidgets() {
     Nextendo::OnlineCounts::Start(this);
     Nextendo::NzpOnlineCount::Start(this);
     Nextendo::PopulationHistory::Start(this);
+
+    // [OpenPak] What the site says right now about each title's online play, over the list this
+    // build shipped with. The list, the carousel and the details panel read the status when they
+    // draw, so the list is only drawn again when that changes something -- and not under a
+    // running game, whose list is drawn anew when it comes back.
+    std::thread{[self = QPointer<GMainWindow>(this)] {
+        if (!openpak::compatibility::Refresh()) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            qApp,
+            [self] {
+                if (self && self->game_list && !self->emulation_running) {
+                    self->game_list->PopulateAsync(UISettings::values.game_dirs);
+                }
+            },
+            Qt::QueuedConnection);
+    }}.detach();
 
     // Create status bar
     // Style applied in UpdateUITheme()
