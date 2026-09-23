@@ -169,6 +169,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "openpak/compatibility.h"
 #include "openpak/crash_reports.h"
 #include "openpak/log.h"
+#include "openpak/platform.h"
 #include "openpak/qt/account_dialog.h"
 #include "openpak/session.h"
 #include "citron/nextendo_chat_window.h"
@@ -1335,6 +1336,14 @@ void GMainWindow::InitializeWidgets() {
 
     // OpenPak: the shared client and dialogs (externals/openpak-client), hosted by OpenPakHost.
     // Core already pointed the client at Citron's directories; its log goes to Citron's log.
+    // Every request to OpenPak says which emulator and build is asking (X-OpenPak-Client).
+    {
+        const std::string_view hash{Common::g_scm_rev};
+        const std::string version{Common::g_build_version};
+        openpak::Platform::SetClient("citron", version.empty()
+                                                   ? std::string{hash.substr(0, 8)}
+                                                   : fmt::format("{}+{}", version, hash.substr(0, 8)));
+    }
     openpak::SetLogSink([](openpak::LogLevel level, const std::string& message) {
         switch (level) {
         case openpak::LogLevel::Trace:

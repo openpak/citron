@@ -77,6 +77,16 @@ Configure → OpenPak page (C2, not done yet), and the chat overlay is still rea
 account window's invite-to-chat and a chat-invite toast. The *Toggle OpenPak account* hotkey
 still opens the window.
 
+## Android
+
+Citron's Android (`src/android`) carries Eden's Android OpenPak layer, package names aside: native
+Material screens as `emulators/prds/openpak-ux-spec.md` §4 has them, in Kotlin `utils/OpenPak.kt`,
+`utils/OpenPakUi.kt` and `fragments/OpenPakFragment.kt`, over one JSON bridge
+`jni/openpak_native.cpp`. It adds profile management to the OpenPak settings (Citron's Android has
+no profile screen of its own). Cloud saves are pulled in `InitializeEmulation` and pushed in
+`ShutdownEmulation` (`jni/native.cpp`); the strings are `res/values/openpak_strings.xml`. Every
+request says which build asks: `X-OpenPak-Client: citron/<version>+<hash>`.
+
 ## Builds and releases
 
 Continuous builds from `main`: `.github/workflows/build-linux.yml` builds this tree (x86_64,
@@ -84,7 +94,8 @@ x86_64-v3 on the self-hosted runner; aarch64 under qemu only when the dispatch s
 `aarch64: true`, because it holds a runner for hours) and attaches the AppImages to
 the `nightly-linux` release without artifacts; the release step runs for whichever legs made it.
 `build-windows.yml` and `build-macos.yml` publish their own nightlies the same way (GitHub-hosted
-runners). No `openpak-v*` tag yet. Local desktop build: `build-openpak/` (system libraries,
+runners). `build-android.yml` (dispatched by hand) builds the standard and Snapdragon 8 Elite
+APKs and attaches them to `nightly-android` the same way. No `openpak-v*` tag yet. Local desktop build: `build-openpak/` (system libraries,
 nlohmann_json in `build-openpak/deps`).
 
 PRDs: [`../prds/`](../prds/README.md) — emulator-wide PRDs live at `emulators/prds/` in the

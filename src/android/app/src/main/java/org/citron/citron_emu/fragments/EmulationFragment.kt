@@ -289,6 +289,13 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         binding.inGameMenu.setNavigationItemSelectedListener {
             when (it.itemId) {
+                // [OpenPak] The OpenPak screen over the game (openpak-ux-spec.md 4.1).
+                R.id.menu_openpak -> {
+                    binding.drawerLayout.close()
+                    OpenPakFragment.newInstance().show(childFragmentManager, OpenPakFragment.TAG)
+                    true
+                }
+
                 R.id.menu_pause_emulation -> {
                     if (emulationState.isPaused) {
                         emulationState.run(false)

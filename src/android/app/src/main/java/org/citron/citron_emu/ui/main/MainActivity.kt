@@ -160,6 +160,15 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         }
 
         setInsets()
+
+        // OpenPak: which profile, set it up the first time, then online. After the first-time
+        // setup instead, when that is still to come (finishSetup).
+        if (savedInstanceState == null &&
+            !PreferenceManager.getDefaultSharedPreferences(applicationContext)
+                .getBoolean(Settings.PREF_FIRST_APP_LAUNCH, true)
+        ) {
+            org.citron.citron_emu.utils.OpenPakUi.runStartup(this)
+        }
     }
 
     private fun checkKeys() {
@@ -179,6 +188,7 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
 
     fun finishSetup(navController: NavController) {
         navController.navigate(R.id.action_firstTimeSetupFragment_to_gamesFragment)
+        org.citron.citron_emu.utils.OpenPakUi.runStartup(this)
         (binding.navigationView as NavigationBarView).setupWithNavController(navController)
         showNavigation(visible = true, animated = true)
     }

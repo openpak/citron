@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: Copyright 2026 OpenPak -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The OpenPak mark (icons/openpak-base.svg) in one colour: the ring, the open arc and the dot. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:tint="?attr/colorControlNormal"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <path
+        android:pathData="M76,256a180,180 0,1 0,360 0a180,180 0,1 0,-360 0"
+        android:strokeWidth="36"
+        android:strokeColor="#FFFFFFFF" />
+    <path
+        android:pathData="M160,256c0,-53 43,-96 96,-96s96,43 96,96 -43,96 -96,96"
+        android:strokeLineCap="round"
+        android:strokeWidth="36"
+        android:strokeColor="#FFFFFFFF" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M228,256a28,28 0,1 0,56 0a28,28 0,1 0,-56 0" />
+</vector>
