@@ -271,8 +271,6 @@ add_executable(citron
     nextendo_room_overlay.h
     openpak_host.cpp
     openpak_host.h
-    openpak_friend_picker.cpp
-    openpak_friend_picker.h
     openpak_online_status.cpp
     openpak_online_status.h
     nextendo_ldn_counts.cpp

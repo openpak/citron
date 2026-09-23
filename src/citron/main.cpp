@@ -173,7 +173,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/nextendo_room_overlay.h"
 #include "citron/nextendo_population_dialog.h"
 #include "citron/openpak_host.h"
-#include "citron/openpak_friend_picker.h"
+#include "openpak/qt/friend_picker.h"
 #include "openpak/qt/online_counts.h"
 #include "openpak/qt/nzp_online_count.h"
 #include "citron/nextendo_population_history.h"
@@ -1353,8 +1353,9 @@ void GMainWindow::InitializeWidgets() {
         }
     });
     openpak_host = new OpenPakHost(*system, this, this);
-    InstallOpenPakFriendPicker(this);
     openpak::qt::Host::SetCurrent(openpak_host);
+    // MyPage's "invite friends": the library's picker, driven by mouse, keyboard or controller.
+    openpak::qt::InstallFriendPicker(openpak_host, this);
     nextendo_toast = new NextendoToast(this);
     Nextendo::OnlineCounts::Start(this);
     Nextendo::NzpOnlineCount::Start(this);
