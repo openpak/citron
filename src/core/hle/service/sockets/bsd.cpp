@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include "common/fs/file.h"
 #include "common/hex_util.h"
@@ -29,10 +30,12 @@
 #include "core/hle/kernel/svc/nextendo_deadline_watch.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/bsd.h"
+#include "core/hle/service/sockets/interface_list.h"
 #include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets_translate.h"
 #include "core/hle/service/ssl/ssl_pending_registry.h"
 #include "core/internal_network/network.h"
+#include "core/internal_network/network_interface.h"
 #include "core/internal_network/socket_proxy.h"
 #include "core/internal_network/sockets.h"
 #include "network/network.h"
@@ -3571,11 +3574,43 @@ void BSD::Unknown40(HLERequestContext& ctx) {
 }
 
 void BSD::Sysctl(HLERequestContext& ctx) {
-    LOG_WARNING(Service, "(STUBBED) called Sysctl");
-    IPC::ResponseBuilder rb{ctx, 4};
+    // [OpenPak] getifaddrs(): NPLN's WebRTC gathers connection candidates from it; refused, a
+    // host offers a joiner no address and the join times out (2321-5248). Ported from Eden and
+    // Ryujinx. Every other query stays unsupported, as before.
+    const auto mib_bytes = ctx.ReadBuffer(0);
+    std::vector<s32> mib(std::min<std::size_t>(mib_bytes.size() / sizeof(s32), 16));
+    std::memcpy(mib.data(), mib_bytes.data(), mib.size() * sizeof(s32));
+    const std::size_t new_size = ctx.CanReadBuffer(1) ? ctx.GetReadBufferSize(1) : 0;
+    const std::size_t old_size = ctx.CanWriteBuffer(0) ? ctx.GetWriteBufferSize(0) : 0;
+
+    s32 ret = -1;
+    Errno bsd_errno = Errno::OPNOTSUPP;
+    u32 length = 0;
+
+    const auto iface = Network::GetSelectedNetworkInterface();
+    if (InterfaceList::Matches(mib) && new_size == 0 && iface) {
+        const auto list = InterfaceList::Build(Network::TranslateIPv4(iface->ip_address),
+                                               Network::TranslateIPv4(iface->subnet_mask));
+        length = static_cast<u32>(list.size());
+        if (old_size != 0 && old_size < list.size()) {
+            bsd_errno = Errno::NOMEM; // no buffer is the size probe; a short one is ENOMEM
+        } else {
+            if (old_size != 0) {
+                ctx.WriteBuffer(list);
+            }
+            ret = 0;
+            bsd_errno = Errno::SUCCESS;
+        }
+    } else {
+        LOG_WARNING(Service, "(STUBBED) Sysctl mib=[{}] old={} new={}", fmt::join(mib, ","),
+                    old_size, new_size);
+    }
+
+    IPC::ResponseBuilder rb{ctx, 5};
     rb.Push(ResultSuccess);
-    rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
+    rb.Push<u32>(length);
 }
 
 } // namespace Service::Sockets
