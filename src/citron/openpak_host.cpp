@@ -48,7 +48,6 @@
 #include "core/hle/service/am/applet_manager.h"
 #include "hid_core/hid_core.h"
 #include "openpak/account.h"
-#include "openpak/compatible_titles.h"
 #include "openpak/friends_cache.h"
 #include "openpak/platform.h"
 #include "openpak/session.h"
@@ -693,11 +692,6 @@ void OpenPakHost::ManualSaveDownload(u64 title_id) {
         emit StatusChanged(tr("Stop the running game before downloading a cloud save."));
         return;
     }
-    if (!Nextendo::CompatibleTitles::Table().count(title_id)) {
-        emit StatusChanged(tr("This game doesn't support cloud saves."));
-        return;
-    }
-
     emit StatusChanged(tr("Downloading save from the cloud..."));
     QPointer<OpenPakHost> self(this);
     std::thread{[this, self, title_id, directory = SaveDirectory(title_id)] {

@@ -26,10 +26,10 @@
 #include "citron/theme.h"
 #include "citron/custom_metadata.h"
 #include "openpak/compatible_titles.h"
+#include "citron/openpak_online_status.h"
 #include "citron/nextendo_ldn_counts.h"
 #include "openpak/qt/online_counts.h"
 #include "citron/util/image_cache.h"
-#include "openpak/account.h"
 
 namespace {
 constexpr int kBackdropPickerRowH = 40;
@@ -814,14 +814,15 @@ QColor CinematicCarousel::AccentColor() const {
 
 void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 program_id,
                                          const QString& installed_version) const {
-    const bool show_nextendo = Common::OpenPakAccount::IsLinked() &&
-                               Nextendo::CompatibleTitles::Table().contains(program_id);
+    // [OpenPak] Every title the catalogue lists, in its status's colour, while OpenPak is on.
+    const auto openpak_status = OpenPakOnlineStatusFor(program_id);
     const std::optional<Nextendo::LdnCounts::Stats> ldn = Nextendo::LdnCounts::For(program_id);
-    if (!show_nextendo && !ldn) {
+    if (!openpak_status && !ldn) {
         return;
     }
-    const bool needs_update = show_nextendo && !Nextendo::CompatibleTitles::IsVersionOk(
-                                                    program_id, installed_version.toStdString());
+    // Only the titles whose servers take one version are ever flagged.
+    const bool needs_update = openpak_status && !Nextendo::CompatibleTitles::IsVersionOk(
+                                                     program_id, installed_version.toStdString());
 
     const qreal scale = std::clamp(card.width() / 130.0, 0.55, 1.5);
     const qreal dot_d = 8.0 * scale;
@@ -862,9 +863,10 @@ void CinematicCarousel::DrawOnlineBadges(QPainter& p, const QRectF& card, u64 pr
         p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, text);
     };
 
-    if (show_nextendo) {
+    if (openpak_status) {
         const int players = Nextendo::OnlineCounts::For(program_id);
-        draw_corner(true, 0, QString::number(players), QColor(50, 195, 85));
+        draw_corner(true, 0, QStringLiteral("%1 \u00B7 %2").arg(openpak_status->label).arg(players),
+                    openpak_status->color);
         if (needs_update) {
             const QString required_version =
                 QString::fromStdString(Nextendo::CompatibleTitles::Table().at(program_id));

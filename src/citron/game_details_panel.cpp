@@ -21,10 +21,9 @@
 #include "citron/theme.h"
 #include "citron/uisettings.h"
 #include "citron/custom_metadata.h"
-#include "openpak/compatible_titles.h"
+#include "citron/openpak_online_status.h"
 #include "openpak/qt/online_counts.h"
 #include "citron/util/image_cache.h"
-#include "openpak/account.h"
 
 GameDetailsPanel::GameDetailsPanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("GameDetailsPanel"));
@@ -446,11 +445,13 @@ m_title_label->setMinimumHeight(static_cast<int>(doc.size().height()) + 4);
 m_id_label->setText(
     QStringLiteral("0x%1").arg(m_current_program_id, 16, 16, QLatin1Char('0')).toUpper());
 
-const bool show_online = Common::OpenPakAccount::IsLinked() &&
-                         Nextendo::CompatibleTitles::Table().contains(m_current_program_id);
-if (show_online) {
+// [OpenPak] Every title the catalogue lists, with its status, while OpenPak is on.
+if (const auto openpak_status = OpenPakOnlineStatusFor(m_current_program_id)) {
     const int players = Nextendo::OnlineCounts::For(m_current_program_id);
-    m_online_label->setText(tr("Currently Playing: \xF0\x9F\x8E\xAE %1").arg(players));
+    m_online_label->setText(tr("OpenPak %1 \u00B7 Currently Playing: \xF0\x9F\x8E\xAE %2")
+                                .arg(openpak_status->label)
+                                .arg(players));
+    m_online_label->setToolTip(openpak_status->tooltip);
     m_online_label->show();
 } else {
     m_online_label->hide();

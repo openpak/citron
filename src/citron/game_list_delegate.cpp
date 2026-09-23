@@ -37,6 +37,7 @@
 #include "citron/game_list_delegate.h"
 #include "citron/game_list_p.h"
 #include "openpak/compatible_titles.h"
+#include "citron/openpak_online_status.h"
 #include "openpak/qt/online_counts.h"
 #include "openpak/qt/nzp_online_count.h"
 #include "citron/uisettings.h"
@@ -528,6 +529,16 @@ void GameListDelegate::AdvanceAnimations() {
 bool GameListDelegate::helpEvent(QHelpEvent* event, QAbstractItemView* view,
                                  const QStyleOptionViewItem& option, const QModelIndex& index) {
     if (event->type() == QEvent::ToolTip && index.isValid()) {
+        // [OpenPak] The Online column's pill says what the status means and what serves it.
+        if (index.column() == GameList::COLUMN_ONLINE) {
+            const u64 program_id = index.sibling(index.row(), GameList::COLUMN_NAME)
+                                       .data(GameListItemPath::ProgramIdRole)
+                                       .toULongLong();
+            if (const auto status = OpenPakOnlineStatusFor(program_id)) {
+                OnyxTooltip::showText(event->globalPos(), status->tooltip, view);
+                return true;
+            }
+        }
         const QString text = index.data(Qt::ToolTipRole).toString();
         if (!text.isEmpty()) {
             OnyxTooltip::showText(event->globalPos(), text, view);
@@ -846,21 +857,17 @@ void GameListDelegate::PaintCompatibility(QPainter* painter, const QRect& rect,
 void GameListDelegate::PaintOnline(QPainter* painter, const QRect& rect,
                                    const QStyleOptionViewItem& option,
                                    const QModelIndex& index) const {
-    if (!Common::OpenPakAccount::IsLinked()) {
-        PaintDefault(painter, rect, option, index);
-        return;
-    }
-
     const QModelIndex name_index = index.sibling(index.row(), GameList::COLUMN_NAME);
     const u64 program_id = name_index.data(GameListItemPath::ProgramIdRole).toULongLong();
-    const auto& table = Nextendo::CompatibleTitles::Table();
-    const bool tracked = table.find(program_id) != table.end();
+    // [OpenPak] Every title the catalogue lists, in its status's colour, while OpenPak is on.
+    const auto openpak_status = OpenPakOnlineStatusFor(program_id);
     // NZP is homebrew: no real title ID, so match it by NACP title string instead.
     const bool is_nzp =
+        Common::OpenPakAccount::IsLinked() &&
         name_index.data(GameListItemPath::TitleRole).toString() == QStringLiteral("Nazi Zombies Portable");
 
-    if (!tracked && !is_nzp) {
-        // Not a Nextendo title: nothing to add, keep the plain LDN text exactly as before.
+    if (!openpak_status && !is_nzp) {
+        // Not an OpenPak title: nothing to add, keep the plain LDN text exactly as before.
         PaintDefault(painter, rect, option, index);
         return;
     }
@@ -875,9 +882,12 @@ void GameListDelegate::PaintOnline(QPainter* painter, const QRect& rect,
         const std::string installed_version =
             name_index.data(GameListItemPath::VersionRole).toString().toStdString();
         players = Nextendo::OnlineCounts::For(program_id);
+        // The version table only knows the titles whose servers take one version; any other
+        // title is never flagged.
         needs_update = !Nextendo::CompatibleTitles::IsVersionOk(program_id, installed_version);
         if (needs_update) {
-            version_pill_text = tr("Requires %1").arg(QString::fromStdString(table.at(program_id)));
+            version_pill_text = tr("Requires %1").arg(QString::fromStdString(
+                Nextendo::CompatibleTitles::Table().at(program_id)));
         }
     }
 
@@ -912,7 +922,11 @@ void GameListDelegate::PaintOnline(QPainter* painter, const QRect& rect,
     };
 
     int x = rect.left() + margin;
-    x = draw_pill(x, pill_y, tr("OpenPak: %1 online").arg(players), QColor(50, 195, 85));
+    x = openpak_status
+            ? draw_pill(x, pill_y,
+                        tr("OpenPak %1 \u00B7 %2 online").arg(openpak_status->label).arg(players),
+                        openpak_status->color)
+            : draw_pill(x, pill_y, tr("OpenPak: %1 online").arg(players), QColor(50, 195, 85));
     if (is_nzp || needs_update) {
         draw_pill(x, pill_y, version_pill_text, QColor(0, 190, 255));
     }
