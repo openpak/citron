@@ -23,6 +23,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/ips_layer.h"
+#include "core/file_sys/openpak_builtin_patches.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
@@ -500,6 +501,17 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     }
     LOG_INFO(Loader, "Patching NSO for name={}, build_id={}", name, build_id);
 
+    auto out = nso;
+
+    // OpenPak's built-in IPS patch first, while the bytes it checks are still as shipped. It does
+    // not depend on the user's mods, so it applies with none installed or all disabled. out is the
+    // header-included buffer user IPS files are applied to, which is the basis its offsets use.
+    if (Settings::values.enable_openpak.GetValue()) {
+        if (const auto* builtin = OpenPakBuiltinPatches::Find(build_id)) {
+            OpenPakBuiltinPatches::Apply(*builtin, out);
+        }
+    }
+
     std::vector<VirtualDir> patch_dirs = GetEnabledModsList(title_id, fs_controller);
 
     // SDMC (Atmosphere) logic -- GetEnabledModsList alone only covers citron's own mod-load
@@ -514,7 +526,6 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     std::sort(patch_dirs.begin(), patch_dirs.end(),
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
     const auto patches = CollectPatches(patch_dirs, build_id);
-    auto out = nso;
     for (const auto& patch_file : patches) {
         if (patch_file->GetExtension() == "ips") {
             LOG_INFO(Loader, "    - Applying IPS patch from mod \"{}\"",
@@ -542,6 +553,11 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     const auto build_id_raw = Common::HexToString(build_id_);
     const auto build_id = build_id_raw.substr(0, build_id_raw.find_last_not_of('0') + 1);
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
+
+    // OpenPak's built-in IPS patch counts as an NSO patch, so the loader calls PatchNSO for it.
+    if (Settings::values.enable_openpak.GetValue() && OpenPakBuiltinPatches::Find(build_id)) {
+        return true;
+    }
 
     std::vector<VirtualDir> patch_dirs = GetEnabledModsList(title_id, fs_controller);
 
