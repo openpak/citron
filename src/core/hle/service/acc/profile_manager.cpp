@@ -280,6 +280,12 @@ UUID ProfileManager::GetLastOpenedUser() const {
     return last_opened_user;
 }
 
+std::string ProfileManager::CurrentUserKey() const {
+    const auto user = GetUser(static_cast<std::size_t>(Settings::values.current_user.GetValue()));
+
+    return user && user->IsValid() ? user->RawString() : std::string{};
+}
+
 /// Gets the list of stored opened users.
 UserIDArray ProfileManager::GetStoredOpenedUsers() const {
     UserIDArray output{};

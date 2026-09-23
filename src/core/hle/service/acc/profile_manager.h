@@ -87,6 +87,9 @@ public:
     UserIDArray GetOpenUsers() const;
     UserIDArray GetAllUsers() const;
     Common::UUID GetLastOpenedUser() const;
+    /// [OpenPak] The active user (the current_user setting) as 32 hex digits, or empty. The key
+    /// OpenPak keeps that user's own account under.
+    std::string CurrentUserKey() const;
     UserIDArray GetStoredOpenedUsers() const;
     void StoreOpenedUsers();
 

@@ -174,6 +174,13 @@ struct System::Impl {
         openpak::Platform::SetDirectories(
             Common::FS::GetCitronPath(Common::FS::CitronPath::ConfigDir),
             Common::FS::GetCitronPath(Common::FS::CitronPath::CacheDir));
+
+        // [OpenPak] Each profile is its own OpenPak account; the client asks which is active.
+        openpak::Platform::SetProfileSource([this] { return profile_manager.CurrentUserKey(); });
+    }
+
+    ~Impl() {
+        openpak::Platform::SetProfileSource({});
     }
 
     void Initialize(System& system) {

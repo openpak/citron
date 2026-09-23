@@ -18,6 +18,12 @@
 #include "common/string_util.h"
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
+#include <thread>
+#include "openpak/account.h"
+#ifdef ENABLE_WEB_SERVICE
+#include "openpak/api.h"
+#endif
+#include "openpak/session.h"
 #include "ui_configure_profile_manager.h"
 #include "citron/configuration/configure_profile_manager.h"
 #include "citron/util/limitable_input_dialog.h"
@@ -258,6 +264,17 @@ void ConfigureProfileManager::DeleteUser(const Common::UUID& uuid) {
         Settings::values.current_user = 0;
     }
     UpdateCurrentUser();
+
+    // [OpenPak] The profile's OpenPak account and device account go with it, and its website
+    // token is revoked on the server: a sign-in outliving its profile would be an account nobody
+    // can see to sign out.
+#ifdef ENABLE_WEB_SERVICE
+    std::thread{[bearer = Common::OpenPakAccount::BearerOf(uuid.RawString())] {
+        WebService::OpenPakApi::RevokeToken(bearer);
+    }}.detach();
+#endif
+    Common::OpenPakAccount::Forget(uuid.RawString());
+    openpak::client::session::ForgetProfile(uuid.RawString());
 
     if (!profile_manager.RemoveUser(uuid)) {
         return;
