@@ -148,6 +148,8 @@ add_executable(citron
     configuration/configure_network.cpp
     configuration/configure_network.h
     configuration/configure_network.ui
+    configuration/configure_openpak.cpp
+    configuration/configure_openpak.h
     configuration/configure_system.cpp
     configuration/configure_system.h
     configuration/configure_system.ui

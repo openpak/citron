@@ -164,10 +164,11 @@ namespace UISettings {
                                     // in a 'backup' folder next to the main AppImage.
                                     Setting<std::string> updater_backup_path{linkage, "", "updater/backupPath", Category::Ui};
 
-                                    Setting<bool> legacy_notifications_enabled{linkage, true, "legacy/notificationsEnabled", Category::Ui};
+                                    // [OpenPak] UX spec §3.13, under the same keys as Eden's.
+                                    Setting<bool> openpak_notifications_enabled{linkage, true, "openpak/notificationsEnabled", Category::Ui};
 
-                                    // 0 = top-right, 1 = top-left, 2 = bottom-right, 3 = bottom-left. See OpenPakToast::Corner.
-                                    Setting<int> legacy_notification_corner{linkage, 0, "legacy/notificationCorner", Category::Ui};
+                                    // 0 = top-right, 1 = top-left, 2 = bottom-right (the spec's default), 3 = bottom-left. See OpenPakToast::Corner.
+                                    Setting<int> openpak_notification_corner{linkage, 2, "openpak/notificationCorner", Category::Ui};
 
                                     // [OpenPak] Which profile goes online at startup: empty for the last used, "ask"
                                     // for the picker, or one profile's UUID.
