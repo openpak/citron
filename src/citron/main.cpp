@@ -2082,12 +2082,22 @@ void GMainWindow::ConnectMenuEvents() {
             &MultiplayerState::OnCloseRoom);
 
     // NexTendo
-    ui->action_Nextendo_Sign_In->setEnabled(!Common::OpenPakAccount::IsLinked());
-    ui->action_Nextendo_Sign_Out->setEnabled(Common::OpenPakAccount::IsLinked());
-    ui->action_Nextendo_Enable_Redirection->setChecked(Settings::values.enable_openpak.GetValue());
-    // The OpenPak menu: the same items, in the same order, as Eden's; only the library's dialogs.
-    ui->menu_NexTendo->insertMenu(ui->action_Nextendo_Enable_Redirection,
-                                  openpak_host->CreateStartupMenu(this));
+    // The OpenPak menu (UX spec §3.1), built by the host so Citron's and Eden's are the same;
+    // the top bar's OpenPak button opens this same menu. Open Account Page stays as the hotkey's
+    // action only.
+    openpak_host->PopulateMenu(
+        ui->menu_NexTendo,
+        [this](int page) {
+            OpenPakAccountDialog dialog(openpak_host, this, page);
+            nextendo_account_dialog_instance = &dialog;
+            connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
+                    [this](u64 pid, const QString& name) {
+                        OpenNextendoChatWindow({}, pid, name);
+                    });
+            dialog.exec();
+            nextendo_account_dialog_instance = nullptr;
+        },
+        [this] { OnConfigure(); });
 
     connect(ui->action_Nextendo_Open_Account, &QAction::triggered, this, [this] {
         if (!Common::OpenPakAccount::IsLinked()) {
@@ -2152,21 +2162,6 @@ void GMainWindow::ConnectMenuEvents() {
                 BootGameFromList(path, StartGameType::Normal);
             }
         }
-    });
-    connect(ui->action_Nextendo_Sign_In, &QAction::triggered, openpak_host,
-            &OpenPakHost::SignIn);
-    connect(ui->action_Nextendo_Sign_Out, &QAction::triggered, openpak_host,
-            &OpenPakHost::SignOut);
-    connect(ui->action_Nextendo_Enable_Redirection, &QAction::toggled, this, [](bool checked) {
-        Settings::values.enable_openpak.SetValue(checked);
-    });
-    connect(openpak_host, &openpak::qt::Host::AccountLinked, this, [this] {
-        ui->action_Nextendo_Sign_In->setEnabled(false);
-        ui->action_Nextendo_Sign_Out->setEnabled(true);
-    });
-    connect(openpak_host, &openpak::qt::Host::AccountUnlinked, this, [this] {
-        ui->action_Nextendo_Sign_In->setEnabled(true);
-        ui->action_Nextendo_Sign_Out->setEnabled(false);
     });
     connect(openpak_host, &openpak::qt::Host::StatusChanged, this,
             [this](const QString& message) {

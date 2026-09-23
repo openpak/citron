@@ -17,8 +17,8 @@ Surfaces:
   service walks the library's console chain (dauth, BAAS device account, login bound to the
   running title) and hands titles the id_token OpenPak issued.
 - **Profiles** — each Citron user profile is its own OpenPak account, one active at a time. A
-  plain launch picks the profile (*OpenPak → OpenPak account at startup*: last used, ask, or one
-  profile), offers the setup once (sign in, create an account, play offline), then goes online.
+  plain launch picks the profile (last used, ask, or one profile; the choice gets its UI on
+  the spec's Configure → OpenPak page), offers the setup once (sign in, create an account, play offline), then goes online.
   `acc` answers only the active profile; deleting a profile forgets its account.
 - **Presence** — the library's heartbeat keeps the account online, keeps the friends caches warm
   and polls the invitation inbox; closing the window says goodbye (three seconds at most). What
@@ -67,11 +67,15 @@ Settings: `enable_openpak`, `openpak_server_ip`, `openpak_nat_ip`. Environment o
 `CITRON_SSL_TRACE=1` (guest TLS in the clear), `SSLKEYLOGFILE`; and the research redirects and
 probes (`NEXTENDO_*`) in `sfdnsres.cpp` and `bsd.cpp`, all off unless set.
 
-Menu: a top-level **OpenPak** menu with the same items, in the same order, as Eden's — Open
-Account Page, Sign In, Sign Out, OpenPak account at startup, Enable Network Redirection. The
-library's dialogs are the only OpenPak dialogs in the menu; the Nextendo-era Population dialog
-and the Chat Rooms prototype are no longer offered there (the chat overlay is still reachable
-from the account window's invite-to-chat and a chat-invite toast, pending the UX spec).
+Menu: the top-level **OpenPak** menu (and the top bar's OpenPak button, the same menu) as the
+UX spec has it (`emulators/prds/openpak-ux-spec.md` §3.1, built by `OpenPakHost::PopulateMenu`,
+identical in Eden): *Sign in to OpenPak...* or *Signed in as {name}*, Friends, Invitations,
+Cloud saves, Mods, News, Status, *OpenPak settings...*, *OpenPak website*, *Sign out...* (with
+the §3.5 confirmation). Population, the Chat Rooms prototype, the redirect toggle and the
+startup submenu are no longer in it; the startup choice and redirect move to the spec's
+Configure → OpenPak page (C2, not done yet), and the chat overlay is still reachable from the
+account window's invite-to-chat and a chat-invite toast. The *Toggle OpenPak account* hotkey
+still opens the window.
 
 ## Builds and releases
 

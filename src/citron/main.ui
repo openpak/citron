@@ -152,11 +152,6 @@
     <property name="title">
      <string>&amp;OpenPak</string>
     </property>
-    <addaction name="action_Nextendo_Open_Account"/>
-    <addaction name="action_Nextendo_Sign_In"/>
-    <addaction name="action_Nextendo_Sign_Out"/>
-    <addaction name="separator"/>
-    <addaction name="action_Nextendo_Enable_Redirection"/>
    </widget>
    <widget class="QMenu" name="menu_Tools">
     <property name="title">
@@ -383,27 +378,6 @@
   <action name="action_Nextendo_Open_Account">
    <property name="text">
     <string>&amp;Open Account Page</string>
-   </property>
-  </action>
-  <action name="action_Nextendo_Sign_In">
-   <property name="text">
-    <string>&amp;Sign In</string>
-   </property>
-  </action>
-  <action name="action_Nextendo_Sign_Out">
-   <property name="enabled">
-    <bool>false</bool>
-   </property>
-   <property name="text">
-    <string>Sign &amp;Out</string>
-   </property>
-  </action>
-  <action name="action_Nextendo_Enable_Redirection">
-   <property name="checkable">
-    <bool>true</bool>
-   </property>
-   <property name="text">
-    <string>&amp;Enable Network Redirection</string>
    </property>
   </action>
   <action name="action_Start_Room">
