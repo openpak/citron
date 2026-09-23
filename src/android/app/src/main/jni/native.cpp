@@ -68,6 +68,7 @@
 #include "hid_core/hid_core.h"
 #include "hid_core/hid_types.h"
 #include "jni/native.h"
+#include "jni/openpak_native.h"
 #include "network/network.h"
 #include "network/room_member.h"
 #include "video_core/renderer_base.h"
@@ -473,6 +474,11 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
         return m_load_result;
     }
 
+    // [OpenPak] The newest cloud save, before the title reads the one on disk: the title is known
+    // now and has not run a single instruction yet.
+    m_openpak_title = m_system.GetApplicationProcessProgramID();
+    OpenPakPullSaveBeforeLaunch(m_openpak_title);
+
     // Complete initialization.
     m_system.GPU().Start();
     m_system.GetCpuManager().OnGpuReady();
@@ -496,6 +502,10 @@ void EmulationSession::ShutdownEmulation() {
         m_is_shutting_down = false;
         m_session_cv.notify_all();
     };
+
+    // [OpenPak] Nothing is being played from this moment, whatever happens to the rest of the
+    // shutdown; presence should say so rather than name a title that is being torn down.
+    OpenPakSetRunningTitle(0);
 
     if (m_next_program_index != -1) {
         ChangeProgram(m_next_program_index);
@@ -521,6 +531,8 @@ void EmulationSession::ShutdownEmulation() {
             std::scoped_lock window_lock(m_window_mutex);
             m_window.reset();
         }
+        // [OpenPak] The save the title just wrote goes up, now that nothing is writing to it.
+        OpenPakPushSaveAfterExit(std::exchange(m_openpak_title, 0));
         OnEmulationStopped(Core::SystemResultStatus::Success);
         return;
     }
@@ -557,6 +569,10 @@ void EmulationSession::RunEmulation() {
         m_is_paused = false;
         m_is_running = true;
     }
+
+    // [OpenPak] Presence and the invitation offers say what is being played, pushed from here,
+    // where the session is known to exist.
+    OpenPakSetRunningTitle(m_system.GetApplicationProcessProgramID());
 
     // Load the disk shader cache.
     if (Settings::values.use_disk_shader_cache.GetValue()) {

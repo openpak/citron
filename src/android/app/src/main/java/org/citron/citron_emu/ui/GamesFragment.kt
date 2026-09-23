@@ -93,6 +93,10 @@ class GamesFragment : Fragment() {
         gamesViewModel.games.collect(viewLifecycleOwner) {
             gameAdapter.submitList(it)
         }
+        // [OpenPak] The site said something about a title's online play this build did not.
+        org.citron.citron_emu.utils.OpenPak.compatibilityVersion.collect(viewLifecycleOwner) {
+            if (it > 0) gameAdapter.notifyDataSetChanged()
+        }
         gamesViewModel.shouldSwapData.collect(
             viewLifecycleOwner,
             resetState = { gamesViewModel.setShouldSwapData(false) }

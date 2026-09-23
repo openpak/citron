@@ -89,6 +89,10 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener {
         super.onCreate(savedInstanceState)
         DisplayModeUtil.preferHighestRefreshRate(this)
 
+        // [OpenPak] Online even when the game was started straight from a shortcut; a no-op when
+        // the game list already went online.
+        org.citron.citron_emu.utils.OpenPak.start()
+
         InputHandler.updateControllerData()
         val players = NativeConfig.getInputSettings(true)
         var hasConfiguredControllers = false
