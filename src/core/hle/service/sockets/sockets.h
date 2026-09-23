@@ -20,10 +20,12 @@ enum class Errno : u32 {
     SUCCESS = 0,
     BADF = 9,
     AGAIN = 11,
+    NOMEM = 12, // [OpenPak] Sysctl: a buffer too short for the answer
     INVAL = 22,
     MFILE = 24,
     PIPE = 32,
     MSGSIZE = 90,
+    OPNOTSUPP = 95, // [OpenPak] Sysctl: a query this build does not answer
     AFNOSUPPORT = 97,
     CONNABORTED = 103,
     CONNRESET = 104,
