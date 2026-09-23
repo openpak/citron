@@ -135,14 +135,14 @@ static std::optional<std::string> GetNextendoRedirectIp(const std::string& host)
     // probe must not collapse onto the first), and a name that must be left alone entirely --
     // the console's own connection test measures OpenPak instead of the internet if redirected.
     // The same lookup as Eden's.
-    if (const auto from_profile = openpak::client::profile::RedirectFor(host, server_ip);
+    if (const auto from_profile = openpak::NetworkProfile::RedirectFor(host, server_ip);
         from_profile.has_value()) {
         LOG_INFO(Service, "[OpenPak] Redirecting '{}' -> '{}' (network profile)", host,
                  *from_profile);
         return from_profile;
     }
 
-    if (openpak::client::profile::Loaded()) {
+    if (openpak::NetworkProfile::Loaded()) {
         // A profile in hand and no match means the name is not ours to answer.
         return std::nullopt;
     }
