@@ -713,7 +713,7 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
         val action = MaterialButton(
             activity,
             null,
-            com.google.android.material.R.attr.borderlessButtonStyle
+            androidx.appcompat.R.attr.borderlessButtonStyle
         ).apply {
             text = actionLabel ?: ""
             visibility = if (actionLabel == null) View.GONE else View.VISIBLE
@@ -755,7 +755,7 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
     fun link(context: Context, value: String) = TextView(context).apply {
         text = value
         textSize = 14f
-        setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorPrimary))
+        setTextColor(MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary))
         minHeight = dp(context, 48)
         gravity = Gravity.CENTER_VERTICAL
         isClickable = true
