@@ -3,6 +3,10 @@ name: Build Citron (Android)
 on:
   workflow_dispatch:
 
+# check-version replaces the nightly release before the builds attach to it.
+permissions:
+  contents: write
+
 jobs:
   check-version:
     name: Check if new version available
