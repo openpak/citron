@@ -76,6 +76,9 @@ private:
         // stash the bytes it was "set" to so a getsockopt right afterward echoes them back,
         // matching Ryujinx-Nextendo's own _feignedSockOpts behavior for the same option.
         std::optional<std::array<u8, 8>> vendor_linger_feigned;
+        // [OpenPak] Every other option the set side tolerated or has no host getter for, keyed by
+        // level << 32 | optname, so the matching get echoes what was set (ported from Eden).
+        std::map<u64, std::vector<u8>> feigned_sockopts;
         bool connected = false;
         // [Nextendo][DIAG] Set on a successful ConnectImpl -- lets ShutdownImpl log how long
         // this specific connection actually lived before the guest gave up on it, to check for
@@ -274,6 +277,10 @@ private:
     std::pair<s32, Errno> FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg);
     Errno GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& optval);
     Errno SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8> optval);
+    static void RememberFeignedSockOpt(FileDescriptor& descriptor, u32 level, OptName optname,
+                                       std::span<const u8> optval);
+    static void EchoFeignedSockOpt(const FileDescriptor& descriptor, u32 level, OptName optname,
+                                   std::vector<u8>& optval);
     Errno ShutdownImpl(s32 fd, s32 how);
     std::pair<s32, Errno> RecvImpl(s32 fd, u32 flags, std::vector<u8>& message);
     std::pair<s32, Errno> RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& message,

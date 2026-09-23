@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -523,6 +525,42 @@ void PutValue(std::span<u8> buffer, const T& t) {
     std::memcpy(buffer.data(), &t, std::min(sizeof(T), buffer.size()));
 }
 
+// [OpenPak] A guest sockaddr in either family's shape, as the host address this layer speaks.
+// IPv4 is {len, family=2, port, addr[4], zero[8]}; IPv6 is {len, family=28, port, flowinfo[4],
+// addr[16], scope_id[4]}, 28 bytes. An NPLN title's gRPC stack dials its dual-mode AF_INET6
+// socket with the v4-mapped form of the resolver's IPv4 answer, so the address is the mapped
+// tail; :: is "any" and ::1 is loopback. A genuine IPv6 address has nowhere to go here and is
+// refused (nullopt -> EAFNOSUPPORT), which is also what any other malformed size gets. Ported
+// from Eden, where refusing the family outright poisoned Stardew's whole gRPC channel.
+std::optional<Network::SockAddrIn> ParseGuestSockAddr(std::span<const u8> addr) {
+    constexpr size_t v6_size = 28;
+    if (addr.size() >= v6_size && addr[1] == static_cast<u8>(Domain::INET6)) {
+        Network::SockAddrIn result{};
+        result.family = Network::Domain::INET;
+        result.portno = static_cast<u16>(addr[2] << 8 | addr[3]);
+
+        const u8* const v6 = addr.data() + 8;
+        const bool leading_zeros = std::all_of(v6, v6 + 10, [](u8 byte) { return byte == 0; });
+        const bool mapped = leading_zeros && v6[10] == 0xff && v6[11] == 0xff;
+        const bool zero_tail = leading_zeros && v6[10] == 0 && v6[11] == 0 && v6[12] == 0 &&
+                               v6[13] == 0 && v6[14] == 0;
+        if (mapped) {
+            std::memcpy(result.ip.data(), v6 + 12, result.ip.size());
+        } else if (zero_tail && v6[15] == 0) {
+            result.ip = {0, 0, 0, 0};
+        } else if (zero_tail && v6[15] == 1) {
+            result.ip = {127, 0, 0, 1};
+        } else {
+            return std::nullopt;
+        }
+        return result;
+    }
+    if (addr.size() == sizeof(SockAddrIn)) {
+        return Translate(GetValue<SockAddrIn>(addr));
+    }
+    return std::nullopt;
+}
+
 class OfflineSocket final : public Network::SocketBase {
 public:
     Network::Errno Initialize(Network::Domain domain_, Network::Type type_,
@@ -897,12 +935,17 @@ void BSD::Poll(HLERequestContext& ctx) {
         std::vector<u8> write_buffer(ctx.GetWriteBufferSize());
         auto [ret, bsd_errno] = PollImpl(write_buffer, read_buffer, nfds, /*timeout=*/0);
 
-        // [Nextendo] Deadline expired while nothing became ready -- report ETIMEDOUT instead of
-        // deferring again, exactly like a real bounded poll() would once its time is up.
+        // [Nextendo] Deadline expired while nothing became ready -- answer zero ready
+        // descriptors instead of deferring again, exactly like a real bounded poll() once its
+        // time is up. [OpenPak] The pollfd array goes back too, every revents cleared, as Eden
+        // has it: the guest reads it whatever the count says.
         if (ret == 0 && bsd_errno == Errno::SUCCESS && existing_deadline &&
             std::chrono::steady_clock::now() >= *existing_deadline) {
             std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
             deferred_poll_snapshots.erase(&ctx);
+            if (write_buffer.size() > 0) {
+                ctx.WriteBuffer(write_buffer);
+            }
             IPC::ResponseBuilder rb{ctx, 4};
             rb.Push(ResultSuccess);
             rb.Push<s32>(0);
@@ -1089,7 +1132,15 @@ void BSD::SetSockOpt(HLERequestContext& ctx) {
     LOG_DEBUG(Service, "called. fd={} level={} optname=0x{:x} optlen={}", fd, level,
               static_cast<u32>(optname), optval.size());
 
-    BuildErrnoResponse(ctx, SetSockOptImpl(fd, level, optname, optval));
+    const Errno bsd_errno = SetSockOptImpl(fd, level, optname, optval);
+    if (bsd_errno != Errno::SUCCESS) {
+        // [OpenPak] Named, because a bare "not supported" says nothing about whether it matters.
+        // Ported from Eden.
+        LOG_WARNING(Service, "setsockopt fd={} level={:#x} optname={:#x} ({} bytes) failed: {}",
+                    fd, level, static_cast<u32>(optname), optval.size(),
+                    static_cast<u32>(bsd_errno));
+    }
+    BuildErrnoResponse(ctx, bsd_errno);
 }
 
 void BSD::Shutdown(HLERequestContext& ctx) {
@@ -1364,6 +1415,16 @@ void BSD::EventFd(HLERequestContext& ctx) {
     descriptor.is_connection_based = true; // enables Write()/Send() without an explicit dest
     descriptor.connected = true;
     descriptor.is_eventfd = true;
+
+    // [OpenPak] nn::socket::EventFdFlags: Semaphore = 1, NonBlocking = 4 (as Ryujinx numbers
+    // them). A non-blocking event fd must answer EAGAIN from a read with nothing pending, not
+    // park a bsdsocket worker thread until someone writes it.
+    constexpr u32 EventFdNonBlocking = 1u << 2;
+    if ((flags & EventFdNonBlocking) != 0) {
+        if (descriptor.socket->SetNonBlock(true) == Network::Errno::SUCCESS) {
+            descriptor.flags |= Network::FLAG_O_NONBLOCK;
+        }
+    }
 
     if (initval > 0) {
         const u64 seed = initval;
@@ -1774,6 +1835,9 @@ std::pair<s32, Errno> BSD::AcceptImpl(s32 fd, std::vector<u8>& write_buffer) {
     new_descriptor.is_connection_based = descriptor.is_connection_based;
 
     const SockAddrIn guest_addr_in = Translate(result.sockaddr_in);
+    if (write_buffer.size() > sizeof(guest_addr_in)) {
+        write_buffer.resize(sizeof(guest_addr_in)); // the IPv4 shape, even on a v6 listener
+    }
     PutValue(write_buffer, guest_addr_in);
 
     return {new_fd, Errno::SUCCESS};
@@ -1795,29 +1859,33 @@ Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
     // gRPC/NPLN stack does) need a clean, real EAFNOSUPPORT here to take that fallback path
     // properly -- garbage/EINVAL from a corrupted parse instead left the whole connection
     // sequence unable to ever complete or definitively fail, looping forever.
-    if (addr.size() != sizeof(SockAddrIn)) {
-        LOG_WARNING(Service, "Bind fd={} with unsupported address size={} (IPv6?), returning "
+    //
+    // [OpenPak] An IPv6 sockaddr is now read properly (see ParseGuestSockAddr): the socket is
+    // dual-mode, and only a genuine IPv6 address still gets the clean EAFNOSUPPORT.
+    const auto parsed_addr = ParseGuestSockAddr(addr);
+    if (!parsed_addr) {
+        LOG_WARNING(Service, "Bind fd={} with unsupported address (size={}), returning "
                               "EAFNOSUPPORT", fd, addr.size());
         return Errno::AFNOSUPPORT;
     }
-    auto addr_in = GetValue<SockAddrIn>(addr);
+    const Network::SockAddrIn host_addr = *parsed_addr;
 
-    LOG_INFO(Service, "Bind fd={} to {}:{}", fd, Network::IPv4AddressToRedactedString(addr_in.ip),
-             addr_in.portno);
+    LOG_INFO(Service, "Bind fd={} to {}:{}", fd,
+             Network::IPv4AddressToRedactedString(host_addr.ip), host_addr.portno);
 
     FileDescriptor& descriptor = *file_descriptors[fd];
-    if (descriptor.type == Network::Type::DGRAM && addr_in.portno > 0) {
-        auto [parked, queued] = TakeParkedUdpSocket(addr_in.portno);
+    if (descriptor.type == Network::Type::DGRAM && host_addr.portno > 0) {
+        auto [parked, queued] = TakeParkedUdpSocket(host_addr.portno);
         if (parked) {
             LOG_INFO(Service,
                      "[OpenPak] Reusing parked UDP socket for port {} ({} buffered datagram(s))",
-                     addr_in.portno, queued.size());
+                     host_addr.portno, queued.size());
             // Close the displaced socket, or every adopt leaks a host descriptor.
             if (descriptor.socket) {
                 descriptor.socket->Close();
             }
             descriptor.socket = std::move(parked);
-            descriptor.bound_port = addr_in.portno;
+            descriptor.bound_port = host_addr.portno;
             // Datagrams the drain thread caught while this socket sat parked go first, so
             // RecvFrom serves them before anything read live off the socket from here on.
             for (auto& datagram : queued) {
@@ -1825,10 +1893,10 @@ Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
             }
             return Errno::SUCCESS;
         }
-        descriptor.bound_port = addr_in.portno;
+        descriptor.bound_port = host_addr.portno;
     }
 
-    const auto result = Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
+    const auto result = Translate(file_descriptors[fd]->socket->Bind(host_addr));
     if (result != Errno::SUCCESS) {
         LOG_ERROR(Service, "Bind fd={} failed with errno={}", fd, static_cast<int>(result));
     }
@@ -1846,16 +1914,16 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
         return Errno::CONNREFUSED;
     }
 
-    // [Nextendo] See BindImpl's comment on the same size check -- an IPv6 sockaddr here hits
-    // the same unsupported-address-family case, and needs the same clean rejection rather than
-    // a misparsed connect target.
-    if (addr.size() != sizeof(SockAddrIn)) {
-        LOG_WARNING(Service, "Connect fd={} with unsupported address size={} (IPv6?), returning "
+    // [OpenPak] See BindImpl: a v4-mapped IPv6 sockaddr is dialled through the dual-mode
+    // socket; only a genuine IPv6 address gets the clean EAFNOSUPPORT rejection.
+    const auto parsed_addr = ParseGuestSockAddr(addr);
+    if (!parsed_addr) {
+        LOG_WARNING(Service, "Connect fd={} with unsupported address (size={}), returning "
                               "EAFNOSUPPORT", fd, addr.size());
         return Errno::AFNOSUPPORT;
     }
-    auto addr_in = GetValue<SockAddrIn>(addr);
-    auto translated_addr = Translate(addr_in);
+    auto translated_addr = *parsed_addr;
+    const Network::IPv4Address guest_ip = translated_addr.ip;
 
     // [Nextendo] Splatoon 3's gRPC stack loses the resolved address in its own connection
     // plumbing and calls connect() with a zeroed IP, keeping only the port it originally
@@ -1864,7 +1932,7 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
     // misfire on a P2P socket targeting another console's port -- that port was never part of
     // a redirect, so the lookup below returns nothing and the address is left untouched.
     static constexpr std::array<u8, 4> zero_addr{0, 0, 0, 0};
-    if (addr_in.ip == zero_addr && translated_addr.portno != 0) {
+    if (guest_ip == zero_addr && translated_addr.portno != 0) {
         if (const auto recovered = GetLastIpForPort(translated_addr.portno)) {
             LOG_INFO(Service,
                      "[OpenPak] Connect fd={} address was lost (zeroed), recovered {} for "
@@ -2040,8 +2108,9 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
         }
     }
 
-    LOG_INFO(Service, "Connect fd={} to {}:{}", fd,
-             Network::IPv4AddressToRedactedString(addr_in.ip), translated_addr.portno);
+    LOG_INFO(Service, "Connect fd={} to {}:{}{}", fd,
+             Network::IPv4AddressToRedactedString(guest_ip), translated_addr.portno,
+             addr.size() > sizeof(SockAddrIn) ? " (v4-mapped IPv6)" : "");
 
     const auto result = Translate(file_descriptors[fd]->socket->Connect(translated_addr));
     if (result == Errno::SUCCESS || result == Errno::INPROGRESS) {
@@ -2134,6 +2203,31 @@ std::pair<s32, Errno> BSD::FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg) {
     }
 }
 
+namespace {
+u64 FeignedSockOptKey(u32 level, OptName optname) {
+    return static_cast<u64>(level) << 32 | static_cast<u32>(optname);
+}
+} // Anonymous namespace
+
+void BSD::RememberFeignedSockOpt(FileDescriptor& descriptor, u32 level, OptName optname,
+                                 std::span<const u8> optval) {
+    descriptor.feigned_sockopts[FeignedSockOptKey(level, optname)].assign(optval.begin(),
+                                                                          optval.end());
+}
+
+void BSD::EchoFeignedSockOpt(const FileDescriptor& descriptor, u32 level, OptName optname,
+                             std::vector<u8>& optval) {
+    const auto stored = descriptor.feigned_sockopts.find(FeignedSockOptKey(level, optname));
+    if (stored != descriptor.feigned_sockopts.end() && !stored->second.empty()) {
+        optval.resize(std::min(optval.size(), stored->second.size()));
+        std::copy_n(stored->second.begin(), optval.size(), optval.begin());
+        return;
+    }
+    LOG_WARNING(Service, "(STUBBED) getsockopt level={:#x} optname={:#x} never set, echoing zeros",
+                level, static_cast<u32>(optname));
+    std::ranges::fill(optval, 0);
+}
+
 Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& optval) {
     if (!IsFileDescriptorValid(fd)) {
         return Errno::BADF;
@@ -2168,8 +2262,7 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
         // sets TCP_NODELAY / SO_REUSEADDR / etc. and reads them straight back; a set-ok / get-
         // EOPNOTSUPP mismatch made it close before connect." Echo back zeroed bytes of the
         // requested size rather than failing outright.
-        LOG_WARNING(Service, "(STUBBED) Unknown getsockopt level={}, echoing zeroed value", level);
-        std::ranges::fill(optval, 0);
+        EchoFeignedSockOpt(*file_descriptors[fd], level, optname, optval);
         return Errno::SUCCESS;
     }
 
@@ -2238,10 +2331,24 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
         return write_bool_opt(socket->GetKeepAlive());
     case OptName::BROADCAST:
         return write_bool_opt(socket->GetBroadcast());
+    case OptName::TYPE: {
+        // [OpenPak] The type the socket was created with, as the guest numbers it.
+        if (optval.size() < sizeof(u32)) {
+            return Errno::INVAL;
+        }
+        optval.resize(sizeof(u32));
+        PutValue(optval, static_cast<u32>(Translate(file_descriptors[fd]->type)));
+        return Errno::SUCCESS;
+    }
     default:
-        LOG_WARNING(Service, "(STUBBED) Unimplemented optname={} (0x{:x}), returning INVAL",
-                    static_cast<u32>(optname), static_cast<u32>(optname));
-        return Errno::INVAL;
+        // [OpenPak] Everything the set side tolerated or stored without a host getter (SNDBUF,
+        // RCVBUF, the timeouts, NOSIGPIPE and any option this build does not know) is echoed
+        // back as it was set -- zeros if it never was -- with SUCCESS. A title's network stack
+        // (NPLN's gRPC above all) sets an option and reads it straight back before trusting the
+        // socket; a set that answers SUCCESS and a get that answers INVAL reads as a broken
+        // socket and the connection is abandoned. Ported from Eden.
+        EchoFeignedSockOpt(*file_descriptors[fd], level, optname, optval);
+        return Errno::SUCCESS;
     }
 }
 
@@ -2263,7 +2370,11 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
     }
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
-        LOG_WARNING(Service, "(STUBBED) Unknown setsockopt level={}, returning SUCCESS for compatibility", level);
+        LOG_WARNING(Service,
+                    "(STUBBED) Unknown setsockopt level={} optname={:#x}, remembered and "
+                    "returning SUCCESS for compatibility",
+                    level, static_cast<u32>(optname));
+        RememberFeignedSockOpt(*file_descriptors[fd], level, optname, optval);
         return Errno::SUCCESS;
     }
 
@@ -2324,9 +2435,10 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
     default:
         if (static_cast<u32>(optname) != 0x200 && optname != OptName::BROADCAST) {
             LOG_WARNING(Service,
-                        "(STUBBED) Unimplemented optname={} (0x{:x}) optlen={}, "
-                        "returning SUCCESS for compatibility",
+                        "(STUBBED) Unimplemented optname={} (0x{:x}) optlen={}, remembered "
+                        "and returning SUCCESS for compatibility",
                         static_cast<u32>(optname), static_cast<u32>(optname), optval.size());
+            RememberFeignedSockOpt(descriptor, level, optname, optval);
             return Errno::SUCCESS;
         }
         break;
@@ -2358,16 +2470,28 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
         }
         return Translate(socket->SetKeepAlive(value != 0));
     case OptName::SNDBUF:
-        return Translate(socket->SetSndBuf(value));
     case OptName::RCVBUF:
-        return Translate(socket->SetRcvBuf(value));
     case OptName::SNDTIMEO:
-        return Translate(socket->SetSndTimeo(value));
     case OptName::RCVTIMEO:
-        return Translate(socket->SetRcvTimeo(value));
-    case OptName::NOSIGPIPE:
-        LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
-        return Errno::SUCCESS;
+    case OptName::NOSIGPIPE: {
+        // These have no host getter here, so what was set is what a later get reads back.
+        Errno result = Errno::SUCCESS;
+        if (optname == OptName::SNDBUF) {
+            result = Translate(socket->SetSndBuf(value));
+        } else if (optname == OptName::RCVBUF) {
+            result = Translate(socket->SetRcvBuf(value));
+        } else if (optname == OptName::SNDTIMEO) {
+            result = Translate(socket->SetSndTimeo(value));
+        } else if (optname == OptName::RCVTIMEO) {
+            result = Translate(socket->SetRcvTimeo(value));
+        } else {
+            LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
+        }
+        if (result == Errno::SUCCESS) {
+            RememberFeignedSockOpt(descriptor, level, optname, optval);
+        }
+        return result;
+    }
     default:
         // Unreachable: non-4-byte-payload unknown optnames already returned above, and every
         // recognized case is handled explicitly.
@@ -2549,7 +2673,10 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         std::copy_n(buffered_data.begin(), ret, message.begin());
 
         if (p_addr_in) {
-            ASSERT(addr.size() == sizeof(SockAddrIn));
+            // A dual-mode v6 socket offers room for a sockaddr_in6; the peer is answered in the
+            // IPv4 shape this layer speaks, with its own length.
+            ASSERT(addr.size() >= sizeof(SockAddrIn));
+            addr.resize(sizeof(SockAddrIn));
             PutValue(addr, Translate(buffered_addr));
             LOG_DEBUG(Service, "RecvFrom fd={} <- {}:{} len={} (buffered) {}", fd,
                       Network::IPv4AddressToRedactedString(buffered_addr.ip),
@@ -2597,7 +2724,8 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         if (ret < 0) {
             addr.clear();
         } else {
-            ASSERT(addr.size() == sizeof(SockAddrIn));
+            ASSERT(addr.size() >= sizeof(SockAddrIn));
+            addr.resize(sizeof(SockAddrIn));
             const SockAddrIn result = Translate(addr_in);
             PutValue(addr, result);
             LOG_DEBUG(Service, "RecvFrom fd={} <- {}:{} len={} {}", fd,
@@ -2736,9 +2864,13 @@ std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> mes
     Network::SockAddrIn addr_in;
     Network::SockAddrIn* p_addr_in = nullptr;
     if (!addr.empty()) {
-        ASSERT(addr.size() == sizeof(SockAddrIn));
-        auto guest_addr_in = GetValue<SockAddrIn>(addr);
-        addr_in = Translate(guest_addr_in);
+        const auto parsed_addr = ParseGuestSockAddr(addr);
+        if (!parsed_addr) {
+            LOG_WARNING(Service, "SendTo fd={} with unsupported address (size={})", fd,
+                        addr.size());
+            return {-1, Errno::AFNOSUPPORT};
+        }
+        addr_in = *parsed_addr;
         p_addr_in = &addr_in;
     }
 
@@ -3404,10 +3536,13 @@ void BSD::SendMMsg(HLERequestContext& ctx) {
     MMsgSerialize(write_buffer, messages);
     ctx.WriteBuffer(write_buffer);
 
+    // [OpenPak] sendmmsg(2): a failure before any message went is -1 with the error; after at
+    // least one, the count and no error. Answering 0 with an errno is "nothing sent, nothing
+    // wrong" to the caller. As Eden answers.
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
-    rb.Push<s32>(processed);
-    rb.PushEnum(last_errno);
+    rb.Push<s32>(processed > 0 || last_errno == Errno::SUCCESS ? processed : -1);
+    rb.PushEnum(processed > 0 ? Errno::SUCCESS : last_errno);
 }
 
 void BSD::RecvMMsg(HLERequestContext& ctx) {
@@ -3474,7 +3609,12 @@ void BSD::RecvMMsg(HLERequestContext& ctx) {
             LOG_INFO(Service, "[OpenPak][SCHED-WATCH] RecvMMsg (pre-recv) on thread id={} prio={}",
                      cur ? cur->GetThreadId() : 0, cur ? cur->GetPriority() : -1);
         }
-        auto [ret, recv_errno] = RecvImpl(fd, flags | msg.flags, received);
+        // [OpenPak] Only the first message may wait. The ones after it take what is already
+        // there, the way MSG_WAITFORONE reads: a stream reply that fits in the first message
+        // must not park the call (and a bsdsocket thread) waiting for bytes nobody is sending.
+        const u32 recv_flags =
+            flags | msg.flags | (processed > 0 ? Network::FLAG_MSG_DONTWAIT : 0u);
+        auto [ret, recv_errno] = RecvImpl(fd, recv_flags, received);
         if (recv_errno != Errno::SUCCESS) {
             LOG_INFO(Service, "RecvMMsg fd={} capacity={}: recv_errno={}", fd, capacity,
                      static_cast<int>(recv_errno));
@@ -3497,16 +3637,24 @@ void BSD::RecvMMsg(HLERequestContext& ctx) {
         }
         msg.length = static_cast<u32>(actual);
         ++processed;
+        if (actual < capacity && IsFileDescriptorValid(fd) &&
+            file_descriptors[fd]->is_connection_based) {
+            // A short stream read: whatever was waiting has been taken.
+            break;
+        }
     }
 
     std::vector<u8> write_buffer;
     MMsgSerialize(write_buffer, messages);
     ctx.WriteBuffer(write_buffer);
 
+    // [OpenPak] recvmmsg(2): -1 with the error only when no message was received; 0 with an
+    // errno reads as a clean end of stream, and a gRPC transport closes the channel on it. A
+    // failure after the first message is the next call's to report. As Eden answers.
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
-    rb.Push<s32>(processed);
-    rb.PushEnum(last_errno);
+    rb.Push<s32>(processed > 0 || last_errno == Errno::SUCCESS ? processed : -1);
+    rb.PushEnum(processed > 0 ? Errno::SUCCESS : last_errno);
 }
 
 void BSD::SetThreadCoreMask(HLERequestContext& ctx) {
