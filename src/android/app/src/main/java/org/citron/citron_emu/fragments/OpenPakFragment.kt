@@ -181,6 +181,7 @@ class OpenPakFragment : DialogFragment() {
                     confirm(getString(R.string.openpak_sign_out_confirm)) {
                         lifecycleScope.launch {
                             OpenPak.signOut()
+                            toast(getString(R.string.openpak_signed_out))
                             showSection(0)
                         }
                     }
@@ -302,8 +303,11 @@ class OpenPakFragment : DialogFragment() {
         }
         val running = list.optString("running")
         val requests = list.optJSONArray("requests") ?: JSONArray()
-        if (requests.length() > 0) {
-            addHeader(getString(R.string.openpak_friend_requests))
+        addHeader(getString(R.string.openpak_friend_requests))
+        if (requests.length() == 0) {
+            addText(getString(R.string.openpak_friends_requests_empty), dim = true)
+        }
+        run {
             requests.forEachObject { request ->
                 val incoming = request.optBoolean("incoming")
                 addRow(
@@ -321,15 +325,15 @@ class OpenPakFragment : DialogFragment() {
             }
         }
         val friends = list.optJSONArray("friends") ?: JSONArray()
-        addHeader(getString(R.string.openpak_friends_count, friends.length()))
+        addHeader(getString(R.string.openpak_friends_list))
         if (friends.length() == 0) {
-            addText(getString(R.string.openpak_no_friends), dim = true)
+            addText(getString(R.string.openpak_friends_empty), dim = true)
         }
         friends.forEachObject { friend ->
             val game = friend.optString("game")
             val state = when {
                 friend.optBoolean("online") && game.isNotEmpty() ->
-                    getString(R.string.openpak_toast_playing, "", game).trim()
+                    getString(R.string.openpak_friends_playing, game)
                 friend.optBoolean("online") -> getString(R.string.openpak_state_online)
                 else -> getString(R.string.openpak_state_offline)
             }
@@ -362,7 +366,12 @@ class OpenPakFragment : DialogFragment() {
             .setTitle(R.string.openpak_add_friend)
             .setView(OpenPakUi.frame(requireActivity(), code))
             .setPositiveButton(R.string.openpak_send_request) { _, _ ->
-                friendAction("add", JSONObject().put("code", code.text.toString().trim()))
+                val typed = code.text.toString().trim()
+                if (typed.isEmpty()) {
+                    toast(getString(R.string.openpak_friends_no_code))
+                } else {
+                    friendAction("add", JSONObject().put("code", typed))
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -372,7 +381,15 @@ class OpenPakFragment : DialogFragment() {
         val args = JSONObject(target.toString()).put("action", action)
         lifecycleScope.launch {
             val error = OpenPak.action("friend_action", args)
-            toast(error.ifEmpty { getString(R.string.openpak_done) })
+            toast(
+                error.ifEmpty {
+                    if (action == "add") {
+                        getString(R.string.openpak_friends_added, target.optString("code"))
+                    } else {
+                        getString(R.string.openpak_done)
+                    }
+                }
+            )
             if (isAdded) showSection(1)
         }
     }
@@ -389,8 +406,9 @@ class OpenPakFragment : DialogFragment() {
         list.forEachObject { invitation ->
             val message = invitation.optString("message")
             addRow(
-                getString(R.string.openpak_invited_you, invitation.optString("from"), invitation.optString("game")),
-                message.ifEmpty { getString(R.string.openpak_invitation_hint) }
+                invitation.optString("game"),
+                getString(R.string.openpak_invitations_from, invitation.optString("from")) +
+                    if (message.isEmpty()) "" else "\n$message"
             )
             val answer = { action: String ->
                 lifecycleScope.launch {
@@ -405,11 +423,11 @@ class OpenPakFragment : DialogFragment() {
             }
             if (invitation.optBoolean("joinable")) {
                 addButtons(
-                    getString(R.string.openpak_join) to { answer("join") },
-                    getString(R.string.openpak_dismiss) to { answer("dismiss") }
+                    getString(R.string.openpak_play) to { answer("join") },
+                    getString(R.string.openpak_decline) to { answer("dismiss") }
                 )
             } else {
-                addButtons(getString(R.string.openpak_dismiss) to { answer("dismiss") })
+                addButtons(getString(R.string.openpak_decline) to { answer("dismiss") })
             }
         }
     }
@@ -464,7 +482,9 @@ class OpenPakFragment : DialogFragment() {
                     .put("newest", title.optInt("newest"))
                 addButtons(
                     getString(R.string.openpak_download) to {
-                        confirm(getString(R.string.openpak_download_confirm)) { saveAction("download", args) }
+                        confirm(getString(R.string.openpak_download_confirm, title.optString("name"))) {
+                            saveAction("download", args)
+                        }
                     },
                     getString(R.string.openpak_upload) to { saveAction("upload", args) }
                 )

@@ -247,7 +247,7 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
         listOf(signIn, create, offline).forEach { layout.addView(it) }
 
         val builder = MaterialAlertDialogBuilder(activity)
-            .setTitle(if (addAccount) R.string.openpak_add_account else R.string.openpak_setup_title)
+            .setTitle(if (addAccount) R.string.openpak_setup_add_title else R.string.openpak_setup_title)
             .setView(layout)
             .setCancelable(false)
         if (addAccount) {
@@ -386,7 +386,7 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
         layout.addView(password)
 
         MaterialAlertDialogBuilder(activity)
-            .setTitle(R.string.openpak_sign_in)
+            .setTitle(R.string.openpak_sign_in_title)
             .setView(layout)
             .setPositiveButton(R.string.openpak_sign_in) { _, _ ->
                 val address = email.text.toString().trim()

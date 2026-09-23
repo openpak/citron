@@ -989,11 +989,12 @@ void OpenPakPullSaveBeforeLaunch(u64 title_id) {
     }
     switch (Nextendo::SaveSync::PullBeforeLaunch(SaveDirectory(title_id), title_id)) {
     case Nextendo::SaveSync::PullOutcome::Pulled:
-        Message(fmt::format("Your cloud save for {} is here.", GameName(title_id)));
+        Message(fmt::format("Cloud save for {} downloaded; the previous local copy was kept beside it.",
+                            GameName(title_id)));
         break;
     case Nextendo::SaveSync::PullOutcome::BothExist:
-        Message(fmt::format("{} has a save here and one in the cloud; nothing was changed. Choose "
-                            "one under OpenPak, Cloud saves.",
+        Message(fmt::format("{} has a save both here and in the cloud. Choose one on the OpenPak "
+                            "Cloud saves page.",
                             GameName(title_id)));
         break;
     case Nextendo::SaveSync::PullOutcome::Nothing:
@@ -1012,7 +1013,8 @@ void OpenPakPushSaveAfterExit(u64 title_id) {
     }
     std::thread{[directory, title_id, zip = std::move(zip)]() mutable {
         const std::string error = Nextendo::SaveSync::PushCaptured(directory, title_id, std::move(zip));
-        Message(error.empty() ? fmt::format("{} saved to the cloud.", GameName(title_id)) : error);
+        Message(error.empty() ? fmt::format("Save for {} uploaded to OpenPak.", GameName(title_id))
+                              : error);
     }}.detach();
 }
 
