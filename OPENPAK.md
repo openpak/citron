@@ -6,8 +6,9 @@ It started life as the Nextendo Network edition of Citron, and the shared client
 extracted from that integration; since 2026-09-23 Citron consumes the library exactly as Eden
 does. The integration is `openpak-client` vendored at `externals/openpak-client` (client half
 linked into core, Qt dialogs into the frontend), hosted by `OpenPakHost`
-(`src/citron/openpak_host.*`, ported from Eden's). Builds are the upstream-style continuous
-builds (`.github/workflows/build-{linux,windows,macos,android}.yml`); no `openpak-v*` tag yet.
+(`src/citron/openpak_host.*`, ported from Eden's). Ryujinx is the reference for the Switch
+integration (`emulators/prds/emulator-integration-prd.md` §2a): whatever lands there is ported to
+Eden and here, through the library wherever it can be.
 
 Surfaces:
 
@@ -32,8 +33,13 @@ Surfaces:
 - **Invitations** — an invitation to the running game asks Join or Ignore; Join leaves it in
   the game's friend invitation channel (`AppletManager::PushFriendInvitation`). A game sends
   them through MyPage, which with OpenPak on is always OpenPak's frontend applet
-  (`am/frontend/applet_my_page.*` over `openpak::my_page`), with the Qt friend picker
-  (`src/citron/openpak_friend_picker.*`) for "invite friends"; friend:m 30900/30901 send too.
+  (`am/frontend/applet_my_page.*` over `openpak::my_page`), with the library's friend picker
+  (`openpak/qt/friend_picker.h`, the same one Eden uses) for "invite friends"; friend:m
+  30900/30901 send too.
+- **Controller** — the OpenPak window and the friend picker take Citron's controller navigation
+  (`OpenPakHost::CreateNavigation` over `util/controller_navigation.*`: D-pad/stick, A, B, L/R
+  for pages), and the game's input is suspended while they are up; mouse and keyboard work as
+  before.
 - **Toasts** — a friend coming online or starting a game, a friend request, a game invitation.
 - **Online status** — the list's OpenPak pill, the carousel's badge and the details panel show
   the catalogue's live/beta/alpha (`openpak::compatibility`, refreshed from the site at startup;
@@ -42,15 +48,33 @@ Surfaces:
 - **Cloud saves** — pulled before a title boots and pushed when it stops, every title, from the
   active profile's save folder, versioned (the Cloud saves page resolves conflicts).
 - **Redirection** — Nintendo's online hostnames resolve to the OpenPak server, following the
-  network profile OpenPak publishes (built-in wildcards until one is loaded). The NAT check's
-  second probe goes to OpenPak's second responder.
-- **Certificates** — guest TLS trusts the OpenPak CA and verifies as the title asks (OpenSSL
-  backend; the Windows Schannel backend does not verify).
+  network profile OpenPak publishes (`openpak::NetworkProfile`, fetched at the first sign-in,
+  cached; built-in wildcards until one is loaded). The NAT check's second probe goes to
+  OpenPak's second responder.
+- **Certificates** — guest TLS trusts the OpenPak CA in addition to the system roots and
+  verifies as the title asks, by IP SAN when the title names an address. Every CI build uses the
+  OpenSSL backend (`ENABLE_OPENSSL=ON`); the Schannel backend, used only by a Windows build
+  without OpenSSL, applies the same rules (not yet compiled or run on Windows). The macOS
+  SecureTransport backend, likewise only without OpenSSL, still does not verify.
+- **The title online path** — nsd, getaddrinfo, the BSD socket layer, nifm and ssl as a title's
+  own online stack (NEX, NPLN/gRPC, Photon) needs them; compared with Eden's function by
+  function below. Stardew Valley 1.6.15.13 gets the build-scoped patch of its own X509 check
+  (`core/loader/nso.cpp`), as in Ryujinx and Eden.
 
-The library is pinned at 3a4d5d4 (the seven-page account window). Environment overrides: `OPENPAK_SERVER_IP`,
-`OPENPAK_NAT_IP`, `OPENPAK_API` (https or loopback only), `OPENPAK_ENABLE`, `OPENPAK_NO_CERT=1`,
-`OPENPAK_CHAT_HOST`/`OPENPAK_CHAT_PORT`, and the research redirects in `sfdnsres.cpp`. The
-Android frontend has no OpenPak code.
+Settings: `enable_openpak`, `openpak_server_ip`, `openpak_nat_ip`. Environment overrides:
+`OPENPAK_SERVER_IP`, `OPENPAK_NAT_IP`, `OPENPAK_API` (https or loopback only), `OPENPAK_ENABLE`,
+`OPENPAK_NO_CERT=1`, `OPENPAK_CHAT_HOST`/`OPENPAK_CHAT_PORT`, `OPENPAK_PHOTON_IP`; tracing:
+`CITRON_SSL_TRACE=1` (guest TLS in the clear), `SSLKEYLOGFILE`; and the research redirects and
+probes (`NEXTENDO_*`) in `sfdnsres.cpp` and `bsd.cpp`, all off unless set.
+
+## Builds and releases
+
+Continuous builds from `main`: `.github/workflows/build-linux.yml` builds this tree (x86_64,
+x86_64-v3, and aarch64 under qemu, all on the self-hosted runner) and attaches the AppImages to
+the `nightly-linux` release without artifacts; the release step runs for whichever legs made it.
+`build-windows.yml` and `build-macos.yml` publish their own nightlies the same way (GitHub-hosted
+runners). No `openpak-v*` tag yet. Local desktop build: `build-openpak/` (system libraries,
+nlohmann_json in `build-openpak/deps`).
 
 PRDs: [`../prds/`](../prds/README.md) — emulator-wide PRDs live at `emulators/prds/` in the
 workspace.
