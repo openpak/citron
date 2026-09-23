@@ -76,10 +76,10 @@ static bool OpenPakSignedIn(Core::System& system, const Common::UUID& user) {
         // way, and the command-line frontend has nothing that would.
         openpak::client::session::Configure(Settings::values.openpak_server_ip.GetValue(), 443, {});
 
-        // What the console redirects and where, from OpenPak itself. The stored copy is loaded
-        // first so a launch without network still redirects.
-        openpak::client::profile::Load();
-        void(openpak::client::profile::Refresh({}, "switch"));
+        // What the console redirects and where, from OpenPak itself: one conditional GET, and
+        // the stored copy (or the built-in list) when OpenPak cannot be reached, so a launch
+        // without network still redirects.
+        void(openpak::NetworkProfile::Fetch("switch"));
     });
 
     // Bind the login to the asking title first. A console's baas login carries an
