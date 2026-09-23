@@ -12,15 +12,15 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/errors.h"
-#include "common/openpak_account.h"
-#include "common/nextendo_friends.h"
+#include "openpak/account.h"
+#include "openpak/friends_cache.h"
 #include "common/nextendo_nat.h"
 #include "core/hle/service/friend/friend.h"
 #include "core/hle/service/friend/friend_interface.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/server_manager.h"
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 
 // [UNITY-FIX] undef Win32 macros shadowing ServiceContext methods.
 #undef CreateEvent

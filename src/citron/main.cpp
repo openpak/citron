@@ -174,8 +174,8 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "citron/nextendo_save_sync.h"
 #include "citron/nextendo_toast.h"
 #include "citron/play_time_manager.h"
-#include "common/openpak_account.h"
-#include "common/nextendo_friends.h"
+#include "openpak/account.h"
+#include "openpak/friends_cache.h"
 #include "citron/startup_checks.h"
 #include "citron/uisettings.h"
 #include "citron/theme.h"
@@ -183,7 +183,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "common/settings.h"
 #ifdef ENABLE_WEB_SERVICE
 #include "web_service/mk8d_country_flags.h"
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 #include "web_service/ssbu_mod_installer.h"
 #endif
 #include "common/string_util.h"

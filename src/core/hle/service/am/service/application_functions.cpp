@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "common/nextendo_friends.h"
+#include "openpak/friends_cache.h"
 #include "common/settings.h"
 #include "common/uuid.h"
 #include "core/file_sys/control_metadata.h"

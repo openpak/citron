@@ -10,7 +10,7 @@
 #include <QTimer>
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 #endif
 
 namespace Nextendo::NzpOnlineCount {

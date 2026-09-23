@@ -9,7 +9,6 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
-#include "common/openpak_account.h"
 #include <ranges>
 #include "common/settings.h"
 #include "common/string_util.h"
@@ -47,10 +46,7 @@ ProfileManager::ProfileManager() {
 
     // Create an user if none are present
     if (user_count == 0) {
-        const std::string default_username = Common::OpenPakAccount::IsLinked()
-                                                  ? Common::OpenPakAccount::GetUsername()
-                                                  : "citron";
-        CreateNewUser(UUID::MakeRandom(), default_username);
+        CreateNewUser(UUID::MakeRandom(), "citron");
         WriteUserSaveFile();
     }
 
@@ -64,22 +60,6 @@ ProfileManager::ProfileManager() {
     }
 
     OpenUser(*GetUser(current));
-
-    // [Nextendo] The default/existing profile username has no relation to the linked Nextendo
-    // account (it's "citron" on first launch, or whatever was saved before a link happened), but
-    // acc:*'s GetProfileBase is what games query for the local player's own name -- Super Mario
-    // Odyssey's Balloon World renders this directly, so keep it in sync with the real account.
-    if (Common::OpenPakAccount::IsLinked()) {
-        const auto uuid = GetUser(current);
-        ProfileBase base{};
-        if (uuid && GetProfileBase(*uuid, base)) {
-            const auto username = Common::OpenPakAccount::GetUsername();
-            base.username.fill(0);
-            const auto len = std::min(username.size(), base.username.size() - 1);
-            std::memcpy(base.username.data(), username.data(), len);
-            SetProfileBase(*uuid, base);
-        }
-    }
 }
 
 ProfileManager::~ProfileManager() = default;

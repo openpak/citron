@@ -37,7 +37,8 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
-#include "common/openpak_account.h"
+#include "openpak/account.h"
+#include "openpak/platform.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "common/string_util.h"
@@ -165,7 +166,15 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 struct System::Impl {
     explicit Impl(System& system)
         : kernel{system}, fs_controller{system}, hid_core{}, room_network{}, cpu_manager{system},
-          reporter{system}, applet_manager{system}, frontend_applets{system}, profile_manager{} {}
+          reporter{system}, applet_manager{system}, frontend_applets{system}, profile_manager{} {
+        // [OpenPak] The shared client keeps the account, the device account and the CA under
+        // Citron's own config directory, where the in-tree copy kept them. Set here, before any
+        // service or frontend asks, so every frontend -- the command-line one included -- reads
+        // the same files.
+        openpak::Platform::SetDirectories(
+            Common::FS::GetCitronPath(Common::FS::CitronPath::ConfigDir),
+            Common::FS::GetCitronPath(Common::FS::CitronPath::CacheDir));
+    }
 
     void Initialize(System& system) {
         // Only create the memory bucket if it literally does not exist (First launch)

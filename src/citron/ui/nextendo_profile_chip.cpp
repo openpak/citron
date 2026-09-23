@@ -12,11 +12,11 @@
 
 #include "citron/nextendo_avatar_cache.h"
 #include "citron/uisettings.h"
-#include "common/openpak_account.h"
-#include "common/nextendo_avatar.h"
+#include "openpak/account.h"
+#include "openpak/avatar.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 #endif
 
 namespace {

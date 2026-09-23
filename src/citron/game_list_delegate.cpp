@@ -36,12 +36,12 @@
 #include "citron/game_list.h"
 #include "citron/game_list_delegate.h"
 #include "citron/game_list_p.h"
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "citron/nextendo_online_counts.h"
 #include "citron/nzp_online_count.h"
 #include "citron/uisettings.h"
 #include "citron/util/image_cache.h"
-#include "common/openpak_account.h"
+#include "openpak/account.h"
 
 namespace {
 void DrawShadowedText(QPainter* painter, const QRect& rect, int flags, const QString& text,

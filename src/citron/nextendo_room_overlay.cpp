@@ -26,7 +26,7 @@
 #include "citron/nextendo_controller.h"
 #include "citron/nextendo_room_overlay.h"
 #include "citron/uisettings.h"
-#include "common/openpak_account.h"
+#include "openpak/account.h"
 
 NextendoRoomOverlay::NextendoRoomOverlay(QWidget* parent, NextendoController* controller_)
     : QWidget(parent), controller(controller_) {

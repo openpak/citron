@@ -54,13 +54,13 @@
 #include <QVBoxLayout>
 
 #include "common/fs/path_util.h"
-#include "common/openpak_account.h"
-#include "common/nextendo_outgoing_requests.h"
+#include "openpak/account.h"
+#include "openpak/outgoing_requests.h"
 #include "common/settings.h"
 #include "citron/nextendo_account_dialog.h"
 #include "citron/nextendo_account_page_p.h"
 #include "citron/nextendo_avatar_cache.h"
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "citron/nextendo_controller.h"
 #include "citron/nextendo_friend_delegate.h"
 #include "citron/nextendo_history_delegate.h"
@@ -71,7 +71,7 @@
 #include "hid_core/hid_core.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 #endif
 
 namespace {

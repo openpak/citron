@@ -21,10 +21,10 @@
 #include "citron/theme.h"
 #include "citron/uisettings.h"
 #include "citron/custom_metadata.h"
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "citron/nextendo_online_counts.h"
 #include "citron/util/image_cache.h"
-#include "common/openpak_account.h"
+#include "openpak/account.h"
 
 GameDetailsPanel::GameDetailsPanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("GameDetailsPanel"));

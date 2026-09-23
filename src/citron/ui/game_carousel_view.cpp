@@ -25,11 +25,11 @@
 #include "citron/uisettings.h"
 #include "citron/theme.h"
 #include "citron/custom_metadata.h"
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "citron/nextendo_ldn_counts.h"
 #include "citron/nextendo_online_counts.h"
 #include "citron/util/image_cache.h"
-#include "common/openpak_account.h"
+#include "openpak/account.h"
 
 namespace {
 constexpr int kBackdropPickerRowH = 40;

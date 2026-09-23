@@ -19,9 +19,9 @@
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
-#include "common/openpak_account.h"
-#include "common/nextendo_avatar.h"
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/account.h"
+#include "openpak/avatar.h"
+#include "openpak/compatible_titles.h"
 #include "common/settings.h"
 #include <ranges>
 #include "common/stb.h"

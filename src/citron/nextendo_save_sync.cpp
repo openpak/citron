@@ -14,16 +14,16 @@
 
 #include <fmt/format.h>
 
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "common/logging.h"
-#include "common/openpak_account.h"
+#include "openpak/account.h"
 #include "core/core.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/filesystem/filesystem.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 #endif
 
 #ifdef CITRON_ENABLE_LIBARCHIVE

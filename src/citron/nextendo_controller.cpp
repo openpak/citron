@@ -22,21 +22,21 @@
 
 #include "common/fs/path_util.h"
 #include "common/logging.h"
-#include "common/openpak_account.h"
-#include "common/nextendo_friends.h"
+#include "openpak/account.h"
+#include "openpak/friends_cache.h"
 #include "core/core.h"
 #include "core/hle/service/friend/friend.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/acc/profile_manager.h"
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "citron/nextendo_chat_client.h"
 #include "citron/nextendo_controller.h"
 #include "citron/nextendo_save_sync.h"
 
 #ifdef ENABLE_WEB_SERVICE
-#include "web_service/openpak_api.h"
+#include "openpak/api.h"
 #endif
 
 NextendoController::NextendoController(Core::System& system_, QWidget* main_window_,

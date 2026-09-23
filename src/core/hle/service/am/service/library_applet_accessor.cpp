@@ -6,7 +6,7 @@
 #include <algorithm>
 
 #include "core/hle/service/am/applet_data_broker.h"
-#include "common/nextendo_friends.h"
+#include "openpak/friends_cache.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/am/frontend/applets.h"
 #include "core/hle/service/am/service/library_applet_accessor.h"

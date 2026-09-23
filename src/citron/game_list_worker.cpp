@@ -26,7 +26,7 @@
 #include "citron/game_list.h"
 #include "citron/game_list_p.h"
 #include "citron/game_list_worker.h"
-#include "common/nextendo_compatible_titles.h"
+#include "openpak/compatible_titles.h"
 #include "citron/uisettings.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"

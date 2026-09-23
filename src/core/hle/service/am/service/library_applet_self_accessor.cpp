@@ -4,8 +4,8 @@
 #include <algorithm>
 
 #include "common/hex_util.h"
-#include "common/nextendo_friends.h"
-#include "web_service/openpak_api.h"
+#include "openpak/friends_cache.h"
+#include "openpak/api.h"
 #include "core/core_timing.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
