@@ -10,6 +10,7 @@
 #include <QActionGroup>
 #include <QByteArray>
 #include <QDesktopServices>
+#include <vector>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -52,6 +53,7 @@
 #include "openpak/platform.h"
 #include "openpak/session.h"
 #include "openpak/qt/chat_client.h"
+#include "openpak/qt/account_dialog.h"
 #include "openpak/qt/save_sync.h"
 #include "openpak/qt/sign_in_dialog.h"
 
@@ -1118,4 +1120,94 @@ openpak::qt::Navigation* OpenPakHost::CreateNavigation(QObject* parent) {
         return nullptr;
     }
     return new OpenPakNavigation(system.HIDCore(), owner);
+}
+
+// The OpenPak menu as the UX spec has it (emulators/prds/openpak-ux-spec.md §3.1): the same ten
+// items, order and words in every emulator. States are recomputed each time the menu opens.
+void OpenPakHost::PopulateMenu(QMenu* menu, std::function<void(int)> open_window,
+                               std::function<void()> open_settings) {
+    menu->clear();
+    menu->setTitle(tr("&OpenPak"));
+
+    QAction* header = menu->addAction(tr("Sign in to OpenPak..."));
+    menu->addSeparator();
+
+    struct PageItem {
+        const char* text;
+        int page;
+        bool needs_account;
+    };
+    static constexpr PageItem pages[] = {
+        {QT_TR_NOOP("Friends"), OpenPakAccountDialog::kFriendsPage, true},
+        {QT_TR_NOOP("Invitations"), OpenPakAccountDialog::kInvitationsPage, true},
+        {QT_TR_NOOP("Cloud saves"), OpenPakAccountDialog::kCloudSavesPage, true},
+        {QT_TR_NOOP("Mods"), OpenPakAccountDialog::kModsPage, false},
+        {QT_TR_NOOP("News"), OpenPakAccountDialog::kNewsPage, false},
+        {QT_TR_NOOP("Status"), OpenPakAccountDialog::kStatusPage, false},
+    };
+    std::vector<std::pair<QAction*, bool>> page_actions;
+    for (const PageItem& item : pages) {
+        QAction* action = menu->addAction(tr(item.text));
+        connect(action, &QAction::triggered, this,
+                [open_window, page = item.page] { open_window(page); });
+        page_actions.emplace_back(action, item.needs_account);
+    }
+    menu->addSeparator();
+    QAction* settings = menu->addAction(tr("OpenPak settings..."));
+    QAction* website = menu->addAction(tr("OpenPak website"));
+    QAction* sign_out = menu->addAction(tr("Sign out..."));
+
+    connect(header, &QAction::triggered, this, [this, open_window, open_settings] {
+        if (!Settings::values.enable_openpak.GetValue()) {
+            open_settings();
+        } else if (IsLinked()) {
+            open_window(OpenPakAccountDialog::kAccountPage);
+        } else {
+            SignIn();
+        }
+    });
+    connect(settings, &QAction::triggered, this, [open_settings] { open_settings(); });
+    connect(website, &QAction::triggered, this, [] {
+        QDesktopServices::openUrl(
+            QUrl(QString::fromStdString(WebService::OpenPakApi::BaseUrl())));
+    });
+    connect(sign_out, &QAction::triggered, this, [this, menu] {
+        // §3.5. The library's shared confirmation replaces this box when it lands (spec L6).
+        QMessageBox box(QMessageBox::Question, tr("Sign out of OpenPak?"),
+                        tr("%1 goes offline on this emulator. Your friends, invitations and "
+                           "cloud saves stay on your account, and you can sign in again at any "
+                           "time.")
+                            .arg(ProfileName(openpak::Platform::ProfileId())),
+                        QMessageBox::NoButton, menu->parentWidget());
+        QPushButton* confirm = box.addButton(tr("Sign out"), QMessageBox::DestructiveRole);
+        QPushButton* cancel = box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(cancel);
+        box.setEscapeButton(cancel);
+        box.exec();
+        if (box.clickedButton() == confirm) {
+            SignOut();
+        }
+    });
+
+    connect(menu, &QMenu::aboutToShow, this, [this, header, page_actions, sign_out] {
+        const bool enabled = Settings::values.enable_openpak.GetValue();
+        const bool linked = enabled && IsLinked();
+        const bool running = system.IsPoweredOn();
+        if (linked) {
+            header->setText(tr("Signed in as %1")
+                                .arg(QString::fromStdString(Common::OpenPakAccount::GetUsername())));
+            header->setEnabled(true);
+            header->setToolTip({});
+        } else {
+            header->setText(tr("Sign in to OpenPak..."));
+            header->setEnabled(!enabled || !running);
+            header->setToolTip(enabled && running ? tr("Stop the running game first.")
+                                                  : QString{});
+        }
+        for (const auto& [action, needs_account] : page_actions) {
+            action->setEnabled(!needs_account || linked);
+        }
+        sign_out->setEnabled(linked && !running);
+        sign_out->setToolTip(linked && running ? tr("Stop the running game first.") : QString{});
+    });
 }
