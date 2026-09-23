@@ -12,16 +12,17 @@ else
     ARCH_FLAGS="-march=armv8-a -mtune=generic -O3 -USuccess -UNone -fuse-ld=lld"
 fi
 
-# --- Source Code Checkout and Versioning ---
-git clone --recursive "https://github.com/CollectingW/emulator.git" ./citron
-cd ./citron
+# --- Source Code and Versioning ---
+# This builds the tree it is run from -- the OpenPak fork, as the workflow checked it out with its
+# submodules (openpak-client among them). It used to clone upstream Citron and build that, so the
+# nightly carried none of the fork.
+cd "$(dirname "$0")"
 
 if [ "$DEVEL" = 'true' ]; then
     CITRON_TAG="$(git rev-parse --short HEAD)"
     VERSION="$CITRON_TAG"
 else
     if CITRON_TAG="$(git describe --tags 2>/dev/null)"; then
-        git checkout "$CITRON_TAG"
         VERSION="$(echo "$CITRON_TAG" | awk -F'-' '{print $1}')"
     else
         # Fallback for repositories without tags (or shallow history without reachable tags)
@@ -50,7 +51,7 @@ CXX_FLAGS_EXTRA="-I${QT_PRIVATE_INCLUDE_DIR}"
 # --- Build Process ---
 JOBS=$(nproc --all)
 
-mkdir build && cd build
+mkdir -p build && cd build
 
 # Configure the build using CMake
 cmake .. -GNinja \
