@@ -107,7 +107,7 @@ class GameAdapter(private val activity: AppCompatActivity, private var tilesMode
         val color = when (status) {
             "live" -> 0xFF2E7D32.toInt()
             "beta" -> 0xFFF9A825.toInt()
-            "alpha" -> 0xFF9E9E9E.toInt()
+            "alpha" -> 0xFFE65100.toInt()
             else -> return title
         }
         return android.text.SpannableString("\u25cf $title").apply {
