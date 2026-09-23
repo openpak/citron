@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   check-version:
-    name: Prepare the release
+    name: Get the commit to build
     runs-on: [self-hosted, linux, podman]
     outputs:
       new_hash: ${{ steps.branch_check.outputs.hash_short }}
@@ -30,26 +30,6 @@ jobs:
           echo "hash_short=$(echo "$FULL_HASH" | cut -c1-7)" >> $GITHUB_OUTPUT
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
 
-      # Every Citron workflow starts on the same vX.Y.Z tag and attaches its files to one release
-      # named after it; whichever gets here first creates it. Nothing passes through artifacts:
-      # the organisation's artifact quota filled up and stopped every release (2026-09-23).
-      - name: Create the release for the tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const tag = context.ref.replace('refs/tags/', '');
-            try {
-              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-              return;
-            } catch (e) { if (e.status !== 404) throw e; }
-            try {
-              await github.rest.repos.createRelease({
-                owner, repo, tag_name: tag, name: `Citron ${tag} (OpenPak)`,
-                generate_release_notes: true,
-              });
-            } catch (e) { if (e.status !== 422) throw e; } // another workflow made it first
 
   build-android:
     name: Build Android APK
@@ -57,7 +37,10 @@ jobs:
       contents: write
     needs: [check-version]
     runs-on: [self-hosted, linux, podman]
-    container: ubuntu:24.04
+    # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
+    container:
+      image: ubuntu:24.04
+      options: --cpus 8
     outputs:
       git_hash: ${{ steps.get_hash.outputs.git_hash }}
       branch_name: ${{ needs.check-version.outputs.branch_name }}
@@ -122,7 +105,7 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x gradlew
-          ./gradlew assembleMainlineRelease \
+          nice -n 10 ./gradlew --max-workers=4 assembleMainlineRelease \
             -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
           COUNT="$(git -C ../.. rev-list --count HEAD)"
@@ -136,10 +119,10 @@ jobs:
 
       - name: Attach to the tag's release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: actions/github-script@v7
         with:
-          tag_name: ${{ github.ref_name }}
-          files: src/android/artifacts/*.apk
+          script: |
+            await require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/attach-to-release.js`)({ github, context, glob, core }, 'src/android/artifacts/*.apk');
 
       - name: Upload APK artifact
         if: "!startsWith(github.ref, 'refs/tags/v')"
@@ -160,9 +143,14 @@ jobs:
     name: Build Android APK (Snapdragon 8 Elite)
     permissions:
       contents: write
-    needs: [check-version]
+    # After the standard APK, never beside it: one build on the workstation at a time.
+    needs: [check-version, build-android]
+    if: ${{ !cancelled() && needs.check-version.result == 'success' }}
     runs-on: [self-hosted, linux, podman]
-    container: ubuntu:24.04
+    # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
+    container:
+      image: ubuntu:24.04
+      options: --cpus 8
     outputs:
       git_hash: ${{ steps.get_hash.outputs.git_hash }}
       branch_name: ${{ needs.check-version.outputs.branch_name }}
@@ -277,7 +265,7 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x ./gradlew
-          ./gradlew assembleMainlineRelease \
+          nice -n 10 ./gradlew --max-workers=4 assembleMainlineRelease \
             -Pcmake.args="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_UPDATE_CHECKER=ON -DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
           APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
@@ -291,10 +279,10 @@ jobs:
 
       - name: Attach to the tag's release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: actions/github-script@v7
         with:
-          tag_name: ${{ github.ref_name }}
-          files: src/android/artifacts/*.apk
+          script: |
+            await require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/attach-to-release.js`)({ github, context, glob, core }, 'src/android/artifacts/*.apk');
 
       - name: Upload APK artifact
         if: "!startsWith(github.ref, 'refs/tags/v')"
