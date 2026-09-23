@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: Copyright 2025 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 #include "common/hex_util.h"
 #include "common/settings.h"
@@ -67,6 +70,32 @@ struct SslVersion {
         BitField<24, 7, u32> api_version;
     };
 };
+
+// [OpenPak] CITRON_SSL_TRACE=1 logs every guest handshake result and the first bytes of every
+// guest read and write, in the clear, at INFO. Eden's EDEN_SSL_TRACE under Citron's name. A
+// diagnostic, read once, and never on by default: what it prints includes tokens.
+static bool TraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("CITRON_SSL_TRACE");
+        return value != nullptr && std::string_view{value} == "1";
+    }();
+    return enabled;
+}
+
+static std::string TraceResult(Result res) {
+    if (res == ResultSuccess) {
+        return "Success";
+    }
+    if (res == ResultWouldBlock) {
+        return "WouldBlock";
+    }
+    return fmt::format("{:04}-{:04} ({:#x})", 2000 + static_cast<u32>(res.GetModule()),
+                       res.GetDescription(), res.raw);
+}
+
+static std::string TraceBytes(std::span<const u8> data) {
+    return Common::HexToString(data.first(std::min(data.size(), size_t{96})));
+}
 
 struct SslContextSharedData {
     u32 connection_count = 0;
@@ -136,32 +165,23 @@ public:
         if (socket) {
             UnregisterPendingCheck(socket.get());
         }
-        if (fd_to_close.has_value()) {
-            const s32 fd = *fd_to_close;
-            if (!do_not_close_socket) {
-                LOG_ERROR(Service_SSL,
-                          "do_not_close_socket was changed after setting socket; is this right?");
-            } else if (fd_to_close_bsd) {
-                auto err = fd_to_close_bsd->CloseImpl(fd);
-                if (err != Service::Sockets::Errno::SUCCESS) {
-                    LOG_ERROR(Service_SSL, "Failed to close duplicated socket: {}", err);
-                }
-            }
-        }
     }
 
 private:
     SslVersion ssl_version;
     std::shared_ptr<SslContextSharedData> shared_data;
     std::unique_ptr<SSLConnectionBackend> backend;
-    std::optional<int> fd_to_close;
-    std::shared_ptr<Service::Sockets::BSD> fd_to_close_bsd;
     bool do_not_close_socket = false;
     bool get_server_cert_chain = false;
     std::shared_ptr<Network::SocketBase> socket;
     bool did_handshake = false;
     u32 verify_option = 0;
     std::vector<std::string> requested_alpn_protos; // set via SetNextAlpnProto, see DoHandshakeImpl
+    // [OpenPak] What the server picked, kept apart from what was offered: GetNextAlpnProto reads
+    // it back after the handshake. Overwriting the offered list with it would leave a later
+    // handshake offering nothing, which a gRPC server refuses.
+    std::vector<u8> negotiated_alpn_proto;
+    std::string host_name; ///< As the title set it; what the trace names a connection by.
 
     // fd's owning bsd:* port isn't known here; probe each instead of assuming "bsd:u".
     std::shared_ptr<Service::Sockets::BSD> FindBsdServiceOwning(s32 fd) {
@@ -176,7 +196,7 @@ private:
     }
 
     Result SetSocketDescriptorImpl(s32* out_fd, s32 fd) {
-        LOG_DEBUG(Service_SSL, "called, fd={}", fd);
+        LOG_DEBUG(Service_SSL, "called, fd={} do_not_close_socket={}", fd, do_not_close_socket);
         ASSERT(!did_handshake);
         auto bsd = FindBsdServiceOwning(fd);
         if (!bsd) {
@@ -184,20 +204,12 @@ private:
             return ResultInvalidSocket;
         }
 
-        // Based on https://switchbrew.org/wiki/SSL_services#SetSocketDescriptor
-        if (do_not_close_socket) {
-            auto res = bsd->DuplicateSocketImpl(fd);
-            if (!res.has_value()) {
-                LOG_ERROR(Service_SSL, "Failed to duplicate socket with fd {}", fd);
-                return ResultInvalidSocket;
-            }
-            fd = *res;
-            fd_to_close = fd;
-            fd_to_close_bsd = bsd;
-            *out_fd = fd;
-        } else {
-            *out_fd = -1;
-        }
+        // [OpenPak] DoNotCloseSocket: the title keeps its own descriptor, polls it through bsd
+        // and may dial again on it, and is told so with -1. No duplicate is made for it any more
+        // (ported from Eden): the duplicate shared the title's socket, so closing it when this
+        // connection went away closed the socket the title still held -- and if the title had
+        // closed the duplicate itself, the number could already belong to a new socket.
+        *out_fd = -1;
         std::optional<std::shared_ptr<Network::SocketBase>> sock = bsd->GetSocket(fd);
         if (!sock.has_value()) {
             LOG_ERROR(Service_SSL, "invalid socket fd {}", fd);
@@ -218,6 +230,7 @@ private:
     Result SetHostNameImpl(const std::string& hostname) {
         LOG_DEBUG(Service_SSL, "called. hostname={}", hostname);
         ASSERT(!did_handshake);
+        host_name = hostname;
         return backend->SetHostName(hostname);
     }
 
@@ -251,6 +264,20 @@ private:
         ASSERT_OR_EXECUTE(!did_handshake && socket, { return ResultNoSocket; });
         Result res = backend->DoHandshake(requested_alpn_protos);
         did_handshake = res.IsSuccess();
+
+        // Success included: a handshake that worked and said nothing looks exactly like one
+        // that never ran.
+        if (TraceEnabled()) {
+            LOG_INFO(Service_SSL, "SSLHS {} -> {}", host_name, TraceResult(res));
+        }
+
+        if (did_handshake) {
+            negotiated_alpn_proto = backend->GetNegotiatedAlpnProto();
+            if (!negotiated_alpn_proto.empty()) {
+                LOG_DEBUG(Service_SSL, "ALPN negotiated: {}",
+                          std::string(negotiated_alpn_proto.begin(), negotiated_alpn_proto.end()));
+            }
+        }
         return res;
     }
 
@@ -292,9 +319,17 @@ private:
         Result res = backend->Read(&actual_size, *out_data);
         if (res != ResultSuccess) {
             LOG_DEBUG(Service_SSL, "Read failed, res={}", res.raw);
+            // Would-block is every idle poll of a non-blocking connection; it would be the log.
+            if (TraceEnabled() && res != ResultWouldBlock) {
+                LOG_INFO(Service_SSL, "SSLRX {} failed: {}", host_name, TraceResult(res));
+            }
             return res;
         }
         out_data->resize(actual_size);
+        if (TraceEnabled()) {
+            LOG_INFO(Service_SSL, "SSLRX {} {}B: {}", host_name, actual_size,
+                     TraceBytes(*out_data));
+        }
         LOG_DEBUG(Service_SSL, "Read {} bytes: {}", actual_size,
                   Common::HexToString(*out_data, false));
         return res;
@@ -307,7 +342,14 @@ private:
         const bool did_rewrite = Service::SSL::TryFixupStationAddress(data, rewritten);
         const std::span<const u8> send_data = did_rewrite ? std::span<const u8>(rewritten) : data;
 
+        if (TraceEnabled()) {
+            LOG_INFO(Service_SSL, "SSLTX {} {}B: {}", host_name, send_data.size(),
+                     TraceBytes(send_data));
+        }
         const Result res = backend->Write(out_size, send_data);
+        if (TraceEnabled() && res != ResultSuccess) {
+            LOG_INFO(Service_SSL, "SSLTX {} failed: {}", host_name, TraceResult(res));
+        }
         if (did_rewrite && res.IsSuccess()) {
             *out_size = data.size();
         }
@@ -615,19 +657,26 @@ private:
     }
 
     void GetNextAlpnProto(HLERequestContext& ctx) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called");
-
+        // [OpenPak] What the server picked, once there is something: a title that offered h2
+        // reads this back to decide whether it speaks HTTP/2 on the connection. Was a stub that
+        // always said NoSupport. Eden answers from the same place.
         struct AlpnProtoInfo {
             u32 state;         // AlpnProtoState
             u32 proto_size;
         };
+        constexpr u32 AlpnNoSupport = 0;
+        constexpr u32 AlpnNegotiated = 1;
 
         AlpnProtoInfo info{};
-        info.state = 0; // NoSupport
-        info.proto_size = 0;
+        info.state = negotiated_alpn_proto.empty() ? AlpnNoSupport : AlpnNegotiated;
 
-        // Write empty protocol string to buffer
-        ctx.WriteBuffer(std::span<const u8>{});
+        const size_t to_write = std::min(negotiated_alpn_proto.size(), ctx.GetWriteBufferSize());
+        info.proto_size = static_cast<u32>(to_write);
+        if (to_write != 0) {
+            ctx.WriteBuffer(std::span<const u8>(negotiated_alpn_proto.data(), to_write));
+        }
+
+        LOG_DEBUG(Service_SSL, "called, state={} size={}", info.state, info.proto_size);
 
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);

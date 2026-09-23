@@ -272,6 +272,16 @@ public:
         return ResultSuccess;
     }
 
+    std::vector<u8> GetNegotiatedAlpnProto() override {
+        const unsigned char* selected = nullptr;
+        unsigned int length = 0;
+        SSL_get0_alpn_selected(ssl, &selected, &length);
+        if (selected == nullptr || length == 0) {
+            return {};
+        }
+        return {selected, selected + length};
+    }
+
     Result HandleReturn(const char* what, size_t* actual, int ret) {
         const int ssl_err = SSL_get_error(ssl, ret);
         CheckOpenSSLErrors();

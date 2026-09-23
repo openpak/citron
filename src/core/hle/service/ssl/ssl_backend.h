@@ -41,6 +41,11 @@ public:
     virtual Result Read(size_t* out_size, std::span<u8> data) = 0;
     virtual Result Write(size_t* out_size, std::span<const u8> data) = 0;
     virtual Result Pending(s32* out_pending) = 0;
+    // [OpenPak] The protocol the server picked in ALPN, as its bare name ("h2"); empty when
+    // nothing was negotiated or the backend cannot tell. GetNextAlpnProto answers with this.
+    virtual std::vector<u8> GetNegotiatedAlpnProto() {
+        return {};
+    }
     virtual Result GetServerCerts(std::vector<std::vector<u8>>* out_certs) = 0;
 };
 
