@@ -277,8 +277,6 @@ add_executable(citron
     openpak_online_status.h
     legacy_ldn_counts.cpp
     legacy_ldn_counts.h
-    legacy_population_dialog.cpp
-    legacy_population_dialog.h
     legacy_population_history.cpp
     legacy_population_history.h
     precompiled_headers.h
@@ -327,8 +325,6 @@ add_executable(citron
     ui/game_carousel_view.h
     ui/system_audio_loopback.cpp
     ui/system_audio_loopback.h
-    ui/population_bar_chart.cpp
-    ui/population_bar_chart.h
     ui/legacy_profile_chip.cpp
     ui/legacy_profile_chip.h
     ui/legacy_status_cluster.cpp
