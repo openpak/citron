@@ -460,7 +460,6 @@ private:
     QTimer shutdown_timer;
     OpenPakHost* openpak_host = nullptr;
     OpenPakToast* legacy_toast = nullptr;
-    QDialog* legacy_signin_dialog = nullptr;
     OpenPakAccountDialog* legacy_account_dialog_instance = nullptr;
     QString pending_chat_invite_room_id;
     // The room itself lives in this persistent floating overlay (not tied to any
