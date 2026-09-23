@@ -5,6 +5,8 @@ concurrency:
   cancel-in-progress: true
 
 on:
+  push:
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       aarch64:
@@ -19,10 +21,9 @@ permissions:
 
 jobs:
   check-version:
-    name: Check if new version available
+    name: Prepare the release
     runs-on: [self-hosted, linux, podman]
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.head.outputs.hash_short }}
       new_hash_full: ${{ steps.head.outputs.hash_full }}
     steps:
@@ -34,73 +35,30 @@ jobs:
           echo "hash_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "hash_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Get last built version
-        id: last_built
-        run: |
-          LAST_HASH=$(cat LATEST_VERSION 2>/dev/null | tr -d '\n' || echo "none")
-          echo "last_hash=$LAST_HASH" >> $GITHUB_OUTPUT
-          echo "Last built hash: $LAST_HASH"
-
-      - name: Check if release exists
-        id: release_check
-        run: |
-          if gh release view nightly-linux --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Release exists"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Release does not exist"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Compare versions
-        id: compare
-        run: |
-          if [ "${{ steps.head.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ New version detected - will build"
-          elif [ "${{ steps.release_check.outputs.exists }}" != "true" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ No release exists - will build"
-          else
-            echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "⏭️ No changes - skipping build"
-          fi
-
-      # Artifacts no longer carry the build between jobs: the organisation's artifact quota
-      # filled up and stopped every release (2026-09-23). The release is made here, before the
-      # builds, and each build attaches its own files to it.
-      - name: Replace the nightly release
-        if: steps.compare.outputs.should_build == 'true' && github.ref_name == 'main'
+      # Every Citron workflow starts on the same vX.Y.Z tag and attaches its files to one release
+      # named after it; whichever gets here first creates it. Nothing passes through artifacts:
+      # the organisation's artifact quota filled up and stopped every release (2026-09-23).
+      - name: Create the release for the tag
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
-            const tag = 'nightly-linux';
+            const tag = context.ref.replace('refs/tags/', '');
             try {
-              const old = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-              await github.rest.repos.deleteRelease({ owner, repo, release_id: old.data.id });
+              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              return;
             } catch (e) { if (e.status !== 404) throw e; }
             try {
-              await github.rest.git.deleteRef({ owner, repo, ref: `tags/${tag}` });
-            } catch (e) { if (e.status !== 404 && e.status !== 422) throw e; }
-            const sha = '${{ steps.head.outputs.hash_full }}';
-            const short = '${{ steps.head.outputs.hash_short }}';
-            const date = new Date().toISOString().slice(0, 10);
-            await github.rest.repos.createRelease({
-              owner, repo, tag_name: tag, target_commitish: sha, make_latest: 'false',
-              name: `Continuous Build (Linux Nightly: ${short})`,
-              body: `**Citron Commit:** [\`${short}\`](https://github.com/${owner}/${repo}/commit/${sha})\n\n` +
-                    `**Build Details:**\n- Platform: Linux (x86_64, x86_64_v3, aarch64)\n` +
-                    `- Format: AppImage + tar.zst packages\n- Build Type: Release with optimizations\n- Date: ${date}`,
-            });
+              await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, name: `Citron ${tag} (OpenPak)`,
+                generate_release_notes: true,
+              });
+            } catch (e) { if (e.status !== 422) throw e; } // another workflow made it first
 
   build:
     name: "${{ matrix.name }}"
     needs: [check-version]
-    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -151,12 +109,11 @@ jobs:
           chmod +x ./package-citron.sh
           ./package-citron.sh
 
-      - name: Attach to the nightly release
-        if: ${{ github.ref_name == 'main' }}
+      - name: Attach to the tag's release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "nightly-linux"
-          make_latest: false
+          tag_name: ${{ github.ref_name }}
           files: |
             dist/*.AppImage*
             dist/*.tar.zst
@@ -179,7 +136,7 @@ jobs:
   build-aarch64:
     name: "Citron Build (aarch64, qemu)"
     needs: [check-version]
-    if: needs.check-version.outputs.should_build == 'true' && inputs.aarch64
+    if: inputs.aarch64
     runs-on: [self-hosted, linux, podman]
     timeout-minutes: 600
     env:
@@ -216,12 +173,11 @@ jobs:
               APP_VERSION="$GIT_SHA" VERSION="$GIT_SHA" ARCH_SUFFIX="" DEVEL=false sh ./package-citron.sh
             '
 
-      - name: Attach to the nightly release
-        if: ${{ github.ref_name == 'main' }}
+      - name: Attach to the tag's release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "nightly-linux"
-          make_latest: false
+          tag_name: ${{ github.ref_name }}
           files: |
             dist/*.AppImage*
             dist/*.tar.zst
@@ -232,9 +188,9 @@ jobs:
         run: docker rm -f "$CONTAINER" 2>/dev/null || true
 
   # Runs when at least one leg published: a failed leg must not hold back the others' release
-  # or the LATEST_VERSION bookkeeping. Which legs made it is read from the release itself.
+  # or the announcement. Which legs made it is read from the release itself.
   release:
-    if: ${{ !cancelled() && github.ref_name == 'main' && needs.check-version.outputs.should_build == 'true' }}
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     name: "release"
     needs: [check-version, build, build-aarch64]
     permissions:
@@ -250,7 +206,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ needs.check-version.outputs.new_hash }}
         run: |
-          assets=$(gh release view nightly-linux --repo "${{ github.repository }}" --json assets -q '.assets[].name' || true)
+          assets=$(gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" --json assets -q '.assets[].name' || true)
           built=""; missing=""
           for leg in x86_64 x86_64_v3 aarch64; do
             if grep -qx "citron_nightly-${SHA}-linux-${leg}.AppImage" <<<"$assets"; then
@@ -261,32 +217,21 @@ jobs:
           done
           built=${built# }; missing=${missing# }
           {
-            echo "### Linux nightly \`${SHA}\`"
+            echo "### Linux ${{ github.ref_name }} \`${SHA}\`"
             echo "- Published: ${built:-none}"
             echo "- Missing: ${missing:-none}"
             echo "- Build results: x86_64 matrix \`${{ needs.build.result }}\`, aarch64 \`${{ needs.build-aarch64.result }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "built=${built}" >> "$GITHUB_OUTPUT"
           if [ -z "$built" ]; then
-            echo "::error::No leg published to nightly-linux; LATEST_VERSION stays as it is so the next run rebuilds."
+            echo "::error::No leg published to ${{ github.ref_name }}."
             exit 1
           fi
           [ -z "$missing" ] || echo "::warning::Not published this time: ${missing}"
 
-      - name: Update LATEST_VERSION
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "${{ needs.check-version.outputs.new_hash }}" > LATEST_VERSION
-          git add LATEST_VERSION
-          git commit -m "Update LATEST_VERSION to ${{ needs.check-version.outputs.new_hash }} [skip ci]" || exit 0
-          for i in {1..5}; do
-            git pull --rebase origin main && git push && break || sleep 2
-          done
-
       - name: Post to Discord
         run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/nightly-linux"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
           DATE=$(date +'%Y-%m-%d')
           WEBHOOK_URL="${{ secrets.DISCORD_WEBHOOK }}"
           if [ -z "$WEBHOOK_URL" ]; then
@@ -294,5 +239,5 @@ jobs:
             exit 0
           fi
           curl -H "Content-Type: application/json" \
-               -d "{\"content\":\"🐧 **New Linux Build Available!**\n\n📦 **Version:** \`${{ needs.check-version.outputs.new_hash }}\`\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\n\n✨ Builds: ${{ steps.legs.outputs.built }}\"}" \
+               -d "{\"content\":\"🐧 **New Linux Build Available!**\n\n📦 **Version:** \`${{ github.ref_name }}\` (${{ needs.check-version.outputs.new_hash }})\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\n\n✨ Builds: ${{ steps.legs.outputs.built }}\"}" \
                "$WEBHOOK_URL"

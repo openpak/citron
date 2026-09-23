@@ -5,14 +5,17 @@ concurrency:
   cancel-in-progress: true
 
 on:
+  push:
+    tags: ['v*.*.*']
   workflow_dispatch: {}
 
 jobs:
   check-version:
-    name: Check if new version available
+    name: Prepare the release
     runs-on: [self-hosted, linux, podman]
+    permissions:
+      contents: write
     outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
       new_hash: ${{ steps.head.outputs.hash_short }}
       new_hash_full: ${{ steps.head.outputs.hash_full }}
     steps:
@@ -22,37 +25,30 @@ jobs:
         run: |
           echo "hash_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "hash_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-      - name: Get last built version
-        id: last_built
-        run: |
-          LAST_HASH=$(cat LATEST_VERSION_MACOS 2>/dev/null | tr -d '\n' || echo "none")
-          echo "last_hash=$LAST_HASH" >> $GITHUB_OUTPUT
-      - name: Check if release exists
-        id: release_check
-        run: |
-          if gh release view nightly-macos --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-      - name: Compare versions
-        id: compare
-        run: |
-          if [ "${{ steps.head.outputs.hash_short }}" != "${{ steps.last_built.outputs.last_hash }}" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          elif [ "${{ steps.release_check.outputs.exists }}" != "true" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          fi
+      # Every Citron workflow starts on the same vX.Y.Z tag and attaches its files to one release
+      # named after it; whichever gets here first creates it. Nothing passes through artifacts:
+      # the organisation's artifact quota filled up and stopped every release (2026-09-23).
+      - name: Create the release for the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace('refs/tags/', '');
+            try {
+              await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              return;
+            } catch (e) { if (e.status !== 404) throw e; }
+            try {
+              await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, name: `Citron ${tag} (OpenPak)`,
+                generate_release_notes: true,
+              });
+            } catch (e) { if (e.status !== 422) throw e; } // another workflow made it first
 
   build:
     name: "Citron Build (macOS)"
     needs: [check-version]
-    if: needs.check-version.outputs.should_build == 'true'
     runs-on: macos-latest
     timeout-minutes: 180
     permissions:
@@ -265,63 +261,35 @@ jobs:
           hdiutil create -fs HFS+ -srcfolder "$APP_BUNDLE_PATH" -volname "Citron Nightly" "./$DMG_FILENAME"
           mv "$DMG_FILENAME" ./dist/
 
-      # The build publishes its own release: no artifact is passed between jobs, so a full
-      # artifact quota cannot stop a release (it did on 2026-09-23).
-      - name: Delete the previous nightly release
-        if: ${{ github.ref_name == 'main' }}
-        run: gh release delete "nightly-macos" --repo "${{ github.repository }}" --cleanup-tag -y || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Set Build Date
         id: date
         run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
-      - name: Publish the nightly release
-        if: ${{ github.ref_name == 'main' }}
+      # No artifact is passed between jobs, so a full artifact quota cannot stop a release (it did
+      # on 2026-09-23): the build attaches its own file to the tag's release.
+      - name: Attach to the tag's release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v2
         with:
-          name: "Continuous Build (macOS Nightly: ${{ steps.version.outputs.VERSION }})"
-          tag_name: "nightly-macos"
-          target_commitish: ${{ github.sha }}
-          prerelease: false
-          make_latest: false
+          tag_name: ${{ github.ref_name }}
           files: "dist/*.dmg"
-          body: |
-            **Citron Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/${{ github.repository }}/commit/${{ needs.check-version.outputs.new_hash_full }})
-            **Build Details:**
-            - Platform: macOS (Universal)
-            - Build Type: Release with Qt6 and LTO
-            - Date: ${{ steps.date.outputs.date }}
 
   release:
-    if: ${{ github.ref_name == 'main' && needs.build.result == 'success' }}
-    name: "Release bookkeeping (macOS)"
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' }}
+    name: "Announce the release (macOS)"
     needs: [check-version, build]
     permissions:
       contents: write
     runs-on: [self-hosted, linux, podman]
     env:
-      APP_VERSION: ${{ needs.check-version.outputs.new_hash }}
+      APP_VERSION: ${{ github.ref_name }}
 
     steps:
       - uses: actions/checkout@v4
-      - name: Update LATEST_VERSION_MACOS
-        if: success()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "${{ env.APP_VERSION }}" > LATEST_VERSION_MACOS
-          git add LATEST_VERSION_MACOS
-          git commit -m "Update LATEST_VERSION_MACOS to ${{ env.APP_VERSION }} [skip ci]" || exit 0
-          for i in {1..5}; do
-            git pull --rebase origin main && git push && break || sleep 2
-          done
-
       - name: Post to Discord
         if: success()
         run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/nightly-macos"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
           DATE=$(date +'%Y-%m-%d')
           WEBHOOK_URL="${{ secrets.DISCORD_WEBHOOK }}"
           if [ -z "$WEBHOOK_URL" ]; then
