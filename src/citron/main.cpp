@@ -2401,7 +2401,7 @@ bool GMainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletPa
     // « found_best=true, best_version=2752512 » et le jeu tournait sur l'executable 11.3.0
     // (build 28C4287A…). Lance avec le meme fichier en argument, il rapportait
     // « found_best=false, best_update_raw is NULL » et tournait sur celui du JEU DE BASE
-    // (build 19FE149D…) — donc sans les correctifs integres, donc sans en ligne possible.
+    // (build 19FE149D…) — la mauvaise version du jeu.
     //
     // Refresh() est idempotent et ne relit que les repertoires enregistres : sur une liste deja
     // peuplee il ne coute rien.
