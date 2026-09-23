@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "common/hex_util.h"
+#include "common/settings.h"
 #include "common/string_util.h"
 
 #include "core/core.h"
@@ -120,6 +121,12 @@ public:
         // clang-format on
 
         RegisterHandlers(functions);
+
+        // [OpenPak] nn::ssl's own default is PeerCa | HostName; a title that never sets the option
+        // expects it, and every redirected name answers with a chain to the OpenPak CA the
+        // backend trusts. Without OpenPak nothing is verified until the title asks, as before.
+        verify_option = Settings::values.enable_openpak.GetValue() ? 3 : 0;
+        backend->SetVerifyOption(verify_option);
 
         shared_data->connection_count++;
     }

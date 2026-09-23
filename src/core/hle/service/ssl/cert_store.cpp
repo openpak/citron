@@ -8,7 +8,10 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include <cstdlib>
+#include "common/settings.h"
 #include "core/hle/service/ssl/cert_store.h"
+#include "openpak/session.h"
 
 namespace Service::SSL {
 
@@ -71,6 +74,42 @@ CertStore::CertStore(Core::System& system) {
                                 entry.der_size, entry.der_offset + sizeof(header)),
                         });
     }
+
+    ApplyOpenPakCertificate();
+}
+
+// [OpenPak] A title that checks the server's chain itself is handed the console's own roots by
+// the store above, and nothing OpenPak signs can satisfy those: Stardew reads ids 1, 2, 1000,
+// 1011, 1012, 1013 and 1033, verifies with them, and drops the connection after ServerHello.
+// The OpenPak CA takes the slot the game actually uses, as in Eden. Disabling the integration
+// leaves the store exactly as the console shipped it.
+void CertStore::ApplyOpenPakCertificate() {
+    if (!Settings::values.enable_openpak.GetValue()) {
+        return;
+    }
+
+    // Escape hatch while proving whether the substitution itself is what a title rejects.
+    if (const char* off = std::getenv("OPENPAK_NO_CERT"); off != nullptr && *off == '1') {
+        LOG_WARNING(Service_SSL, "[OpenPak] Certificate substitution disabled by environment");
+        return;
+    }
+
+    const std::vector<u8> der = openpak::client::session::CaCertificateDer();
+
+    if (der.empty()) {
+        LOG_WARNING(Service_SSL, "[OpenPak] No CA to put in the certificate store");
+        return;
+    }
+
+    constexpr auto OpenPakSlot = CaCertificateId::DSTRootCAX3;
+
+    m_certs.insert_or_assign(OpenPakSlot, Certificate{
+                                              .status = TrustedCertStatus::EnabledTrusted,
+                                              .der_data = der,
+                                          });
+
+    LOG_INFO(Service_SSL, "[OpenPak] Supplying the CA through system certificate {}",
+             static_cast<s32>(OpenPakSlot));
 }
 
 CertStore::~CertStore() = default;

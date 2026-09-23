@@ -27,6 +27,9 @@ public:
                                  std::span<const CaCertificateId> certificate_ids);
 
 private:
+    /// [OpenPak] Put the OpenPak CA where a title looks for a root it can verify us with.
+    void ApplyOpenPakCertificate();
+
     template <typename F>
     void ForEachCertificate(std::span<const CaCertificateId> certs, F&& f);
 
