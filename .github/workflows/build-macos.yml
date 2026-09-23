@@ -55,6 +55,8 @@ jobs:
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: macos-latest
     timeout-minutes: 180
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -263,51 +265,47 @@ jobs:
           hdiutil create -fs HFS+ -srcfolder "$APP_BUNDLE_PATH" -volname "Citron Nightly" "./$DMG_FILENAME"
           mv "$DMG_FILENAME" ./dist/
 
-      - name: Upload macOS Build
-        uses: actions/upload-artifact@v4
-        with:
-          name: Citron-macOS-Nightly
-          path: "dist/*.dmg"
-
-  release:
-    if: ${{ github.ref_name == 'main' }}
-    name: "Release (macOS)"
-    needs: [check-version, build]
-    permissions:
-      contents: write
-    runs-on: [self-hosted, linux, podman]
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: Citron-macOS-Nightly
-          path: .
-      - name: Get Version from Filename
-        run: |
-          FILENAME=$(ls *.dmg)
-          VERSION=${FILENAME#Citron-macOS-nightly-}
-          VERSION=${VERSION%.dmg}
-          echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
-      - name: Delete Previous Release
+      # The build publishes its own release: no artifact is passed between jobs, so a full
+      # artifact quota cannot stop a release (it did on 2026-09-23).
+      - name: Delete the previous nightly release
+        if: ${{ github.ref_name == 'main' }}
         run: gh release delete "nightly-macos" --repo "${{ github.repository }}" --cleanup-tag -y || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set Build Date
-        run: echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-      - name: Release Artifacts
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the nightly release
+        if: ${{ github.ref_name == 'main' }}
         uses: softprops/action-gh-release@v2
         with:
-          name: "Continuous Build (macOS Nightly: ${{ env.APP_VERSION }})"
+          name: "Continuous Build (macOS Nightly: ${{ steps.version.outputs.VERSION }})"
           tag_name: "nightly-macos"
+          target_commitish: ${{ github.sha }}
           prerelease: false
-          files: "*.dmg"
+          make_latest: false
+          files: "dist/*.dmg"
           body: |
             **Citron Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/${{ github.repository }}/commit/${{ needs.check-version.outputs.new_hash_full }})
             **Build Details:**
             - Platform: macOS (Universal)
             - Build Type: Release with Qt6 and LTO
-            - Date: ${{ env.BUILD_DATE }}
+            - Date: ${{ steps.date.outputs.date }}
+
+  release:
+    if: ${{ github.ref_name == 'main' && needs.build.result == 'success' }}
+    name: "Release bookkeeping (macOS)"
+    needs: [check-version, build]
+    permissions:
+      contents: write
+    runs-on: [self-hosted, linux, podman]
+    env:
+      APP_VERSION: ${{ needs.check-version.outputs.new_hash }}
+
+    steps:
+      - uses: actions/checkout@v4
       - name: Update LATEST_VERSION_MACOS
         if: success()
         run: |

@@ -22,10 +22,11 @@ jobs:
         run: |
           echo "hash_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "hash_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+      # Its own file: sharing LATEST_VERSION with the Linux nightly made each skip the other.
       - name: Get last built version
         id: last_built
         run: |
-          LAST_HASH=$(cat LATEST_VERSION | tr -d '\n' || echo "none")
+          LAST_HASH=$(cat LATEST_VERSION_WINDOWS 2>/dev/null | tr -d '\n' || echo "none")
           echo "last_hash=$LAST_HASH" >> $GITHUB_OUTPUT
       - name: Check if release exists
         id: release_check
@@ -55,6 +56,8 @@ jobs:
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: windows-latest
     timeout-minutes: 240
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -142,48 +145,31 @@ jobs:
           rm -rf user backup update_result.txt update_helper_log.txt
           7z a -tzip "${GITHUB_WORKSPACE}/dist/Citron-windows-nightly-${{ steps.version.outputs.VERSION }}-x64-clangcl.zip" .
 
-      - name: Upload Windows Build (clang-cl)
-        uses: actions/upload-artifact@v4
-        with:
-          name: Citron-Windows-Nightly-ClangCL-x64
-          path: "dist/*.zip"
-
-  release:
-    if: ${{ github.ref_name == 'main' }}
-    name: "Release"
-    needs: [check-version, build-clangtron]
-    permissions:
-      contents: write
-    runs-on: [self-hosted, linux, podman]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: Citron-Windows-Nightly-ClangCL-x64
-          path: ./release-artifacts
-      - name: Get Version from Filename
+      # The build publishes its own release: no artifact is passed between jobs, so a full
+      # artifact quota cannot stop a release (it did on 2026-09-23).
+      - name: Delete the previous nightly release
+        if: ${{ github.ref_name == 'main' }}
         shell: bash
-        run: |
-          FILENAME=$(basename "$(ls ./release-artifacts/Citron-windows-nightly-*-x64-clangcl.zip)")
-          VERSION=${FILENAME#Citron-windows-nightly-}
-          VERSION=${VERSION%-x64-clangcl.zip}
-          echo "APP_VERSION=${VERSION}" >> $GITHUB_ENV
-      - name: Delete Previous Release
         run: gh release delete "nightly-windows" --repo "${{ github.repository }}" --cleanup-tag -y || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set Build Date
-        run: echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-      - name: Release Artifacts
+        id: date
+        shell: bash
+        run: echo "date=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the nightly release
+        if: ${{ github.ref_name == 'main' }}
         uses: softprops/action-gh-release@v2
         with:
-          name: "Continuous Build (Windows Nightly: ${{ env.APP_VERSION }})"
+          name: "Continuous Build (Windows Nightly: ${{ steps.version.outputs.VERSION }})"
           tag_name: "nightly-windows"
+          target_commitish: ${{ github.sha }}
           prerelease: false
+          make_latest: false
           files: |
-            release-artifacts/*-x64-clangcl.zip
+            dist/*-x64-clangcl.zip
           body: |
             **Citron Commit:** [`${{ needs.check-version.outputs.new_hash }}`](https://github.com/${{ github.repository }}/commit/${{ needs.check-version.outputs.new_hash_full }})
 
@@ -191,15 +177,28 @@ jobs:
             - Platform: Windows (x64)
             - Toolchain: clang-cl (native Windows, CPM dependencies)
             - Build Type: Nightly
-            - Date: ${{ env.BUILD_DATE }}
-      - name: Update LATEST_VERSION
+            - Date: ${{ steps.date.outputs.date }}
+
+  release:
+    if: ${{ github.ref_name == 'main' && needs.build-clangtron.result == 'success' }}
+    name: "Release bookkeeping"
+    needs: [check-version, build-clangtron]
+    permissions:
+      contents: write
+    runs-on: [self-hosted, linux, podman]
+    env:
+      APP_VERSION: ${{ needs.check-version.outputs.new_hash }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Update LATEST_VERSION_WINDOWS
         if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "${{ env.APP_VERSION }}" > LATEST_VERSION
-          git add LATEST_VERSION
-          git commit -m "Update LATEST_VERSION to ${{ env.APP_VERSION }} [skip ci]" || exit 0
+          echo "${{ env.APP_VERSION }}" > LATEST_VERSION_WINDOWS
+          git add LATEST_VERSION_WINDOWS
+          git commit -m "Update LATEST_VERSION_WINDOWS to ${{ env.APP_VERSION }} [skip ci]" || exit 0
           for i in {1..5}; do
             git pull --rebase origin main && git push && break || sleep 2
           done
