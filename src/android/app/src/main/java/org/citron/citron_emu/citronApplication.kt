@@ -13,6 +13,8 @@ import org.citron.citron_emu.utils.DirectoryInitialization
 import org.citron.citron_emu.utils.DocumentsTree
 import org.citron.citron_emu.utils.GpuDriverHelper
 import org.citron.citron_emu.utils.Log
+import org.citron.citron_emu.utils.OpenPak
+import org.citron.citron_emu.utils.OpenPakUi
 
 fun Context.getPublicFilesDir(): File = getExternalFilesDir(null) ?: filesDir
 
@@ -41,6 +43,15 @@ class CitronApplication : Application() {
         NativeInput.reloadInputDevices()
         NativeLibrary.logDeviceInfo()
         Log.logDeviceInfo()
+
+        // OpenPak: who is asking and where its files live. Going online waits for the profile to
+        // be chosen (MainActivity) or for a game started straight from a shortcut.
+        OpenPak.init()
+        OpenPakUi.install(this)
+        OpenPakUi.openScreen = { activity, page ->
+            org.citron.citron_emu.fragments.OpenPakFragment.newInstance(page)
+                .show(activity.supportFragmentManager, org.citron.citron_emu.fragments.OpenPakFragment.TAG)
+        }
 
         createNotificationChannels()
     }

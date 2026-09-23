@@ -13,6 +13,8 @@ add_library(citron-android SHARED
     android_config.cpp
     android_config.h
     native_input.cpp
+    openpak_native.cpp
+    openpak_native.h
 )
 
 set_property(TARGET citron-android PROPERTY IMPORTED_LOCATION ${FFmpeg_LIBRARY_DIR})
@@ -22,5 +24,9 @@ target_link_libraries(citron-android PRIVATE android camera2ndk EGL glad jnigrap
 if (ARCHITECTURE_arm64)
     target_link_libraries(citron-android PRIVATE adrenotools)
 endif()
+
+# OpenPak: the sign-in chain, presence, invitations, cloud saves and the account window's calls --
+# the same library the desktop build uses, minus its Qt half.
+target_link_libraries(citron-android PRIVATE openpak::client)
 
 set(CPACK_PACKAGE_EXECUTABLES ${CPACK_PACKAGE_EXECUTABLES} citron-android)
