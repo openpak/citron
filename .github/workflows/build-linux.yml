@@ -110,11 +110,6 @@ jobs:
             artifact_suffix: "_v3"
             script_suffix: "_v3"
             build_arg: "v3"
-          - name: "Citron Build (aarch64)"
-            os: ubuntu-24.04-arm
-            artifact_suffix: "_aarch64"
-            script_suffix: ""
-            build_arg: ""
 
     container: ghcr.io/pkgforge-dev/archlinux:latest
 
@@ -165,37 +160,124 @@ jobs:
         if: always()
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
 
+  # GitHub-hosted runners, ubuntu-24.04-arm included, do not start for this organisation (the
+  # jobs fail with 0 steps: "recent account payments have failed or your spending limit needs
+  # to be increased", 2026-09-23). The aarch64 build therefore runs on the self-hosted x86_64
+  # runner, in the arm64 variant of the same Arch container, under qemu-user: the host has
+  # qemu-aarch64 registered in binfmt_misc with the F flag, so arm64 containers run as they are.
+  # It is native arm64 code, only emulated, so it is several times slower than the x86_64 legs;
+  # the container gets a low CPU weight so it yields to anything interactive on the host.
+  # The job does not use `container:` because the runner's node, which runs the actions, is an
+  # x86_64 binary and would not start inside an arm64 container.
+  build-aarch64:
+    name: "Citron Build (aarch64, qemu)"
+    needs: [check-version]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: [self-hosted, linux, podman]
+    timeout-minutes: 600
+    env:
+      IMAGE: ghcr.io/pkgforge-dev/archlinux:latest
+      CONTAINER: citron-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check that arm64 binaries can run here
+        run: |
+          if ! grep -qs '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64; then
+            echo "::error::qemu-aarch64 is not registered in binfmt_misc on $(hostname); install qemu-user-static(-binfmt) there."
+            exit 1
+          fi
+          docker pull --platform linux/arm64 "$IMAGE"
+          docker run --rm --platform linux/arm64 "$IMAGE" uname -m | grep -qx aarch64
+
+      - name: Build and package Citron in an arm64 container
+        run: |
+          docker run --rm --name "$CONTAINER" --platform linux/arm64 --cpu-shares 256 \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            -e HOST_OWNER="$(id -u):$(id -g)" \
+            -e GIT_SHA="$(git rev-parse --short HEAD)" \
+            "$IMAGE" bash -euxc '
+              # Hand the workspace back to the runner user however the build ends.
+              trap "chown -R \"\$HOST_OWNER\" /src" EXIT
+              pacman -Syu --noconfirm --needed git
+              git config --global --add safe.directory /src
+              sh ./get-dependencies.sh
+              DEVEL=false sh ./build-citron.sh
+              APP_VERSION="$GIT_SHA" VERSION="$GIT_SHA" ARCH_SUFFIX="" DEVEL=false sh ./package-citron.sh
+            '
+
+      - name: Attach to the nightly release
+        if: ${{ github.ref_name == 'main' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "nightly-linux"
+          make_latest: false
+          files: |
+            dist/*.AppImage*
+            dist/*.tar.zst
+
+      # A cancelled run stops the docker client, not the container it started.
+      - name: Remove the build container
+        if: always()
+        run: docker rm -f "$CONTAINER" 2>/dev/null || true
+
+  # Runs when at least one leg published: a failed leg must not hold back the others' release
+  # or the LATEST_VERSION bookkeeping. Which legs made it is read from the release itself.
   release:
-    if: ${{ github.ref_name == 'main' }}
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.check-version.outputs.should_build == 'true' }}
     name: "release"
-    needs: [check-version, build]
+    needs: [check-version, build, build-aarch64]
     permissions:
-      actions: read
-      security-events: write
       contents: write
     runs-on: [self-hosted, linux, podman]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set Version
-        id: version
-        run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Collect the legs that published
+        id: legs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.check-version.outputs.new_hash }}
+        run: |
+          assets=$(gh release view nightly-linux --repo "${{ github.repository }}" --json assets -q '.assets[].name' || true)
+          built=""; missing=""
+          for leg in x86_64 x86_64_v3 aarch64; do
+            if grep -qx "citron_nightly-${SHA}-linux-${leg}.AppImage" <<<"$assets"; then
+              built="$built $leg"
+            else
+              missing="$missing $leg"
+            fi
+          done
+          built=${built# }; missing=${missing# }
+          {
+            echo "### Linux nightly \`${SHA}\`"
+            echo "- Published: ${built:-none}"
+            echo "- Missing: ${missing:-none}"
+            echo "- Build results: x86_64 matrix \`${{ needs.build.result }}\`, aarch64 \`${{ needs.build-aarch64.result }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "built=${built}" >> "$GITHUB_OUTPUT"
+          if [ -z "$built" ]; then
+            echo "::error::No leg published to nightly-linux; LATEST_VERSION stays as it is so the next run rebuilds."
+            exit 1
+          fi
+          [ -z "$missing" ] || echo "::warning::Not published this time: ${missing}"
 
       - name: Update LATEST_VERSION
-        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          echo "${{ steps.version.outputs.sha }}" > LATEST_VERSION
+          echo "${{ needs.check-version.outputs.new_hash }}" > LATEST_VERSION
           git add LATEST_VERSION
-          git commit -m "Update LATEST_VERSION to ${{ steps.version.outputs.sha }} [skip ci]" || exit 0
+          git commit -m "Update LATEST_VERSION to ${{ needs.check-version.outputs.new_hash }} [skip ci]" || exit 0
           for i in {1..5}; do
             git pull --rebase origin main && git push && break || sleep 2
           done
 
       - name: Post to Discord
-        if: success()
         run: |
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/tag/nightly-linux"
           DATE=$(date +'%Y-%m-%d')
@@ -205,5 +287,5 @@ jobs:
             exit 0
           fi
           curl -H "Content-Type: application/json" \
-               -d "{\"content\":\"🐧 **New Linux Build Available!**\n\n📦 **Version:** \`${{ steps.version.outputs.sha }}\`\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\n\n✨ Includes x86_64, x86_64_v3 & aarch64 builds!\"}" \
+               -d "{\"content\":\"🐧 **New Linux Build Available!**\n\n📦 **Version:** \`${{ needs.check-version.outputs.new_hash }}\`\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\n\n✨ Builds: ${{ steps.legs.outputs.built }}\"}" \
                "$WEBHOOK_URL"
