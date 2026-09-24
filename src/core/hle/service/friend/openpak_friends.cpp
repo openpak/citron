@@ -144,7 +144,7 @@ void Warm(std::span<const NetworkServiceAccountId> ids) {
     }
 
     if (!wanted.empty()) {
-        baas::RunInBackground([wanted = std::move(wanted)] { baas::WarmUsers(wanted); });
+        baas::RunInBackground([pending = std::move(wanted)] { baas::WarmUsers(pending); });
     }
 }
 
