@@ -28,12 +28,21 @@ jobs:
       new_hash_full: ${{ steps.head.outputs.hash_full }}
     steps:
       - uses: actions/checkout@v4
+      - name: Scratch in the workspace, not the runner's shared /tmp
+        # /tmp is a RAM disk every build on the machine shares; when it filled on
+        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
 
       - name: Get current commit hash
         id: head
         run: |
           echo "hash_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "hash_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+      - name: Clear scratch
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
 
 
   build:
@@ -70,6 +79,12 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
+      - name: Scratch in the workspace, not the runner's shared /tmp
+        # /tmp is a RAM disk every build on the machine shares; when it filled on
+        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
 
       - name: Add Git Safe Directory
         run: git config --global --add safe.directory "$PWD"
@@ -116,6 +131,9 @@ jobs:
   # the container gets a low CPU weight so it yields to anything interactive on the host.
   # The job does not use `container:` because the runner's node, which runs the actions, is an
   # x86_64 binary and would not start inside an arm64 container.
+      - name: Clear scratch
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
   build-aarch64:
     name: "Citron Build (aarch64, qemu)"
     needs: [check-version]
@@ -132,6 +150,12 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
+      - name: Scratch in the workspace, not the runner's shared /tmp
+        # /tmp is a RAM disk every build on the machine shares; when it filled on
+        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
 
       - name: Check that arm64 binaries can run here
         run: |
@@ -172,6 +196,9 @@ jobs:
 
   # Runs when at least one leg published: a failed leg must not hold back the others' release
   # or the announcement. Which legs made it is read from the release itself.
+      - name: Clear scratch
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
   release:
     if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     name: "release"
@@ -182,6 +209,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Scratch in the workspace, not the runner's shared /tmp
+        # /tmp is a RAM disk every build on the machine shares; when it filled on
+        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
 
       - name: Collect the legs that published
         id: legs
@@ -224,3 +257,6 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d "{\"content\":\"🐧 **New Linux Build Available!**\n\n📦 **Version:** \`${{ github.ref_name }}\` (${{ needs.check-version.outputs.new_hash }})\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\n\n✨ Builds: ${{ steps.legs.outputs.built }}\"}" \
                "$WEBHOOK_URL"
+      - name: Clear scratch
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
