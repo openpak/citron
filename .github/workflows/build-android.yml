@@ -12,7 +12,7 @@ permissions:
 jobs:
   check-version:
     name: Get the commit to build
-    runs-on: [self-hosted, linux, podman, heavy]
+    runs-on: ubuntu-24.04
     outputs:
       new_hash: ${{ steps.branch_check.outputs.hash_short }}
       new_hash_full: ${{ steps.branch_check.outputs.hash_full }}
@@ -20,12 +20,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Get the commit to build
         id: branch_check
@@ -35,26 +29,34 @@ jobs:
           echo "branch_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           echo "hash_short=$(echo "$FULL_HASH" | cut -c1-7)" >> $GITHUB_OUTPUT
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
-
 
   build-android:
     name: Build Android APK
     permissions:
       contents: write
     needs: [check-version]
-    runs-on: [self-hosted, linux, podman, heavy]
-    # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
+    runs-on: ubuntu-24.04
+    # The build installs its own SDK and NDK inside the container (android-sdk/ in the
+    # workspace), so the host's preinstalled Android SDK is not used. A hosted runner has about
+    # 14 GB free, too little for this build: the host's large toolsets are mounted in and emptied
+    # from inside the container (root on the host's Docker).
     container:
       image: ubuntu:24.04
-      options: --cpus 8
+      volumes:
+        - /usr/local/lib/android:/host-free/android
+        - /opt/ghc:/host-free/ghc
+        - /usr/share/dotnet:/host-free/dotnet
     outputs:
       git_hash: ${{ steps.get_hash.outputs.git_hash }}
       branch_name: ${{ needs.check-version.outputs.branch_name }}
 
     steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          rm -rf /host-free/android/* /host-free/ghc/* /host-free/dotnet/*
+          df -h /
+
       - name: Bootstrap build container
         run: apt-get update -qq && apt-get install -y -qq git ca-certificates sudo tar gzip >/dev/null
       - uses: actions/checkout@v4
@@ -63,12 +65,6 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       # The container runs as root over a workspace the runner's user owns: git refuses it as
       # "dubious ownership" unless told otherwise.
@@ -122,7 +118,7 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x gradlew
-          nice -n 10 ./gradlew --max-workers=4 assembleMainlineRelease \
+          ./gradlew --max-workers=4 assembleMainlineRelease \
             -Pcmake.args="-DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
           COUNT="$(git -C ../.. rev-list --count HEAD)"
@@ -150,27 +146,22 @@ jobs:
           path: src/android/artifacts/*.apk
           retention-days: 3
 
-      # The runner runs this container as root in rootful Docker: what the build left behind is
-      # handed back to the runner's own user, or the next checkout on this runner cannot clean it.
-      - name: Hand the workspace back to the runner
-        if: always()
-        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
-
   build-android-8elite:
     name: Build Android APK (Snapdragon 8 Elite)
     permissions:
       contents: write
-    # After the standard APK, never beside it: one build on the workstation at a time.
-    needs: [check-version, build-android]
-    if: ${{ !cancelled() && needs.check-version.result == 'success' }}
-    runs-on: [self-hosted, linux, podman, heavy]
-    # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
+    needs: [check-version]
+    runs-on: ubuntu-24.04
+    # The build installs its own SDK and NDK inside the container (android-sdk/ in the
+    # workspace), so the host's preinstalled Android SDK is not used. A hosted runner has about
+    # 14 GB free, too little for this build: the host's large toolsets are mounted in and emptied
+    # from inside the container (root on the host's Docker).
     container:
       image: ubuntu:24.04
-      options: --cpus 8
+      volumes:
+        - /usr/local/lib/android:/host-free/android
+        - /opt/ghc:/host-free/ghc
+        - /usr/share/dotnet:/host-free/dotnet
     outputs:
       git_hash: ${{ steps.get_hash.outputs.git_hash }}
       branch_name: ${{ needs.check-version.outputs.branch_name }}
@@ -183,6 +174,12 @@ jobs:
       CCACHE_SLOPPINESS: time_macros
 
     steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          rm -rf /host-free/android/* /host-free/ghc/* /host-free/dotnet/*
+          df -h /
+
       - name: Bootstrap build container
         run: apt-get update -qq && apt-get install -y -qq git ca-certificates sudo tar gzip >/dev/null
       - uses: actions/checkout@v4
@@ -191,12 +188,6 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       # The container runs as root over a workspace the runner's user owns: git refuses it as
       # "dubious ownership" unless told otherwise.
@@ -293,7 +284,7 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           export ANDROID_NDK="$ANDROID_NDK_HOME"
           chmod +x ./gradlew
-          nice -n 10 ./gradlew --max-workers=4 assembleMainlineRelease \
+          ./gradlew --max-workers=4 assembleMainlineRelease \
             -Pcmake.args="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DENABLE_UPDATE_CHECKER=ON -DENABLE_QT=OFF -DENABLE_SDL2=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_OPENSSL=OFF -DCITRON_USE_BUNDLED_VCPKG=ON -DCITRON_USE_BUNDLED_FFMPEG=ON -DCITRON_ENABLE_LTO=ON -DCITRON_BUILD_TYPE=Release"
 
           APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
@@ -321,31 +312,18 @@ jobs:
           path: src/android/artifacts/*.apk
           retention-days: 3
 
-      - name: Hand the workspace back to the runner
-        if: always()
-        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
-
   release-android:
     name: "Announce the Android release"
     needs: [check-version, build-android, build-android-8elite]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
-    runs-on: [self-hosted, linux, podman, heavy]
+    runs-on: ubuntu-24.04
 
     # The release was made by release.yml and each build attached its APK; what is left is
     # the announcement.
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Get version info
         shell: bash
@@ -375,6 +353,3 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d "{\"content\":\"🤖 **New Android Build Available!**\n\n📦 **Version:** \`${{ env.GIT_HASH }}\`\n📅 **Date:** ${{ env.DATE }}\n$BRANCH_EMOJI **Branch:** $BRANCH_DESC$EXPERIMENTAL_FEATURES\n🔗 **Download:** $DOWNLOAD_URL\"}" \
                "$WEBHOOK_URL"
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
