@@ -8,13 +8,6 @@ on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
-    inputs:
-      aarch64:
-        # Under qemu the aarch64 leg holds a self-hosted runner for hours, and the org's two
-        # runners also build every server release; it runs only when asked for.
-        description: 'Also build aarch64 (qemu, several hours on a self-hosted runner)'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -22,55 +15,62 @@ permissions:
 jobs:
   check-version:
     name: Get the commit to build
-    runs-on: [self-hosted, linux, podman, heavy]
+    runs-on: ubuntu-24.04
     outputs:
       new_hash: ${{ steps.head.outputs.hash_short }}
       new_hash_full: ${{ steps.head.outputs.hash_full }}
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Get current commit hash
         id: head
         run: |
           echo "hash_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "hash_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
-
 
   build:
     name: "${{ matrix.name }}"
     needs: [check-version]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     strategy:
       fail-fast: false
-      # One leg at a time: the self-hosted runners are the owner's workstation (2026-09-23: two
-      # legs at -j16 each pinned it at 100%).
-      max-parallel: 1
       matrix:
         include:
           - name: "Citron Build (Normal x86_64)"
-            os: [self-hosted, linux, podman, heavy]
+            os: ubuntu-24.04
             artifact_suffix: "_x86_64"
             script_suffix: ""
             build_arg: ""
           - name: "Citron Build (Optimized x86_64)"
-            os: [self-hosted, linux, podman, heavy]
+            os: ubuntu-24.04
             artifact_suffix: "_v3"
             script_suffix: "_v3"
             build_arg: "v3"
+          # GitHub's native arm64 runner, with the arm64 variant of the same Arch container.
+          - name: "Citron Build (aarch64)"
+            os: ubuntu-24.04-arm
+            artifact_suffix: "_aarch64"
+            script_suffix: ""
+            build_arg: ""
 
-    container: ghcr.io/pkgforge-dev/archlinux:latest
+    container:
+      image: ghcr.io/pkgforge-dev/archlinux:latest
+      # A hosted runner has about 14 GB free, too little for this build. The steps run inside
+      # the container, so the host's large preinstalled toolsets it does not use are mounted in
+      # and emptied from there (the container is root on the host's Docker).
+      volumes:
+        - /usr/local/lib/android:/host-free/android
+        - /opt/ghc:/host-free/ghc
+        - /usr/share/dotnet:/host-free/dotnet
 
     steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          rm -rf /host-free/android/* /host-free/ghc/* /host-free/dotnet/*
+          df -h /
+
       - name: Install Git
         run: pacman -Syu --noconfirm --needed git
 
@@ -79,13 +79,9 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
+      # The container runs as root over a workspace the runner's user owns: git refuses it as
+      # "dubious ownership" unless told otherwise.
       - name: Add Git Safe Directory
         run: git config --global --add safe.directory "$PWD"
 
@@ -94,10 +90,8 @@ jobs:
 
       - name: Build Citron from source
         run: |
-          NPROC_VAL=$(nproc --all)
-          JOBS_VAL=$((NPROC_VAL > 4 ? 4 : NPROC_VAL))
           chmod +x ./build-citron.sh
-          JOBS=${JOBS_VAL} DEVEL=false ./build-citron.sh ${{ matrix.build_arg }}
+          JOBS=$(nproc) DEVEL=false ./build-citron.sh ${{ matrix.build_arg }}
 
       - name: Package AppImage with Correct Name
         run: |
@@ -116,105 +110,18 @@ jobs:
           script: |
             await require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/attach-to-release.js`)({ github, context, glob, core }, 'dist/*.AppImage*\ndist/*.tar.zst');
 
-      # The container runs as root on the self-hosted runner, and root-owned files left in the
-      # workspace stop the next job's checkout, which runs as the runner's user (2026-09-23).
-      - name: Hand the workspace back to the runner
-        if: always()
-        run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
-
-  # GitHub-hosted runners, ubuntu-24.04-arm included, do not start for this organisation (the
-  # jobs fail with 0 steps: "recent account payments have failed or your spending limit needs
-  # to be increased", 2026-09-23). The aarch64 build therefore runs on the self-hosted x86_64
-  # runner, in the arm64 variant of the same Arch container, under qemu-user: the host has
-  # qemu-aarch64 registered in binfmt_misc with the F flag, so arm64 containers run as they are.
-  # It is native arm64 code, only emulated, so it is several times slower than the x86_64 legs;
-  # the container gets a low CPU weight so it yields to anything interactive on the host.
-  # The job does not use `container:` because the runner's node, which runs the actions, is an
-  # x86_64 binary and would not start inside an arm64 container.
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
-  build-aarch64:
-    name: "Citron Build (aarch64, qemu)"
-    needs: [check-version]
-    if: inputs.aarch64
-    runs-on: [self-hosted, linux, podman, heavy]
-    timeout-minutes: 600
-    env:
-      IMAGE: ghcr.io/pkgforge-dev/archlinux:latest
-      CONTAINER: citron-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # openpak-client is private: GITHUB_TOKEN reads only this repo.
-          token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
-          submodules: recursive
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
-
-      - name: Check that arm64 binaries can run here
-        run: |
-          if ! grep -qs '^enabled' /proc/sys/fs/binfmt_misc/qemu-aarch64; then
-            echo "::error::qemu-aarch64 is not registered in binfmt_misc on $(hostname); install qemu-user-static(-binfmt) there."
-            exit 1
-          fi
-          docker pull --platform linux/arm64 "$IMAGE"
-          docker run --rm --platform linux/arm64 "$IMAGE" uname -m | grep -qx aarch64
-
-      - name: Build and package Citron in an arm64 container
-        run: |
-          docker run --rm --name "$CONTAINER" --platform linux/arm64 --cpu-shares 256 \
-            -v "$GITHUB_WORKSPACE:/src" -w /src \
-            -e HOST_OWNER="$(id -u):$(id -g)" \
-            -e GIT_SHA="$(git rev-parse --short HEAD)" \
-            "$IMAGE" bash -euxc '
-              # Hand the workspace back to the runner user however the build ends.
-              trap "chown -R \"\$HOST_OWNER\" /src" EXIT
-              pacman -Syu --noconfirm --needed git
-              git config --global --add safe.directory /src
-              sh ./get-dependencies.sh
-              DEVEL=false sh ./build-citron.sh
-              APP_VERSION="$GIT_SHA" VERSION="$GIT_SHA" ARCH_SUFFIX="" DEVEL=false sh ./package-citron.sh
-            '
-
-      - name: Attach to the tag's release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/attach-to-release.js`)({ github, context, glob, core }, 'dist/*.AppImage*\ndist/*.tar.zst');
-
-      # A cancelled run stops the docker client, not the container it started.
-      - name: Remove the build container
-        if: always()
-        run: docker rm -f "$CONTAINER" 2>/dev/null || true
-
   # Runs when at least one leg published: a failed leg must not hold back the others' release
   # or the announcement. Which legs made it is read from the release itself.
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
   release:
     if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     name: "release"
-    needs: [check-version, build, build-aarch64]
+    needs: [check-version, build]
     permissions:
       contents: write
-    runs-on: [self-hosted, linux, podman, heavy]
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the runner's temp, not the machine's shared /tmp
-        # /tmp is a RAM disk every build on the machine shares; when it filled on
-        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
-        run: |
-          mkdir -p "$RUNNER_TEMP/scratch"
-          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Collect the legs that published
         id: legs
@@ -236,7 +143,7 @@ jobs:
             echo "### Linux ${{ github.ref_name }} \`${SHA}\`"
             echo "- Published: ${built:-none}"
             echo "- Missing: ${missing:-none}"
-            echo "- Build results: x86_64 matrix \`${{ needs.build.result }}\`, aarch64 \`${{ needs.build-aarch64.result }}\`"
+            echo "- Build results: matrix \`${{ needs.build.result }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "built=${built}" >> "$GITHUB_OUTPUT"
           if [ -z "$built" ]; then
@@ -257,6 +164,3 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d "{\"content\":\"🐧 **New Linux Build Available!**\n\n📦 **Version:** \`${{ github.ref_name }}\` (${{ needs.check-version.outputs.new_hash }})\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\n\n✨ Builds: ${{ steps.legs.outputs.built }}\"}" \
                "$WEBHOOK_URL"
-      - name: Clear scratch
-        if: always()
-        run: rm -rf "$RUNNER_TEMP/scratch"
