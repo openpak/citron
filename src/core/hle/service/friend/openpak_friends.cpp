@@ -163,7 +163,7 @@ std::string RequestChannel(s32 channel) {
 
 /// Fire and forget: a request's POST is a network call and the caller is the game's thread.
 void SendFriendRequestInBackground(baas::FriendRequestSend send) {
-    baas::RunInBackground([send = std::move(send)] { baas::SendFriendRequest(send); });
+    baas::RunInBackground([request = std::move(send)] { baas::SendFriendRequest(request); });
 }
 
 /// One friend is no longer "newly" (§A.2): the flag is cleared locally at once -- the module does
@@ -1546,8 +1546,8 @@ private:
         if (AvailableFor(user)) {
             std::string text = friends::Text(std::span<const char>{note.note});
             baas::Update(friend_id, [text](baas::Friend& one) { one.note = text; });
-            baas::RunInBackground([friend_id, text = std::move(text)] {
-                baas::PatchFriend(friend_id, "replace", "/friendNote", text);
+            baas::RunInBackground([friend_id, note_text = std::move(text)] {
+                baas::PatchFriend(friend_id, "replace", "/friendNote", note_text);
             });
         }
         R_SUCCEED();
@@ -1834,8 +1834,8 @@ private:
     Result Block(NetworkServiceAccountId friend_id, s32 reason, std::optional<baas::Route> route) {
         R_UNLESS(friend_id != 0, ResultInvalidArgument);
 
-        baas::RunInBackground([friend_id, reason, route = std::move(route)] {
-            if (const int error = baas::BlockUser(friend_id, reason, route); error != baas::Ok) {
+        baas::RunInBackground([friend_id, reason, block_route = std::move(route)] {
+            if (const int error = baas::BlockUser(friend_id, reason, block_route); error != baas::Ok) {
                 LOG_WARNING(Service_Friend, "[OpenPak] Blocking {:016x} failed: 2121-{:04}",
                             friend_id, error);
             }
@@ -2025,13 +2025,13 @@ private:
         }
 
         // Fire and forget: the POST is a network call and this is the game's thread.
-        baas::RunInBackground([receivers = std::move(receivers), application_id, acd_index,
+        baas::RunInBackground([to = std::move(receivers), application_id, acd_index,
                                presence_group_id,
                                data = std::vector<u8>(application_data.begin(),
                                                       application_data.end()),
                                messages = friends::InvitationMessages(description),
                                application_id_match] {
-            baas::SendInvitation(receivers, application_id, acd_index, presence_group_id, data,
+            baas::SendInvitation(to, application_id, acd_index, presence_group_id, data,
                                  messages, application_id_match);
         });
         R_SUCCEED();
@@ -2044,7 +2044,7 @@ private:
         // Fire and forget: the mark-read is a network call and this is the game's thread. It is
         // the same dismissal the host's own invitation list makes, so both agree on what waits.
         std::vector<u64> ids(invitation_ids.begin(), invitation_ids.end());
-        baas::RunInBackground([ids = std::move(ids)] { ReadNativeInvitations(ids); });
+        baas::RunInBackground([pending_ids = std::move(ids)] { ReadNativeInvitations(pending_ids); });
         R_SUCCEED();
     }
 
