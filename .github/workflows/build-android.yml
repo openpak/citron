@@ -12,7 +12,7 @@ permissions:
 jobs:
   check-version:
     name: Get the commit to build
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     outputs:
       new_hash: ${{ steps.branch_check.outputs.hash_short }}
       new_hash_full: ${{ steps.branch_check.outputs.hash_full }}
@@ -45,7 +45,7 @@ jobs:
     permissions:
       contents: write
     needs: [check-version]
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
     container:
       image: ubuntu:24.04
@@ -166,7 +166,7 @@ jobs:
     # After the standard APK, never beside it: one build on the workstation at a time.
     needs: [check-version, build-android]
     if: ${{ !cancelled() && needs.check-version.result == 'success' }}
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     # The runner is the owner's workstation: at most 8 CPUs for the build (2026-09-23).
     container:
       image: ubuntu:24.04
@@ -334,7 +334,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
 
     # The release was made by check-version and each build attached its APK; what is left is
     # the announcement.

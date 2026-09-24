@@ -22,7 +22,7 @@ permissions:
 jobs:
   check-version:
     name: Get the commit to build
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     outputs:
       new_hash: ${{ steps.head.outputs.hash_short }}
       new_hash_full: ${{ steps.head.outputs.hash_full }}
@@ -138,7 +138,7 @@ jobs:
     name: "Citron Build (aarch64, qemu)"
     needs: [check-version]
     if: inputs.aarch64
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     timeout-minutes: 600
     env:
       IMAGE: ghcr.io/pkgforge-dev/archlinux:latest
@@ -205,7 +205,7 @@ jobs:
     needs: [check-version, build, build-aarch64]
     permissions:
       contents: write
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
 
     steps:
       - uses: actions/checkout@v4
