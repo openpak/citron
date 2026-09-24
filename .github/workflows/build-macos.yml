@@ -20,11 +20,20 @@ jobs:
       new_hash_full: ${{ steps.head.outputs.hash_full }}
     steps:
       - uses: actions/checkout@v4
+      - name: Scratch in the workspace, not the runner's shared /tmp
+        # /tmp is a RAM disk every build on the machine shares; when it filled on
+        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
       - name: Get current commit hash
         id: head
         run: |
           echo "hash_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
           echo "hash_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+      - name: Clear scratch
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
 
   build:
     name: "Citron Build (macOS)"
@@ -268,6 +277,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Scratch in the workspace, not the runner's shared /tmp
+        # /tmp is a RAM disk every build on the machine shares; when it filled on
+        # 2026-09-24 a compiler died and a job hung for hours instead of failing.
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
       - name: Post to Discord
         if: success()
         run: |
@@ -281,3 +296,6 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d "{\"content\":\"🍎 **New macOS Build Available!**\n\n📦 **Version:** \`${{ env.APP_VERSION }}\`\n📅 **Date:** ${DATE}\n🔗 **Download:** $DOWNLOAD_URL\"}" \
                "$WEBHOOK_URL"
+      - name: Clear scratch
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
