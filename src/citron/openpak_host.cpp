@@ -623,6 +623,13 @@ void OpenPakHost::AskAndSignIn(bool adopt, const QString& intro, std::function<v
     }
 }
 
+// OpenPak changed this console's redirects while the emulator runs. The account service applies
+// the network profile once per process, so only a new emulator process picks them up.
+void OpenPakHost::NetworkRedirectsChanged() {
+    Notify(static_cast<int>(Kind::Account),
+           openpak::qt::RedirectsChangedText(openpak::qt::RedirectsApplied::AtEmulatorStart));
+}
+
 void OpenPakHost::SignOut() {
     // The website token is revoked on the server, not only forgotten here, as Ryujinx does. The
     // console link stays: signing out of the website does not unlink a Switch either.

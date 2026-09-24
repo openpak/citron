@@ -158,10 +158,11 @@ static std::optional<std::string> GetNextendoRedirectIp(const std::string& host)
         return target;
     }
 
-    if (host == "nintendo.net" || host.ends_with(".nintendo.net") ||
-        host == "nintendo.com" || host.ends_with(".nintendo.com") ||
-        host == "nintendowifi.net" || host.ends_with(".nintendowifi.net") ||
-        host == "nintendo.co.jp" || host.ends_with(".nintendo.co.jp")) {
+    // The library's built-in Switch families, inside the verified ceiling: the one list every
+    // OpenPak client falls back to, instead of a copy of it here.
+    static const std::vector<std::string> builtin_families =
+        openpak::NetworkProfile::BuiltIn("switch").suffixes;
+    if (openpak::NetworkProfile::NameInFamilies(host, builtin_families)) {
         LOG_INFO(Service, "[OpenPak] Redirecting Nintendo host '{}' -> '{}'", host, server_ip);
         return server_ip;
     }
