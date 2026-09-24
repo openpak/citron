@@ -4,9 +4,12 @@ concurrency:
   group: build-macos-nightly-${{ github.ref }}
   cancel-in-progress: true
 
+# Manual only. The repo is private, so macos-latest bills minutes (Windows 2x, macOS 10x) and
+# does not start for this organisation; the only runner is the owner's Linux workstation, which
+# cannot build this. A vX.Y.Z tag therefore does not start it, and the Linux/Android release does
+# not wait for it. Dispatched on a tag ref, it still attaches its file to that tag's release
+# (made by release.yml) and announces it.
 on:
-  push:
-    tags: ['v*.*.*']
   workflow_dispatch: {}
 
 jobs:

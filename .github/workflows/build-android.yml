@@ -5,7 +5,7 @@ on:
     tags: ['v*.*.*']
   workflow_dispatch:
 
-# check-version creates the tag's release before the builds attach to it.
+# release.yml creates the tag's release; the builds wait for it and attach to it.
 permissions:
   contents: write
 
@@ -336,7 +336,7 @@ jobs:
       contents: write
     runs-on: [self-hosted, linux, podman, heavy]
 
-    # The release was made by check-version and each build attached its APK; what is left is
+    # The release was made by release.yml and each build attached its APK; what is left is
     # the announcement.
     steps:
       - uses: actions/checkout@v4
