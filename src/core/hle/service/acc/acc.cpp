@@ -1042,9 +1042,9 @@ private:
     }
 
     void LoadIdTokenCacheDeprecated(HLERequestContext& ctx) {
-        LOG_WARNING(Service_ACC, "(STUBBED) called");
-
-        ensure_token_id->LoadIdTokenCache(ctx);
+        // [OpenPak] Command 3 is what titles built against older SDKs call (Crash Team Racing
+        // Nitro-Fueled): same token as command 4, or Demonware gets an empty login token.
+        LoadIdTokenCache(ctx);
     }
 
     void LoadIdTokenCache(HLERequestContext& ctx) {
