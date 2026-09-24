@@ -13,7 +13,7 @@ permissions:
 jobs:
   create:
     name: Create the release
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     steps:
       - name: Scratch in the workspace, not the runner's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on

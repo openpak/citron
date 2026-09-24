@@ -12,7 +12,7 @@ on:
 jobs:
   check-version:
     name: Get the commit to build
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     permissions:
       contents: write
     outputs:
@@ -271,7 +271,7 @@ jobs:
     needs: [check-version, build]
     permissions:
       contents: write
-    runs-on: [self-hosted, linux, podman]
+    runs-on: [self-hosted, linux, podman, heavy]
     env:
       APP_VERSION: ${{ github.ref_name }}
 
