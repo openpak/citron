@@ -20,12 +20,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Get the commit to build
         id: branch_check
@@ -37,7 +37,7 @@ jobs:
           echo "hash_full=$FULL_HASH" >> $GITHUB_OUTPUT
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
 
 
   build-android:
@@ -63,12 +63,12 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       # The container runs as root over a workspace the runner's user owns: git refuses it as
       # "dubious ownership" unless told otherwise.
@@ -157,7 +157,7 @@ jobs:
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
 
   build-android-8elite:
     name: Build Android APK (Snapdragon 8 Elite)
@@ -191,12 +191,12 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       # The container runs as root over a workspace the runner's user owns: git refuses it as
       # "dubious ownership" unless told otherwise.
@@ -326,7 +326,7 @@ jobs:
         run: chown -R "$(stat -c %u:%g "$GITHUB_WORKSPACE/..")" "$GITHUB_WORKSPACE"
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
 
   release-android:
     name: "Announce the Android release"
@@ -340,12 +340,12 @@ jobs:
     # the announcement.
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Get version info
         shell: bash
@@ -377,4 +377,4 @@ jobs:
                "$WEBHOOK_URL"
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
