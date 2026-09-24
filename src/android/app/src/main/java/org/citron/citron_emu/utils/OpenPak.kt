@@ -50,6 +50,7 @@ object OpenPak {
         data class SavesPushed(val game: String) : Event()
         data class SavesPushFailed(val game: String, val error: String) : Event()
         data class SavesConflict(val game: String) : Event()
+        object RedirectsChanged : Event()
         data class PickFriends(val max: Int, val friends: List<PickableFriend>) : Event()
     }
 
@@ -187,6 +188,7 @@ object OpenPak {
             "saves_pushed" -> Event.SavesPushed(json.optString("game"))
             "saves_push_failed" -> Event.SavesPushFailed(json.optString("game"), json.optString("error"))
             "saves_conflict" -> Event.SavesConflict(json.optString("game"))
+            "redirects_changed" -> Event.RedirectsChanged
             else -> null
         }
 

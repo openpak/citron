@@ -188,6 +188,8 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
             is OpenPak.Event.SavesPushFailed ->
                 snackbar(string(R.string.openpak_toast_saves_push_failed, event.game, event.error))
             is OpenPak.Event.SavesConflict -> snackbar(string(R.string.openpak_toast_saves_conflict, event.game))
+            is OpenPak.Event.RedirectsChanged ->
+                if (on) snackbar(string(R.string.openpak_toast_redirects_changed_emulator))
         }
     }
 

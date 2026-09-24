@@ -134,6 +134,7 @@ public:
     std::string NatIp() const override;
     void SetGuestInputSuspended(bool suspended) override;
     openpak::qt::Navigation* CreateNavigation(QObject* parent) override;
+    void NetworkRedirectsChanged() override;
 
 private:
     // The sign-in dialog. adopt copies the account's name and avatar into the profile, which only

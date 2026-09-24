@@ -224,6 +224,8 @@
     <string name="openpak_toast_saves_pushed">Save for %1$s uploaded to OpenPak.</string>
     <string name="openpak_toast_saves_push_failed">The save for %1$s did not upload: %2$s</string>
     <string name="openpak_toast_saves_conflict">%1$s has a save here and a different one in the cloud. Choose one on the Cloud saves page.</string>
+    <string name="openpak_toast_redirects_changed_game">OpenPak updated this system\'s network redirects. Restart the game to use them.</string>
+    <string name="openpak_toast_redirects_changed_emulator">OpenPak updated this system\'s network redirects. Restart the emulator to use them.</string>
     <string name="openpak_settings_section">OpenPak</string>
     <string name="openpak_settings_account">Account</string>
     <string name="openpak_settings_enable">Connect this emulator to OpenPak</string>

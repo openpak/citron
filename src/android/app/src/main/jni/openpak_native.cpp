@@ -52,6 +52,7 @@
 #include "openpak/friends_cache.h"
 #include "openpak/log.h"
 #include "openpak/my_page.h"
+#include "openpak/network_profile.h"
 #include "openpak/platform.h"
 #include "openpak/save_sync.h"
 #include "openpak/session.h"
@@ -1131,6 +1132,9 @@ void OPENPAK_JNI(nativeInit)(JNIEnv* env, jobject self) {
                         : fmt::format("{}+{}", version, hash.substr(0, 8)));
     Api::SetSaveDevice(fmt::format("{} on Android", OPENPAK_EMULATOR_NAME));
     SetDirectories();
+    // OpenPak changed this console's redirects while the app runs: a snackbar says a restart
+    // applies them (the account service applies the profile once per process).
+    openpak::NetworkProfile::SetChangeNotifier([] { Queue({{"type", "redirects_changed"}}); });
 
     if (g_bridge == nullptr) {
         g_bridge = env->NewGlobalRef(self);
