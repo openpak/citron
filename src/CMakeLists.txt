@@ -269,7 +269,9 @@ if (CITRON_SHADER_TOOL)
     add_subdirectory(shader_tool)
 endif()
 
-if (ENABLE_SDL2)
+# OpenPak: citron-cmd includes SDL2's SDL_metal.h, which the SDL3 build on macOS lacks; the
+# macOS release ships only the Qt app.
+if (ENABLE_SDL2 AND NOT APPLE)
     add_subdirectory_without_clangcl_pgo(citron_cmd)
 endif()
 
