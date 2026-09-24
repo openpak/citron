@@ -28,12 +28,12 @@ jobs:
       new_hash_full: ${{ steps.head.outputs.hash_full }}
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Get current commit hash
         id: head
@@ -42,7 +42,7 @@ jobs:
           echo "hash_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
 
 
   build:
@@ -79,12 +79,12 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Add Git Safe Directory
         run: git config --global --add safe.directory "$PWD"
@@ -133,7 +133,7 @@ jobs:
   # x86_64 binary and would not start inside an arm64 container.
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
   build-aarch64:
     name: "Citron Build (aarch64, qemu)"
     needs: [check-version]
@@ -150,12 +150,12 @@ jobs:
           # openpak-client is private: GITHUB_TOKEN reads only this repo.
           token: ${{ secrets.OPENPAK_MODULE_TOKEN || github.token }}
           submodules: recursive
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Check that arm64 binaries can run here
         run: |
@@ -198,7 +198,7 @@ jobs:
   # or the announcement. Which legs made it is read from the release itself.
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
   release:
     if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     name: "release"
@@ -209,12 +209,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Scratch in the workspace, not the runner's shared /tmp
+      - name: Scratch in the runner's temp, not the machine's shared /tmp
         # /tmp is a RAM disk every build on the machine shares; when it filled on
         # 2026-09-24 a compiler died and a job hung for hours instead of failing.
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.tmp"
-          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/scratch"
+          echo "TMPDIR=$RUNNER_TEMP/scratch" >> "$GITHUB_ENV"
 
       - name: Collect the legs that published
         id: legs
@@ -259,4 +259,4 @@ jobs:
                "$WEBHOOK_URL"
       - name: Clear scratch
         if: always()
-        run: rm -rf "$GITHUB_WORKSPACE/.tmp"
+        run: rm -rf "$RUNNER_TEMP/scratch"
