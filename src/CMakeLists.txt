@@ -165,10 +165,16 @@ else()
             -Wno-braced-scalar-init
             -Wno-unused-private-field
             -Wno-nullability-completeness
-            -Werror=shadow-uncaptured-local
             -Werror=implicit-fallthrough
             -Werror=type-limits
         )
+        # OpenPak: Apple clang flags lambda init-captures that upstream's own code (sockets/bsd.cpp)
+        # uses, so on Apple this stays a warning; everywhere else it is still an error.
+        if (APPLE)
+            add_compile_options(-Wshadow-uncaptured-local)
+        else()
+            add_compile_options(-Werror=shadow-uncaptured-local)
+        endif()
         # apply hidden visibility to unity clang builds in the internal src subtree only.
         if(ENABLE_UNITY_BUILD AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT APPLE AND NOT ANDROID)
             add_compile_options(
