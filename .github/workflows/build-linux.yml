@@ -58,12 +58,12 @@ jobs:
       matrix:
         include:
           - name: "Citron Build (Normal x86_64)"
-            os: [self-hosted, linux, podman]
+            os: [self-hosted, linux, podman, heavy]
             artifact_suffix: "_x86_64"
             script_suffix: ""
             build_arg: ""
           - name: "Citron Build (Optimized x86_64)"
-            os: [self-hosted, linux, podman]
+            os: [self-hosted, linux, podman, heavy]
             artifact_suffix: "_v3"
             script_suffix: "_v3"
             build_arg: "v3"
