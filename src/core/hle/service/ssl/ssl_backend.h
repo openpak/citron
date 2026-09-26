@@ -41,6 +41,14 @@ public:
     virtual Result Read(size_t* out_size, std::span<u8> data) = 0;
     virtual Result Write(size_t* out_size, std::span<const u8> data) = 0;
     virtual Result Pending(s32* out_pending) = 0;
+    // [OpenPak] Reads without consuming. Moving Out 2's websocket uses Peek as its readiness
+    // check -- it peeks every 5 ms and will not call Read until a peek reports data -- so a flat
+    // ResultWouldBlock stalls it forever. Backends that cannot peek keep that answer, which is
+    // also what Nintendo's libcurl reads as "the connection is alive".
+    virtual Result Peek(size_t* out_size, std::span<u8> data) {
+        *out_size = 0;
+        return ResultWouldBlock;
+    }
     // [OpenPak] The protocol the server picked in ALPN, as its bare name ("h2"); empty when
     // nothing was negotiated or the backend cannot tell. GetNextAlpnProto answers with this.
     virtual std::vector<u8> GetNegotiatedAlpnProto() {
