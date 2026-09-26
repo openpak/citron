@@ -358,6 +358,13 @@ private:
         return res;
     }
 
+    Result PeekImpl(size_t* out_size, std::span<u8> data) {
+        if (!backend) {
+            return ResultNoSocket;
+        }
+        return backend->Peek(out_size, data);
+    }
+
     Result PendingImpl(s32* out_pending) {
         return backend->Pending(out_pending);
     }
@@ -527,10 +534,23 @@ private:
     }
 
     void Peek(HLERequestContext& ctx) {
-        // [Nextendo] Nintendo's libcurl checks connection liveness via Peek.
-        // Returning ResultWouldBlock tells libcurl the connection is open and active.
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultWouldBlock);
+        // [OpenPak] This used to answer a hardcoded ResultWouldBlock, on the grounds that
+        // Nintendo's libcurl only uses Peek to check that a connection is alive. Moving Out 2's
+        // T17BE websocket uses it as its readiness check instead: it peeks every 5 ms and will not
+        // call Read until a peek reports data, so it sat through thousands of refusals with the
+        // server's reply undrained in its socket. Peek for real; an idle connection still answers
+        // WouldBlock, which keeps libcurl's reading of it intact.
+        std::vector<u8> output_bytes(ctx.GetWriteBufferSize());
+        size_t peek_size{0};
+        const Result res = PeekImpl(&peek_size, output_bytes);
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(res);
+        if (res == ResultSuccess) {
+            rb.Push(static_cast<u32>(peek_size));
+            ctx.WriteBuffer(std::span(output_bytes).first(peek_size));
+        } else {
+            rb.Push(static_cast<u32>(0));
+        }
     }
 
     void Poll(HLERequestContext& ctx) {

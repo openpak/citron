@@ -272,6 +272,11 @@ public:
         return ResultSuccess;
     }
 
+    Result Peek(size_t* out_size, std::span<u8> data) override {
+        const int ret = SSL_peek_ex(ssl, data.data(), data.size(), out_size);
+        return HandleReturn("SSL_peek_ex", out_size, ret);
+    }
+
     std::vector<u8> GetNegotiatedAlpnProto() override {
         const unsigned char* selected = nullptr;
         unsigned int length = 0;
