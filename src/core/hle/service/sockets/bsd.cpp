@@ -1471,6 +1471,18 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
     // not be passed to Translate(Type) as part of the base socket type.
     type = static_cast<Type>(static_cast<u32>(type) & ~0x10000000);
 
+    // [OpenPak] With the flags gone some titles are left asking for Type::Unspecified, which
+    // Translate() cannot map, so the call could never succeed for anybody. Risk of Rain 2 asks for
+    // exactly that -- 0x10000000, SOCK_CLOEXEC over a base type of 0 -- right after resolving
+    // localhost, and on Ryujinx the failure cost the emulator a null dereference ~105 ms later,
+    // four runs running, while a real Switch played on. Mapping it to STREAM is what got Ryujinx
+    // into an RoR2 lobby (2026-09-26, measured). It cannot regress a working title: the
+    // alternative for Unspecified is a call that always fails.
+    if (type == Type::Unspecified) {
+        LOG_INFO(Service, "socket type 0 -> STREAM (base type unset by the guest)");
+        type = Type::STREAM;
+    }
+
     const s32 fd = FindFreeFileDescriptorHandle();
     if (fd < 0) {
         LOG_ERROR(Service, "No more file descriptors available");
