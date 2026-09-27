@@ -130,7 +130,15 @@ std::optional<baas::User> User(u64 id) {
     if (const auto found = baas::FindFriend(id)) {
         return baas::User{found->id, found->nickname, found->thumbnail_url, found->play_log};
     }
-    return baas::CachedUser(id);
+    if (const auto cached = baas::CachedUser(id)) {
+        return cached;
+    }
+    // Last resort for the local player, who is never their own friend: their own user as of the last
+    // sync. Answering an invalid slot for yourself is what a game notices first.
+    if (const auto own = baas::OwnUserSetting(); own && own->id == id) {
+        return baas::User{own->id, own->nickname, own->thumbnail_url, {}};
+    }
+    return std::nullopt;
 }
 
 /// Ask for the ids nothing has cached yet, off this thread (§A.7). The call that asked is
