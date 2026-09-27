@@ -7,6 +7,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/cmif_serialization.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/nim/nim.h"
 #include "core/hle/service/server_manager.h"
@@ -87,19 +88,95 @@ public:
 class IShopServiceAsync final : public ServiceFramework<IShopServiceAsync> {
 public:
     explicit IShopServiceAsync(Core::System& system_)
-        : ServiceFramework{system_, "IShopServiceAsync"} {
+        : ServiceFramework{system_, "IShopServiceAsync"},
+          service_context{system_, "IShopServiceAsync"} {
         // clang-format off
         static const FunctionInfo functions[] = {
-            {0, nullptr, "Cancel"},
-            {1, nullptr, "GetSize"},
-            {2, nullptr, "Read"},
-            {3, nullptr, "GetErrorCode"},
-            {4, nullptr, "Request"},
-            {5, nullptr, "Prepare"},
+            {0, D<&IShopServiceAsync::Cancel>, "Cancel"},
+            {1, D<&IShopServiceAsync::GetSize>, "GetSize"},
+            {2, D<&IShopServiceAsync::Read>, "Read"},
+            {3, D<&IShopServiceAsync::GetErrorCode>, "GetErrorCode"},
+            {4, D<&IShopServiceAsync::Request>, "Request"},
+            {5, D<&IShopServiceAsync::Prepare>, "Prepare"},
         };
         // clang-format on
 
         RegisterHandlers(functions);
+
+        completion_event = service_context.CreateEvent("IShopServiceAsync:Completion");
+    }
+
+    ~IShopServiceAsync() override {
+        service_context.CloseEvent(completion_event);
+    }
+
+    Kernel::KReadableEvent* GetEvent() const {
+        return &completion_event->GetReadableEvent();
+    }
+
+private:
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* completion_event;
+
+    std::mutex data_mutex;
+    std::vector<u8> download_data;
+    u32 error_code{0};
+
+    Result Cancel() {
+        LOG_DEBUG(Service_NIM, "called");
+        std::scoped_lock lock{data_mutex};
+        download_data.clear();
+        R_SUCCEED();
+    }
+
+    Result GetSize(Out<u64> out_size) {
+        std::scoped_lock lock{data_mutex};
+        *out_size = download_data.size();
+        R_SUCCEED();
+    }
+
+    Result Read(Out<u64> out_size, u64 offset, OutBuffer<BufferAttr_HipcAutoSelect> out_buffer) {
+        std::scoped_lock lock{data_mutex};
+
+        u64 actual_read = 0;
+        if (offset < download_data.size()) {
+            actual_read = std::min<u64>(out_buffer.size(), download_data.size() - offset);
+            std::memcpy(out_buffer.data(), download_data.data() + offset, actual_read);
+        }
+
+        *out_size = actual_read;
+        R_SUCCEED();
+    }
+
+    Result GetErrorCode(Out<u32> out_error_code) {
+        *out_error_code = error_code;
+        R_SUCCEED();
+    }
+
+    Result Request() {
+        LOG_DEBUG(Service_NIM, "(STUBBED) called");
+
+        // There is no shop behind this. The body still has to be well-formed: nn::ec hands what it
+        // reads to a JSON parser, and a zero-length body is a fault to it -- which is how Don't
+        // Starve Together froze an emulator the moment its login succeeded.
+        {
+            std::scoped_lock lock{data_mutex};
+            download_data.assign({'{', '}'});
+        }
+        error_code = 0;
+        completion_event->Signal();
+
+        R_SUCCEED();
+    }
+
+    Result Prepare(InArray<char, BufferAttr_HipcMapAlias> in_path,
+                   InArray<char, BufferAttr_HipcMapAlias> in_post) {
+        if (!in_path.empty()) {
+            LOG_INFO(Service_NIM, "Preparing request for URL: {}",
+                     std::string(in_path.data(), in_path.size()));
+        }
+        completion_event->Clear();
+        R_SUCCEED();
     }
 };
 
@@ -118,10 +195,15 @@ public:
 
 private:
     void CreateAsyncInterface(HLERequestContext& ctx) {
-        LOG_WARNING(Service_NIM, "(STUBBED) called");
-        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        LOG_DEBUG(Service_NIM, "called");
+        auto async_interface = std::make_shared<IShopServiceAsync>(system);
+
+        // Both, in one reply: the completion event the guest waits on AND the interface itself.
+        // Answering with only the interface leaves the caller with no event to wait on.
+        IPC::ResponseBuilder rb{ctx, 2, 1, 1};
         rb.Push(ResultSuccess);
-        rb.PushIpcInterface<IShopServiceAsync>(system);
+        rb.PushCopyObjects(async_interface->GetEvent());
+        rb.PushIpcInterface<IShopServiceAsync>(std::move(async_interface));
     }
 };
 
