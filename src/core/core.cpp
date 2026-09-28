@@ -37,7 +37,6 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
-#include "openpak/account.h"
 #include "openpak/platform.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -471,9 +470,6 @@ struct System::Impl {
             game_info.version = title_version;
             room_member->SendGameInfo(game_info);
         }
-
-        Common::OpenPakAccount::WriteGuestBridge(
-            Common::FS::GetCitronPath(Common::FS::CitronPath::SDMCDir));
 
         status = SystemResultStatus::Success;
         return status;
