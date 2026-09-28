@@ -899,6 +899,12 @@ private:
              index++) {
             const auto found = User(friend_ids[index]);
             out_list[index] = found ? friends::ToProfileImpl(*found) : friends::ProfileImpl{};
+            // An unresolved profile is invisible from outside, and a game that cannot build its
+            // friend list just gives up, so a miss says which id it was (openpak/ryujinx 61e87a147).
+            if (!found) {
+                LOG_WARNING(Service_Friend, "[OpenPak] GetProfileList: {:016x} UNRESOLVED ({} asked)",
+                            static_cast<u64>(friend_ids[index]), friend_ids.size());
+            }
         }
 
         Warm(friend_ids);
