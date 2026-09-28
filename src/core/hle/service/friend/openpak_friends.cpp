@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -632,12 +633,21 @@ public:
 
         completion_event = service_context.CreateEvent("IFriendService:CompletionEvent");
 
-        // Nothing here completes asynchronously as far as the guest can tell: every command
-        // answers at once, so the event is simply signalled, as the reference leaves it.
-        completion_event->Signal();
+        // Created NOT signalled, as the friends module creates it (22.5.0). The client library
+        // asks "has my call finished" by polling this event and nothing else, while the call itself
+        // runs on a worker thread it has only just started: an event that is already signalled
+        // answers yes before that thread has run, and the game reads a result nobody has written.
+        // Moving Out 2 lost that race on every first launch on Ryujinx and reported "An error has
+        // occurred connecting to T17 services" (openpak/ryujinx de8916462, b207dac62).
+        completion->event = completion_event;
     }
 
     ~OpenPakFriendService() override {
+        // The module signals the event as the session goes, which is what completes a call that
+        // needed no work. A sync still running finds the event gone and leaves it alone.
+        std::scoped_lock lock{completion->mutex};
+        completion_event->Signal();
+        completion->event = nullptr;
         service_context.CloseEvent(completion_event);
     }
 
@@ -670,8 +680,29 @@ private:
         R_SUCCEED();
     }
 
+    /// The completion event reports whether the work a command started has finished: cleared while
+    /// that work runs, signalled when it ends.
+    void Await(std::function<void()> work) {
+        completion_event->Clear();
+        baas::RunInBackground([work = std::move(work), shared = completion] {
+            work();
+            std::scoped_lock lock{shared->mutex};
+            if (shared->event != nullptr) {
+                shared->event->Signal();
+            }
+        });
+    }
+
+    /// Nothing to wait for: the answer is already in hand.
+    void Done() {
+        completion_event->Signal();
+    }
+
     Result Cancel() {
-        LOG_DEBUG(Service_Friend, "(STUBBED) called");
+        // A sync already in flight cannot be stopped, but a guest that cancels must not be left
+        // waiting on the completion event for work it has given up on.
+        LOG_DEBUG(Service_Friend, "called");
+        Done();
         R_SUCCEED();
     }
 
@@ -779,7 +810,9 @@ private:
         // answered at once: blocking a game's thread on an HTTP round trip is the one thing this
         // service may never do.
         if (AvailableFor(user) && !baas::FriendListAvailable()) {
-            baas::RunInBackground([] { baas::SyncFriendList(true); });
+            Await([] { baas::SyncFriendList(true); });
+        } else {
+            Done();
         }
 
         R_SUCCEED();
@@ -847,7 +880,7 @@ private:
 
     Result EnsureBlockedUserListAvailable(Uid user) {
         if (AvailableFor(user) && !baas::BlockListAvailable()) {
-            baas::RunInBackground([] { baas::SyncBlockList(); });
+            Await([] { baas::SyncBlockList(); });
         }
         R_SUCCEED();
     }
@@ -942,9 +975,16 @@ private:
         R_SUCCEED();
     }
 
-    Result GetProfileImageUrl(Out<friends::Url> out_url) {
-        LOG_WARNING(Service_Friend, "(STUBBED) called");
-        *out_url = {};
+    Result GetProfileImageUrl(Out<friends::Url> out_url, friends::Url url, s32 size) {
+        // The game hands in the thumbnail URL from a friend's record and asks for the URL to fetch.
+        // An empty answer is a placeholder avatar where a console shows the real one: nx-baas puts
+        // cdn-image-<...>.baas.nintendo.com/1/<userId> in the friend payload, that host is
+        // redirected to OpenPak, and it serves the image. Pass it through (openpak/ryujinx
+        // 201c5c451).
+        // ponytail: unchanged, not resized. `size` selects a variant on hardware and nx-baas serves
+        // /1/ and /2/; revisit if a title asks for a size we do not have.
+        LOG_DEBUG(Service_Friend, "called, size={}", size);
+        *out_url = url;
         R_SUCCEED();
     }
 
@@ -994,7 +1034,9 @@ private:
         // The console clears the cooldown and syncs inline; here the sync is started and the
         // guest answered at once. The list on screen refreshes through the notification event.
         if (AvailableFor(user)) {
-            baas::RunInBackground([] { baas::SyncFriendList(true); });
+            Await([] { baas::SyncFriendList(true); });
+        } else {
+            Done();
         }
         R_SUCCEED();
     }
@@ -1250,7 +1292,7 @@ private:
         R_TRY(RequireViewer());
 
         if (AvailableFor(user)) {
-            baas::RunInBackground([] { baas::SyncBlockList(); });
+            Await([] { baas::SyncBlockList(); });
         }
         R_SUCCEED();
     }
@@ -1379,7 +1421,7 @@ private:
         R_TRY(RequireViewer());
 
         if (AvailableFor(user)) {
-            baas::RunInBackground([] { baas::SyncUserSetting(); });
+            Await([] { baas::SyncUserSetting(); });
         }
         R_SUCCEED();
     }
@@ -2093,6 +2135,14 @@ private:
     const u32 permission;
     KernelHelpers::ServiceContext service_context;
     Kernel::KEvent* completion_event;
+
+    /// The event as a sync on the worker thread sees it: that work can outlive this session, so it
+    /// signals through here, and finds nullptr once the session has closed the event.
+    struct Completion {
+        std::mutex mutex;
+        Kernel::KEvent* event{};
+    };
+    std::shared_ptr<Completion> completion = std::make_shared<Completion>();
 };
 
 } // namespace
