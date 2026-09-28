@@ -179,6 +179,22 @@ void OpenPakHost::GoOnline() {
             return;
         }
 
+        // The name and the picture follow the account on every sign-in, not only the one made in
+        // the dialog: a name or avatar changed on the website shows at the next launch
+        // (openpak/ryujinx 888987257).
+        QMetaObject::invokeMethod(
+            this,
+            [this, self, profile, name = openpak::client::session::Nickname()] {
+                if (!self) {
+                    return;
+                }
+                if (!name.empty() && QString::fromStdString(name) != profile) {
+                    ApplyProfileName(name);
+                }
+                SyncProfileAvatar();
+            },
+            Qt::QueuedConnection);
+
         // Presence says what is being played. The host reads it from the system it owns, on its
         // own thread, and only while a game is actually loaded.
         openpak::client::session::StartHeartbeat([this] {
