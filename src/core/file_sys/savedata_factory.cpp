@@ -8,6 +8,7 @@
 #include <vector>
 #include "common/assert.h"
 #include "common/common_types.h"
+#include "common/fs/fs.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/uuid.h"
@@ -222,6 +223,21 @@ std::string SaveDataFactory::GetFullPath(ProgramId program_id, VirtualDir dir,
         return fmt::format("{}{:016X}/{:016X}{:016X}/{:016X}", out, 0, user_id[1], user_id[0], title_id);
     case SaveDataType::Cache:
         return fmt::format("{}save/cache/{:016X}", out, title_id);
+    case SaveDataType::Bcat: {
+        // [OpenPak] Eden's path. A save made under the old fallthrough name is moved over once,
+        // so nobody loses a delivery cache.
+        auto bcat_path = fmt::format("{}save/bcat/{:016X}", out, title_id);
+        const auto old_path =
+            fmt::format("{}save/unknown_{:X}/{:016X}", out, static_cast<u8>(type), title_id);
+        if (dir->GetDirectoryRelative(bcat_path) == nullptr &&
+            dir->GetDirectoryRelative(old_path) != nullptr &&
+            dir->CreateDirectoryRelative(fmt::format("{}save/bcat", out)) != nullptr &&
+            !Common::FS::RenameDir(dir->GetFullPath() + old_path, dir->GetFullPath() + bcat_path)) {
+            LOG_ERROR(Service_FS, "Could not move the BCAT save from {} to {}", old_path,
+                      bcat_path);
+        }
+        return bcat_path;
+    }
     default:
         return fmt::format("{}save/unknown_{:X}/{:016X}", out, static_cast<u8>(type), title_id);
     }
