@@ -20,7 +20,6 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 
-#include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
@@ -77,35 +76,6 @@ static void OneTimeInit() {
     }
 
     one_time_init_success = true;
-}
-
-// [OpenPak] NPLN (gRPC over HTTP/2) needs the title's own ALPN list; everyone else gets
-// http/1.1 only, because NEX rides a WebSocket Upgrade that h2 breaks. The same rule as the
-// OpenSSL backend's.
-bool IsNplnHost(std::string_view hostname) {
-    const std::string lower = Common::ToLower(std::string(hostname));
-    return lower.find("npln") != std::string::npos ||
-           lower.find("gs.nintendo.net") != std::string::npos;
-}
-
-// ALPN protocol list in wire form: one length byte per name.
-std::vector<u8> BuildAlpnProtocolList(std::span<const std::string> requested, bool npln) {
-    std::vector<u8> list;
-    if (npln) {
-        for (const std::string& proto : requested) {
-            if (proto != "h2" && proto != "http/1.1") {
-                continue;
-            }
-            list.push_back(static_cast<u8>(proto.size()));
-            list.insert(list.end(), proto.begin(), proto.end());
-        }
-    }
-    if (list.empty()) {
-        static constexpr std::string_view http11 = "http/1.1";
-        list.push_back(static_cast<u8>(http11.size()));
-        list.insert(list.end(), http11.begin(), http11.end());
-    }
-    return list;
 }
 
 // SEC_APPLICATION_PROTOCOLS for one ALPN list: {u32 ProtocolListsSize, u32 ProtoNegoExt,
@@ -205,28 +175,7 @@ public:
     }
 
     Result SetHostName(const std::string& hostname_in) override {
-        std::string effective_host = hostname_in;
-        // nsd's environment, as the OpenSSL backend substitutes it.
-        for (auto pos = effective_host.find('%'); pos != std::string::npos;
-             pos = effective_host.find('%', pos + 3)) {
-            effective_host.replace(pos, 1, "lp1");
-        }
-        if (socket) {
-            auto [peer_addr, err] = socket->GetPeerName();
-            if (err == Network::Errno::SUCCESS) {
-                std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
-                // Some titles pass the redirected IP itself instead of leaving this empty.
-                if (effective_host.empty() || effective_host == ip_str) {
-                    std::string last_host = Service::Sockets::GetLastHostForIp(ip_str);
-                    if (!last_host.empty()) {
-                        effective_host = last_host;
-                        LOG_INFO(Service_SSL, "[OpenPak] Recovered host '{}' for IP {}",
-                                 effective_host, ip_str);
-                    }
-                }
-            }
-        }
-        hostname = effective_host;
+        hostname = hostname_in;
         return ResultSuccess;
     }
 
@@ -239,15 +188,9 @@ public:
         return ResultSuccess;
     }
 
-    Result DoHandshake(std::span<const std::string> requested_alpn_protos) override {
+    Result DoHandshake(std::span<const u8> alpn_protos) override {
         if (handshake_state == HandshakeState::Initial) {
-            const bool npln = hostname.has_value() && IsNplnHost(*hostname);
-            alpn_protocol_list = BuildAlpnProtocolList(requested_alpn_protos, npln);
-            if (npln) {
-                LOG_INFO(Service_SSL,
-                         "[OpenPak] NPLN host '{}': honoring game-requested ALPN ({} byte(s))",
-                         *hostname, alpn_protocol_list.size());
-            }
+            alpn_protocol_list.assign(alpn_protos.begin(), alpn_protos.end());
         }
         while (1) {
             Result r;
@@ -343,14 +286,12 @@ public:
         unsigned long attr;
         bool initial_call_done = handshake_state != HandshakeState::Initial;
 
-        // [OpenPak] NEX (MK8/Splatoon 2) uses PRUDP over WebSocket which requires HTTP/1.1
-        // Upgrade, so everyone but NPLN is offered http/1.1 only (see DoHandshake). Only valid
-        // in the client's first ClientHello.
+        // [OpenPak] The title's own list, as it set it, and nothing when it set nothing. Only
+        // valid in the client's first ClientHello.
+        const bool offer_alpn = !initial_call_done && !alpn_protocol_list.empty();
         std::vector<u8> alpn_buf;
-        if (!initial_call_done) {
-            alpn_buf = BuildAlpnSecBuffer(alpn_protocol_list.empty()
-                                              ? BuildAlpnProtocolList({}, false)
-                                              : alpn_protocol_list);
+        if (offer_alpn) {
+            alpn_buf = BuildAlpnSecBuffer(alpn_protocol_list);
         }
 
         // https://learn.microsoft.com/en-us/windows/win32/secauthn/initializesecuritycontext--schannel
@@ -372,9 +313,9 @@ public:
             },
             {
                 // [2] ALPN offer; only populated on the initial call.
-                .cbBuffer = initial_call_done ? 0ul : static_cast<unsigned long>(alpn_buf.size()),
-                .BufferType = initial_call_done ? SECBUFFER_EMPTY : SECBUFFER_APPLICATION_PROTOCOLS,
-                .pvBuffer = initial_call_done ? nullptr : alpn_buf.data(),
+                .cbBuffer = offer_alpn ? static_cast<unsigned long>(alpn_buf.size()) : 0ul,
+                .BufferType = offer_alpn ? SECBUFFER_APPLICATION_PROTOCOLS : SECBUFFER_EMPTY,
+                .pvBuffer = offer_alpn ? alpn_buf.data() : nullptr,
             },
         }};
         std::array<SecBuffer, 2> output_buffers{{

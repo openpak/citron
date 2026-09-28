@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <mutex>
-#include <string_view>
 #include <vector>
 
 #include <openssl/bio.h>
@@ -18,9 +17,7 @@
 #include "common/fs/path_util.h"
 #include "common/hex_util.h"
 #include "common/settings.h"
-#include "common/string_util.h"
 
-#include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/ssl/ssl_backend.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
@@ -47,26 +44,6 @@ Result CheckOpenSSLErrors();
 void OneTimeInit();
 void OneTimeInitLogFile();
 bool OneTimeInitBIO();
-
-// [OpenPak] NPLN (Splatoon 3's gRPC/HTTP2 stack) needs h2; everyone else needs http/1.1-only
-// (NEX rides a WebSocket Upgrade that h2 breaks). Substring match: NPLN's session transport
-// connects via SNI "gs.nintendo.net", which doesn't contain "npln".
-bool IsNplnHost(std::string_view hostname) {
-    const std::string lower = Common::ToLower(std::string(hostname));
-    return lower.find("npln") != std::string::npos || lower.find("gs.nintendo.net") != std::string::npos;
-}
-
-std::vector<unsigned char> BuildAlpnWire(std::span<const std::string> protocols) {
-    std::vector<unsigned char> wire;
-    for (const std::string& proto : protocols) {
-        if (proto != "h2" && proto != "http/1.1") {
-            continue;
-        }
-        wire.push_back(static_cast<unsigned char>(proto.size()));
-        wire.insert(wire.end(), proto.begin(), proto.end());
-    }
-    return wire;
-}
 
 } // namespace
 
@@ -108,33 +85,10 @@ public:
         socket = std::move(socket_in);
     }
 
+    // The name and the verify option arrive in either order, so both are only remembered here
+    // and applied together when the handshake starts.
     Result SetHostName(const std::string& hostname) override {
-        std::string effective_host = hostname;
-        auto pos = effective_host.find('%');
-        if (pos != std::string::npos) {
-            effective_host.replace(pos, 1, "lp1");
-        }
-        if (socket) {
-            auto [peer_addr, err] = socket->GetPeerName();
-            if (err == Network::Errno::SUCCESS) {
-                std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
-                // Some titles pass the redirected IP itself instead of leaving this empty.
-                if (effective_host.empty() || effective_host == ip_str) {
-                    std::string last_host = Service::Sockets::GetLastHostForIp(ip_str);
-                    if (!last_host.empty()) {
-                        effective_host = last_host;
-                        auto pos2 = effective_host.find('%');
-                        if (pos2 != std::string::npos) {
-                            effective_host.replace(pos2, 1, "lp1");
-                        }
-                        LOG_INFO(Service_SSL, "[OpenPak] Recovered host '{}' for IP {}", effective_host, ip_str);
-                    }
-                }
-            }
-        }
-        // The name and the verify option arrive in either order, so both are only remembered
-        // here and applied together when the handshake starts.
-        host_name = std::move(effective_host);
+        host_name = hostname;
         return ResultSuccess;
     }
 
@@ -205,42 +159,20 @@ public:
         X509_free(ca);
     }
 
-    Result DoHandshake(std::span<const std::string> requested_alpn_protos) override {
-        // If no host was named, try recovering it from the peer IP.
-        if (socket && host_name.empty()) {
-            auto [peer_addr, err] = socket->GetPeerName();
-            if (err == Network::Errno::SUCCESS) {
-                std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
-                std::string last_host = Service::Sockets::GetLastHostForIp(ip_str);
-                if (!last_host.empty()) {
-                    auto pos = last_host.find('%');
-                    if (pos != std::string::npos) {
-                        last_host.replace(pos, 1, "lp1");
-                    }
-                    LOG_INFO(Service_SSL, "[OpenPak] DoHandshake SNI injection host '{}' for IP {}", last_host, ip_str);
-                    host_name = last_host;
-                }
-            }
+    Result DoHandshake(std::span<const u8> alpn_protos) override {
+        // [OpenPak] The title's own protocol list, handed to OpenSSL as it arrived, for every
+        // host: SetNextAlpnProto already carries the length-prefixed wire form. Nothing is
+        // offered when the title set nothing.
+        if (!alpn_protos.empty() &&
+            SSL_set_alpn_protos(ssl, alpn_protos.data(),
+                                static_cast<unsigned>(alpn_protos.size())) != 0) {
+            LOG_ERROR(Service_SSL, "SSL_set_alpn_protos failed");
         }
 
         // Once: a non-blocking handshake is called again until it completes.
         if (!verification_applied) {
             R_TRY(ApplyVerification());
             verification_applied = true;
-        }
-
-        static constexpr unsigned char kHttp11Only[] = "\x08http/1.1";
-        std::vector<unsigned char> npln_wire;
-        const char* servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-        if (servername && IsNplnHost(servername)) {
-            npln_wire = BuildAlpnWire(requested_alpn_protos);
-        }
-        if (!npln_wire.empty()) {
-            LOG_INFO(Service_SSL, "[OpenPak] NPLN host '{}': honoring game-requested ALPN ({} byte(s))",
-                     servername, npln_wire.size());
-            SSL_set_alpn_protos(ssl, npln_wire.data(), static_cast<unsigned int>(npln_wire.size()));
-        } else {
-            SSL_set_alpn_protos(ssl, kHttp11Only, sizeof(kHttp11Only) - 1);
         }
 
         SSL_set_verify_result(ssl, X509_V_OK);

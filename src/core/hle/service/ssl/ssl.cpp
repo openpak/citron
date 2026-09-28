@@ -21,10 +21,8 @@
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/ssl/cert_store.h"
-#include "core/hle/service/ssl/legacy_nat_rewrite.h"
 #include "core/hle/service/ssl/ssl.h"
 #include "core/hle/service/ssl/ssl_backend.h"
-#include "core/hle/service/ssl/ssl_pending_registry.h"
 #include "core/hle/service/ssl/ssl_types.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
@@ -162,8 +160,15 @@ public:
 
     ~ISslConnection() {
         shared_data->connection_count--;
-        if (socket) {
-            UnregisterPendingCheck(socket.get());
+        // [OpenPak] The duplicate goes with the connection, unless the title set DoNotCloseSocket.
+        if (fd_to_close.has_value() && !do_not_close_socket) {
+            auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD>("bsd:u");
+            if (bsd) {
+                auto err = bsd->CloseImpl(*fd_to_close);
+                if (err != Service::Sockets::Errno::SUCCESS) {
+                    LOG_ERROR(Service_SSL, "Failed to close duplicated socket: {}", err);
+                }
+            }
         }
     }
 
@@ -171,60 +176,43 @@ private:
     SslVersion ssl_version;
     std::shared_ptr<SslContextSharedData> shared_data;
     std::unique_ptr<SSLConnectionBackend> backend;
+    std::optional<s32> fd_to_close;
     bool do_not_close_socket = false;
     bool get_server_cert_chain = false;
+    bool skip_default_verify = false;
+    bool enable_alpn = false;
     std::shared_ptr<Network::SocketBase> socket;
+    std::vector<u8> next_alpn_proto;       ///< The length-prefixed list the title offers.
+    std::vector<u8> negotiated_alpn_proto; ///< What the server picked, read back by the title.
     bool did_handshake = false;
     u32 verify_option = 0;
-    std::vector<std::string> requested_alpn_protos; // set via SetNextAlpnProto, see DoHandshakeImpl
-    // [OpenPak] What the server picked, kept apart from what was offered: GetNextAlpnProto reads
-    // it back after the handshake. Overwriting the offered list with it would leave a later
-    // handshake offering nothing, which a gRPC server refuses.
-    std::vector<u8> negotiated_alpn_proto;
     std::string host_name; ///< As the title set it; what the trace names a connection by.
 
-    // fd's owning bsd:* port isn't known here; probe each instead of assuming "bsd:u".
-    std::shared_ptr<Service::Sockets::BSD> FindBsdServiceOwning(s32 fd) {
-        static constexpr std::array<const char*, 4> bsd_ports{"bsd:u", "bsd:s", "bsd:a", "bsd:nu"};
-        for (const char* port : bsd_ports) {
-            auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD>(port);
-            if (bsd && bsd->GetSocket(fd).has_value()) {
-                return bsd;
-            }
-        }
-        return nullptr;
-    }
-
     Result SetSocketDescriptorImpl(s32* out_fd, s32 fd) {
-        LOG_DEBUG(Service_SSL, "called, fd={} do_not_close_socket={}", fd, do_not_close_socket);
+        LOG_DEBUG(Service_SSL, "called, fd={}", fd);
         ASSERT(!did_handshake);
-        auto bsd = FindBsdServiceOwning(fd);
-        if (!bsd) {
-            LOG_ERROR(Service_SSL, "invalid socket fd {}", fd);
-            return ResultInvalidSocket;
-        }
+        auto bsd = system.ServiceManager().GetService<Service::Sockets::BSD>("bsd:u");
+        ASSERT_OR_EXECUTE(bsd, { return ResultInternalError; });
 
-        // [OpenPak] DoNotCloseSocket: the title keeps its own descriptor, polls it through bsd
-        // and may dial again on it, and is told so with -1. No duplicate is made for it any more
-        // (ported from Eden): the duplicate shared the title's socket, so closing it when this
-        // connection went away closed the socket the title still held -- and if the title had
-        // closed the duplicate itself, the number could already belong to a new socket.
-        *out_fd = -1;
-        std::optional<std::shared_ptr<Network::SocketBase>> sock = bsd->GetSocket(fd);
-        if (!sock.has_value()) {
-            LOG_ERROR(Service_SSL, "invalid socket fd {}", fd);
-            return ResultInvalidSocket;
+        // [OpenPak] The connection works on its own duplicate. The title gets its descriptor
+        // back, or -1 when it set DoNotCloseSocket.
+        const auto res = bsd->DuplicateSocketImpl(fd);
+        if (res.has_value()) {
+            const s32 duplicated_fd = *res;
+            *out_fd = do_not_close_socket ? -1 : fd;
+            fd_to_close = duplicated_fd;
+            std::optional<std::shared_ptr<Network::SocketBase>> sock =
+                bsd->GetSocket(duplicated_fd);
+            if (!sock.has_value()) {
+                LOG_ERROR(Service_SSL, "invalid socket fd {} after duplication", duplicated_fd);
+                return ResultInvalidSocket;
+            }
+            socket = std::move(*sock);
+            backend->SetSocket(socket);
+            return ResultSuccess;
         }
-        socket = std::move(*sock);
-        backend->SetSocket(socket);
-        // Lets bsd:u's Poll report readable when this connection has already decrypted more
-        // than the game's last Read() asked for -- the raw socket alone can't tell.
-        RegisterPendingCheck(socket.get(), [this] {
-            s32 pending = 0;
-            backend->Pending(&pending);
-            return pending;
-        });
-        return ResultSuccess;
+        LOG_ERROR(Service_SSL, "Failed to duplicate socket with fd {}", fd);
+        return ResultInvalidSocket;
     }
 
     Result SetHostNameImpl(const std::string& hostname) {
@@ -262,7 +250,9 @@ private:
 
     Result DoHandshakeImpl() {
         ASSERT_OR_EXECUTE(!did_handshake && socket, { return ResultNoSocket; });
-        Result res = backend->DoHandshake(requested_alpn_protos);
+        // [OpenPak] Offered whenever the title supplied a list, for every host, and nothing
+        // when it supplied none.
+        Result res = backend->DoHandshake(next_alpn_proto);
         did_handshake = res.IsSuccess();
 
         // Success included: a handshake that worked and said nothing looks exactly like one
@@ -337,24 +327,15 @@ private:
 
     Result WriteImpl(size_t* out_size, std::span<const u8> data) {
         ASSERT_OR_EXECUTE(did_handshake, { return ResultInternalError; });
-
-        std::vector<u8> rewritten;
-        const bool did_rewrite = Service::SSL::TryFixupStationAddress(data, rewritten);
-        const std::span<const u8> send_data = did_rewrite ? std::span<const u8>(rewritten) : data;
-
         if (TraceEnabled()) {
-            LOG_INFO(Service_SSL, "SSLTX {} {}B: {}", host_name, send_data.size(),
-                     TraceBytes(send_data));
+            LOG_INFO(Service_SSL, "SSLTX {} {}B: {}", host_name, data.size(), TraceBytes(data));
         }
-        const Result res = backend->Write(out_size, send_data);
+        const Result res = backend->Write(out_size, data);
         if (TraceEnabled() && res != ResultSuccess) {
             LOG_INFO(Service_SSL, "SSLTX {} failed: {}", host_name, TraceResult(res));
         }
-        if (did_rewrite && res.IsSuccess()) {
-            *out_size = data.size();
-        }
         LOG_DEBUG(Service_SSL, "Write {} bytes, res={}: {}", *out_size, res.raw,
-                  Common::HexToString(send_data.subspan(0, send_data.size()), false));
+                  Common::HexToString(data, false));
         return res;
     }
 
@@ -521,8 +502,10 @@ private:
             get_server_cert_chain = static_cast<bool>(parameters.value);
             break;
         case OptionType::SkipDefaultVerify:
+            skip_default_verify = static_cast<bool>(parameters.value);
+            break;
         case OptionType::EnableAlpn:
-            LOG_DEBUG(Service_SSL, "OptionType option={} set to {}", static_cast<u32>(parameters.option), parameters.value);
+            enable_alpn = static_cast<bool>(parameters.value);
             break;
         default:
             LOG_WARNING(Service_SSL, "Unknown option={}, value={}", static_cast<u32>(parameters.option),
@@ -615,13 +598,33 @@ private:
 
     void GetOption(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
-        const auto option = rp.PopEnum<OptionType>();
+        const auto option = rp.PopRaw<OptionType>();
 
-        LOG_WARNING(Service_SSL, "(STUBBED) called, option={}", option);
+        u8 value = 0;
+
+        switch (option) {
+        case OptionType::DoNotCloseSocket:
+            value = static_cast<u8>(do_not_close_socket);
+            break;
+        case OptionType::GetServerCertChain:
+            value = static_cast<u8>(get_server_cert_chain);
+            break;
+        case OptionType::SkipDefaultVerify:
+            value = static_cast<u8>(skip_default_verify);
+            break;
+        case OptionType::EnableAlpn:
+            value = static_cast<u8>(enable_alpn);
+            break;
+        default:
+            LOG_WARNING(Service_SSL, "Unknown option={}", static_cast<u32>(option));
+            break;
+        }
+
+        LOG_DEBUG(Service_SSL, "called, option={}, ret value={}", static_cast<u32>(option), value);
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push<s32>(0); // Stub: default option value
+        rb.Push<u8>(value);
     }
 
     void GetVerifyCertErrors(HLERequestContext& ctx) {
@@ -655,53 +658,31 @@ private:
     }
 
     void SetNextAlpnProto(HLERequestContext& ctx) {
-        const auto alpn_data = ctx.ReadBuffer();
+        const auto data = ctx.ReadBuffer(0);
+        next_alpn_proto.assign(data.begin(), data.end());
 
-        // [OpenPak] Wire format: repeated [1-byte len][name]. Passed to DoHandshakeImpl.
-        requested_alpn_protos.clear();
-        size_t pos = 0;
-        while (pos < alpn_data.size()) {
-            const u8 len = alpn_data[pos++];
-            if (len == 0 || pos + len > alpn_data.size()) {
-                break;
-            }
-            requested_alpn_protos.emplace_back(reinterpret_cast<const char*>(alpn_data.data() + pos), len);
-            pos += len;
-        }
-
-        LOG_INFO(Service_SSL, "called, alpn_data_size={}, parsed {} protocol(s)", alpn_data.size(),
-                 requested_alpn_protos.size());
+        LOG_DEBUG(Service_SSL, "called, size={}", next_alpn_proto.size());
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
 
     void GetNextAlpnProto(HLERequestContext& ctx) {
-        // [OpenPak] What the server picked, once there is something: a title that offered h2
-        // reads this back to decide whether it speaks HTTP/2 on the connection. Was a stub that
-        // always said NoSupport. Eden answers from the same place.
-        struct AlpnProtoInfo {
-            u32 state;         // AlpnProtoState
-            u32 proto_size;
-        };
-        constexpr u32 AlpnNoSupport = 0;
-        constexpr u32 AlpnNegotiated = 1;
+        // [OpenPak] The negotiated protocol once there is one; before the handshake, what the
+        // title set. One u32, the size, and the bytes in the buffer.
+        const std::vector<u8>& source =
+            negotiated_alpn_proto.empty() ? next_alpn_proto : negotiated_alpn_proto;
 
-        AlpnProtoInfo info{};
-        info.state = negotiated_alpn_proto.empty() ? AlpnNoSupport : AlpnNegotiated;
-
-        const size_t to_write = std::min(negotiated_alpn_proto.size(), ctx.GetWriteBufferSize());
-        info.proto_size = static_cast<u32>(to_write);
+        const size_t to_write = std::min(source.size(), ctx.GetWriteBufferSize());
         if (to_write != 0) {
-            ctx.WriteBuffer(std::span<const u8>(negotiated_alpn_proto.data(), to_write));
+            ctx.WriteBuffer(std::span<const u8>(source.data(), to_write));
         }
 
-        LOG_DEBUG(Service_SSL, "called, state={} size={}", info.state, info.proto_size);
+        LOG_DEBUG(Service_SSL, "called, size={}", to_write);
 
-        IPC::ResponseBuilder rb{ctx, 4};
+        IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.Push(info.state);
-        rb.Push(info.proto_size);
+        rb.Push<u32>(static_cast<u32>(to_write));
     }
 
     void SetDtlsSocketDescriptor(HLERequestContext& ctx) {

@@ -101,8 +101,6 @@ add_library(common STATIC
     scm_rev.h
     scope_exit.h
     scratch_buffer.h
-    legacy_nat.cpp
-    legacy_nat.h
     settings.cpp
     settings.h
     settings_common.cpp

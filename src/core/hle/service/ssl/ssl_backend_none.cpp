@@ -28,7 +28,7 @@ public:
         return ResultSuccess;
     }
 
-    Result DoHandshake(std::span<const std::string> /*requested_alpn_protos*/) override {
+    Result DoHandshake(std::span<const u8> /*alpn_protos*/) override {
         LOG_WARNING(Service_SSL, "(STUBBED) Pretending to do TLS handshake");
         return ResultSuccess;
     }

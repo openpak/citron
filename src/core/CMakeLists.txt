@@ -1140,13 +1140,9 @@ add_library(core STATIC
     hle/service/spl/spl_types.h
     hle/service/ssl/cert_store.cpp
     hle/service/ssl/cert_store.h
-    hle/service/ssl/legacy_nat_rewrite.cpp
-    hle/service/ssl/legacy_nat_rewrite.h
     hle/service/ssl/ssl.cpp
     hle/service/ssl/ssl.h
     hle/service/ssl/ssl_backend.h
-    hle/service/ssl/ssl_pending_registry.cpp
-    hle/service/ssl/ssl_pending_registry.h
     hle/service/ssl/ssl_types.h
     hle/service/tma/file_io.cpp
     hle/service/tma/file_io.h
@@ -1217,8 +1213,6 @@ add_library(core STATIC
     loader/xci.h
     memory.cpp
     memory.h
-    legacy_guest_call.cpp
-    legacy_guest_call.h
     memory/cheat_engine.cpp
     memory/cheat_engine.h
     memory/dmnt_cheat_types.h
@@ -1336,22 +1330,11 @@ if (ARCHITECTURE_x86_64 OR ARCHITECTURE_arm64)
     target_link_libraries(core PRIVATE dynarmic::dynarmic)
 endif()
 
-if(ENABLE_OPENSSL)
-    target_sources(core PRIVATE
-        hle/service/ssl/ssl_backend_openssl.cpp)
-    target_link_libraries(core PRIVATE OpenSSL::SSL)
-elseif (APPLE)
-    target_sources(core PRIVATE
-        hle/service/ssl/ssl_backend_securetransport.cpp)
-    target_link_libraries(core PRIVATE "-framework Security")
-elseif (WIN32)
-    target_sources(core PRIVATE
-        hle/service/ssl/ssl_backend_schannel.cpp)
-    target_link_libraries(core PRIVATE crypt32 secur32)
-else()
-    target_sources(core PRIVATE
-        hle/service/ssl/ssl_backend_none.cpp)
-endif()
+# [OpenPak] One TLS backend on every platform. The Schannel, SecureTransport and stub backends
+# stay in the tree, unbuilt.
+target_sources(core PRIVATE
+    hle/service/ssl/ssl_backend_openssl.cpp)
+target_link_libraries(core PRIVATE OpenSSL::SSL)
 
 if (CITRON_USE_PRECOMPILED_HEADERS)
     target_precompile_headers(core PRIVATE precompiled_headers.h)
