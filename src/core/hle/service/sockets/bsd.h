@@ -79,6 +79,9 @@ private:
         // [OpenPak] Every other option the set side tolerated or has no host getter for, keyed by
         // level << 32 | optname, so the matching get echoes what was set (ported from Eden).
         std::map<u64, std::vector<u8>> feigned_sockopts;
+        // [OpenPak] A receive timeout is set. Such a recv returns on its own, so it is never parked
+        // (see DeferBlockingReceive).
+        bool has_receive_timeout = false;
         bool connected = false;
         // [OpenPak][DIAG] Set on a successful ConnectImpl -- lets ShutdownImpl log how long
         // this specific connection actually lived before the guest gave up on it, to check for
@@ -291,6 +294,7 @@ private:
 
     s32 FindFreeFileDescriptorHandle() noexcept;
     bool IsFileDescriptorValid(s32 fd) const noexcept;
+    bool DeferBlockingReceive(HLERequestContext& ctx, s32 fd, u32 flags);
 
     void BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const noexcept;
 
