@@ -298,7 +298,9 @@ private:
         // [OpenPak] Resolve at once when the host is online. Nothing else moves the request out
         // of OnHold, so a title that waits on the event or polls the state hung there.
         if (state == RequestState::NotSubmitted || state == RequestState::OnHold) {
-            UpdateState(HasConnection() ? RequestState::Accepted : RequestState::OnHold);
+            const bool has_connection = HasConnection();
+            awaiting_connection = !has_connection;
+            UpdateState(has_connection ? RequestState::Accepted : RequestState::OnHold);
         }
 
         IPC::ResponseBuilder rb{ctx, 2};
@@ -307,6 +309,8 @@ private:
 
     void GetRequestState(HLERequestContext& ctx) {
         LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(state));
+
+        AcceptIfConnected();
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
@@ -325,6 +329,8 @@ private:
 
     void GetResult(HLERequestContext& ctx) {
         LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(state));
+
+        AcceptIfConnected();
 
         const auto result = [this] {
             const bool has_connection = HasConnection();
@@ -381,6 +387,17 @@ private:
         rb.Push<u32>(0);
         rb.Push<u32>(0);
         rb.Push<u32>(0);
+    }
+
+    // [OpenPak] A request submitted while the host had no address is accepted once the host has
+    // one, without the title submitting again: a title that waits on the events or polls the
+    // state has no reason to (as Eden has it).
+    void AcceptIfConnected() {
+        if (!awaiting_connection || !HasConnection()) {
+            return;
+        }
+        awaiting_connection = false;
+        UpdateState(RequestState::Accepted);
     }
 
     void UpdateState(RequestState new_state) {
@@ -514,6 +531,8 @@ private:
     KernelHelpers::ServiceContext service_context;
 
     RequestState state;
+    // [OpenPak] Submitted while the host had no address (see AcceptIfConnected).
+    bool awaiting_connection = false;
 
     Kernel::KEvent* event1;
     Kernel::KEvent* event2;
