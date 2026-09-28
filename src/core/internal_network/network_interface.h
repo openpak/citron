@@ -15,11 +15,14 @@
 
 namespace Network {
 
+enum class HostAdapterKind { Wifi, Ethernet };
+
 struct NetworkInterface {
     std::string name;
     struct in_addr ip_address;
     struct in_addr subnet_mask;
     struct in_addr gateway;
+    HostAdapterKind kind{HostAdapterKind::Ethernet};
 };
 
 std::vector<NetworkInterface> GetAvailableNetworkInterfaces();

@@ -6,7 +6,6 @@
 #include "common/cityhash.h"
 #include "common/settings.h"
 #include "core/core.h"
-#include "core/core_timing.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -37,8 +36,8 @@ namespace Service::NIFM {
 // This is nn::nifm::RequestState
 // Reference: https://switchbrew.org/wiki/Network_Interface_services#RequestState
 enum class RequestState : u32 {
-    Invalid = 0,
-    Free = 1, ///< NotSubmitted/Free state
+    NotSubmitted = 1,
+    Invalid = 1, ///< The duplicate 1 is intentional; it means both not submitted and error on HW.
     OnHold = 2,
     Accepted = 3,
     Blocking = 4,
@@ -151,10 +150,10 @@ struct SfNetworkProfileData {
     IpSettingData ip_setting_data{};
     u128 uuid{};
     std::array<char, 0x40> network_name{};
-    u8 unknown_1{};
-    u8 unknown_2{};
-    u8 unknown_3{};
-    u8 unknown_4{};
+    u8 profile_type{};
+    u8 interface_type{};
+    u8 is_auto_connect{};
+    u8 is_large_capacity{};
     SfWirelessSettingData wireless_setting_data{};
     INSERT_PADDING_BYTES(1);
 };
@@ -176,7 +175,7 @@ static_assert(sizeof(NifmNetworkProfileData) == 0x18E,
               "NifmNetworkProfileData has incorrect size.");
 #pragma pack(pop)
 
-[[maybe_unused]] constexpr Result ResultPendingConnection{ErrorModule::NIFM, 111};
+constexpr Result ResultPendingConnection{ErrorModule::NIFM, 111};
 constexpr Result ResultNetworkCommunicationDisabled{ErrorModule::NIFM, 1111};
 
 class IScanRequest final : public ServiceFramework<IScanRequest> {
@@ -279,71 +278,39 @@ public:
 
         event1 = CreateKEvent(service_context, "IRequest:Event1");
         event2 = CreateKEvent(service_context, "IRequest:Event2");
-        state = RequestState::Free;
-
-        // [OpenPak] ResolveState() (and the event1->Signal() it can trigger via UpdateState)
-        // previously only ever ran as a side effect of the GUEST calling GetRequestState/
-        // GetResult/Submit again. A title that creates this request, grabs event1's handle, and
-        // just waits on it -- exactly the point of an event-based readiness API, avoiding polling
-        // -- would see event1 signal at most once (whatever ResolveState() happened to observe at
-        // the last explicit call) and never again, even though the real network state can still
-        // change afterward. Confirmed live: Splatoon 3's own NPLN-readiness worker thread spins a
-        // timeout=0 WaitSynchronization probe on this exact event every ~16ms, forever, without
-        // ever re-invoking any IRequest method -- so it can only ever be woken by something
-        // proactively re-checking network state in the background, which nothing did. Poll every
-        // 100ms (plenty responsive for a state that changes on the order of seconds, nowhere near
-        // hot-path frequency) for the lifetime of this request and signal whenever it actually
-        // changes, matching what a real console's nifm does continuously regardless of whether the
-        // application is actively querying it.
-        state_poll_event = Core::Timing::CreateEvent(
-            "IRequest::StatePoll", [this](s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
-                std::scoped_lock lk{state_lock};
-                ResolveState();
-                return std::nullopt;
-            });
-        system.CoreTiming().ScheduleLoopingEvent(std::chrono::milliseconds(100),
-                                                 std::chrono::milliseconds(100), state_poll_event);
+        state = RequestState::NotSubmitted;
     }
 
     ~IRequest() override {
-        system.CoreTiming().UnscheduleEvent(state_poll_event);
         service_context.CloseEvent(event1);
         service_context.CloseEvent(event2);
     }
 
 private:
-    // Resolves immediately; parking in OnHold made titles that poll GetRequestState hang.
-    // [OpenPak] Callable from either the IPC-dispatch thread (guest calling GetRequestState/
-    // GetResult/Submit) or the CoreTiming thread (state_poll_event above) -- state_lock (held by
-    // every caller, see LockService()'s own class comment about exactly this CoreTiming-thread
-    // access pattern) keeps the read-modify-write of `state` and the event signal consistent
-    // between the two.
-    RequestState ResolveState() {
-        const auto new_state = Network::GetHostIPv4Address().has_value() ? RequestState::Accepted
-                                                                        : RequestState::Free;
-        if (state != new_state) {
-            UpdateState(new_state);
-        }
-        return state;
+    static bool HasConnection() {
+        return Network::GetHostIPv4Address().has_value() &&
+               !Settings::values.airplane_mode.GetValue();
     }
 
     void Submit(HLERequestContext& ctx) {
-        std::scoped_lock lk{state_lock};
-        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(ResolveState()));
+        LOG_DEBUG(Service_NIFM, "called");
+
+        // [OpenPak] Resolve at once when the host is online. Nothing else moves the request out
+        // of OnHold, so a title that waits on the event or polls the state hung there.
+        if (state == RequestState::NotSubmitted || state == RequestState::OnHold) {
+            UpdateState(HasConnection() ? RequestState::Accepted : RequestState::OnHold);
+        }
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
 
     void GetRequestState(HLERequestContext& ctx) {
-        std::scoped_lock lk{state_lock};
-        const auto current = ResolveState();
-
-        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(current));
+        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(state));
 
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
-        rb.PushEnum(current);
+        rb.PushEnum(state);
     }
 
     void SetRequirementPreset(HLERequestContext& ctx) {
@@ -357,12 +324,21 @@ private:
     }
 
     void GetResult(HLERequestContext& ctx) {
-        std::scoped_lock lk{state_lock};
-        const auto current = ResolveState();
-        const auto result = current == RequestState::Accepted ? ResultSuccess
-                                                             : ResultNetworkCommunicationDisabled;
+        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(state));
 
-        LOG_DEBUG(Service_NIFM, "called, state={}", static_cast<u32>(current));
+        const auto result = [this] {
+            const bool has_connection = HasConnection();
+            switch (state) {
+            case RequestState::NotSubmitted:
+                return has_connection ? ResultSuccess : ResultNetworkCommunicationDisabled;
+            case RequestState::OnHold:
+                UpdateState(has_connection ? RequestState::Accepted : RequestState::Invalid);
+                return ResultPendingConnection;
+            case RequestState::Accepted:
+            default:
+                return ResultSuccess;
+            }
+        }();
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(result);
@@ -410,15 +386,7 @@ private:
     void UpdateState(RequestState new_state) {
         state = new_state;
         event1->Signal();
-        // [OpenPak] event2 (the second handle GetSystemEventReadableHandles hands the guest) was
-        // never signaled anywhere in this file -- a title that waits on it instead of/alongside
-        // event1 would wait forever, no matter what the real network state is. Confirmed live:
-        // Splatoon 3's own NPLN-readiness worker thread polls exactly this shape of never-signaled
-        // event (timeout=0 WaitSynchronization probe, every ~16ms, forever) while event1's own
-        // state transition (this same call, moments earlier from Submit()/GetRequestState())
-        // already correctly resolved to Accepted. Signal both on every state change until the
-        // real, distinct semantics for event2 are known -- strictly better than never firing it at
-        // all, and safe: a spurious extra wake on an already-satisfied wait is harmless.
+        // [OpenPak] Splatoon 3's NPLN readiness thread waits on the second event.
         event2->Signal();
     }
 
@@ -546,8 +514,6 @@ private:
     KernelHelpers::ServiceContext service_context;
 
     RequestState state;
-    std::mutex state_lock;
-    std::shared_ptr<Core::Timing::EventType> state_poll_event;
 
     Kernel::KEvent* event1;
     Kernel::KEvent* event2;
@@ -638,9 +604,18 @@ void IGeneralService::GetCurrentNetworkProfile(HLERequestContext& ctx) {
             .uuid{name_hash, name_hash},
         };
         to_array(data.network_name, ssid);
-        data.wireless_setting_data.ssid_length = static_cast<u8>(std::min(ssid.size(), size_t{32}));
-        to_array(data.wireless_setting_data.ssid, ssid);
-        to_array(data.wireless_setting_data.passphrase, std::string{"citron00000000"});
+        // [OpenPak] As Eden: the profile says which kind of adapter it is, and only a wireless
+        // one carries wireless settings.
+        const bool via_wifi = net_iface->kind == Network::HostAdapterKind::Wifi;
+        data.profile_type = static_cast<u8>(NetworkProfileType::User);
+        data.interface_type = static_cast<u8>(via_wifi ? NetworkInterfaceType::WiFi_Ieee80211
+                                                       : NetworkInterfaceType::Ethernet);
+        if (via_wifi) {
+            data.wireless_setting_data.ssid_length =
+                static_cast<u8>(std::min(ssid.size(), size_t{32}));
+            to_array(data.wireless_setting_data.ssid, ssid);
+            to_array(data.wireless_setting_data.passphrase, std::string{"citron00000000"});
+        }
         return data;
     }();
 
@@ -806,24 +781,34 @@ void IGeneralService::SetBackgroundRequestEnabled(HLERequestContext& ctx) {
 }
 
 void IGeneralService::IsWirelessCommunicationEnabled(HLERequestContext& ctx) {
-    LOG_WARNING(Service_NIFM, "(STUBBED) called");
+    LOG_DEBUG(Service_NIFM, "called");
 
+    // [OpenPak] Airplane mode is the wireless switch, as Eden has it.
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u8>(1);
+    rb.Push<u8>(Settings::values.airplane_mode.GetValue() ? 0 : 1);
 }
 
 void IGeneralService::GetInternetConnectionStatus(HLERequestContext& ctx) {
-    LOG_WARNING(Service_NIFM, "(STUBBED) called");
+    LOG_DEBUG(Service_NIFM, "called");
 
     struct Output {
         u8 type{static_cast<u8>(NetworkInterfaceType::WiFi_Ieee80211)};
-        u8 wifi_strength{3};
-        InternetConnectionStatus state{InternetConnectionStatus::Connected};
+        u8 wifi_strength{0};
+        InternetConnectionStatus state{InternetConnectionStatus::ConnectingUnknown1};
     };
     static_assert(sizeof(Output) == 0x3, "Output has incorrect size.");
 
-    constexpr Output out{};
+    // [OpenPak] Connected only when the host has an interface; none is selected in airplane
+    // mode. Answering Connected regardless sent titles online with nothing to connect through.
+    Output out{};
+    if (const auto net_iface = Network::GetSelectedNetworkInterface()) {
+        const bool via_wifi = net_iface->kind == Network::HostAdapterKind::Wifi;
+        out.type = static_cast<u8>(via_wifi ? NetworkInterfaceType::WiFi_Ieee80211
+                                            : NetworkInterfaceType::Ethernet);
+        out.wifi_strength = via_wifi ? 2 : 3;
+        out.state = InternetConnectionStatus::Connected;
+    }
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);

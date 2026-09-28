@@ -86,7 +86,9 @@ std::vector<NetworkInterface> GetAvailableNetworkInterfaces() {
             .name{Common::UTF16ToUTF8(std::wstring{current_address->FriendlyName})},
             .ip_address{ip_addr},
             .subnet_mask = in_addr{.S_un{.S_addr{mask}}},
-            .gateway = gateway});
+            .gateway = gateway,
+            .kind = current_address->IfType == IF_TYPE_IEEE80211 ? HostAdapterKind::Wifi
+                                                                 : HostAdapterKind::Ethernet});
     }
 
     return result;
@@ -128,7 +130,8 @@ std::vector<NetworkInterface> GetAvailableNetworkInterfaces() {
                 .name{ifa->ifa_name},
                 .ip_address{Common::BitCast<struct sockaddr_in>(*ifa->ifa_addr).sin_addr},
                 .subnet_mask{Common::BitCast<struct sockaddr_in>(*ifa->ifa_netmask).sin_addr},
-                .gateway{in_addr{.s_addr = gateway}}});
+                .gateway{in_addr{.s_addr = gateway}},
+                .kind{HostAdapterKind::Ethernet}});
             continue;
         }
 
@@ -177,7 +180,8 @@ std::vector<NetworkInterface> GetAvailableNetworkInterfaces() {
             .name{ifa->ifa_name},
             .ip_address{Common::BitCast<struct sockaddr_in>(*ifa->ifa_addr).sin_addr},
             .subnet_mask{Common::BitCast<struct sockaddr_in>(*ifa->ifa_netmask).sin_addr},
-            .gateway{in_addr{.s_addr = gateway}}});
+            .gateway{in_addr{.s_addr = gateway}},
+            .kind{HostAdapterKind::Ethernet}});
     }
 
     freeifaddrs(ifaddr);
