@@ -2527,8 +2527,8 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
         } else if (optname == OptName::SNDTIMEO) {
             result = Translate(socket->SetSndTimeo(value));
         } else if (optname == OptName::RCVTIMEO) {
-            descriptor.has_receive_timeout = value != 0;
             result = Translate(socket->SetRcvTimeo(value));
+            descriptor.has_receive_timeout = result == Errno::SUCCESS && value != 0;
         } else {
             LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
         }
