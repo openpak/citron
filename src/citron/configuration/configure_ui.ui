@@ -208,13 +208,6 @@
                                         </property>
                                     </widget>
                                 </item>
-                                <item row="5" column="0" colspan="2">
-                                    <widget class="QCheckBox" name="show_online_column">
-                                        <property name="text">
-                                            <string>Show Online Column</string>
-                                        </property>
-                                    </widget>
-                                </item>
                                 <item row="6" column="0" colspan="2">
                                     <widget class="QCheckBox" name="game_list_poster_view">
                                         <property name="text">
