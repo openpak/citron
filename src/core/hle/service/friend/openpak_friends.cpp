@@ -645,6 +645,7 @@ public:
     ~OpenPakFriendService() override {
         // The module signals the event as the session goes, which is what completes a call that
         // needed no work. A sync still running finds the event gone and leaves it alone.
+        LOG_DEBUG(Service_Friend, "[OpenPak] session closed, completion signalled");
         std::scoped_lock lock{completion->mutex};
         completion_event->Signal();
         completion->event = nullptr;
@@ -904,6 +905,10 @@ private:
             if (!found) {
                 LOG_WARNING(Service_Friend, "[OpenPak] GetProfileList: {:016x} UNRESOLVED ({} asked)",
                             static_cast<u64>(friend_ids[index]), friend_ids.size());
+            } else {
+                LOG_DEBUG(Service_Friend, "[OpenPak] GetProfileList: {:016x} resolved, picture {}",
+                          static_cast<u64>(friend_ids[index]),
+                          found->thumbnail_url.empty() ? "(none)" : found->thumbnail_url);
             }
         }
 
