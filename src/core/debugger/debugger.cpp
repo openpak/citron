@@ -132,7 +132,7 @@ private:
 
             try {
                 // Initialize the listening socket and accept a new client.
-                tcp::endpoint endpoint{boost::asio::ip::address_v4::any(), port};
+                tcp::endpoint endpoint{boost::asio::ip::address_v4::loopback(), port};
                 tcp::acceptor acceptor{io_context, endpoint};
 
                 AsyncAccept(acceptor, [&](auto&& peer) { AcceptConnection(std::move(peer)); });

@@ -743,7 +743,6 @@ struct Values {
     // type. This is the peer OpenPak runs its second responder on.
     Setting<std::string> openpak_nat_ip{linkage, "145.241.228.207", "openpak_nat_ip",
                                          Category::Network};
-    Setting<std::string> openpak_pid{linkage, "", "openpak_pid", Category::Network};
     // Governs the automatic pull-on-boot/push-on-stop cloud save sync only -- the manual
     // "Download Save" button in the OpenPak Account dialog is an explicit per-click action
     // and isn't gated by this, since that's already opt-in every time.
