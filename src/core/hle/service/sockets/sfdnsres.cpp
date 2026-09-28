@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <mutex>
 #include <string_view>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -16,7 +16,6 @@
 #include "common/string_util.h"
 #include "common/swap.h"
 #include "core/core.h"
-#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/nsd.h"
 #include "core/hle/service/sockets/sfdnsres.h"
@@ -27,52 +26,6 @@
 #include "openpak/network_profile.h"
 
 namespace Service::Sockets {
-
-static std::mutex g_last_host_mutex;
-static std::unordered_map<std::string, std::string> g_last_host_for_ip;
-
-void SetLastHostForIp(const std::string& ip, const std::string& host) {
-    std::lock_guard lock(g_last_host_mutex);
-    g_last_host_for_ip[ip] = host;
-}
-
-std::string GetLastHostForIp(const std::string& ip) {
-    std::lock_guard lock(g_last_host_mutex);
-    auto it = g_last_host_for_ip.find(ip);
-    if (it != g_last_host_for_ip.end()) {
-        return it->second;
-    }
-    return "";
-}
-
-// [OpenPak] See sfdnsres.h's declaration comment. Real bug this exists for (Splatoon 3,
-// confirmed via Ryujinx-Reference hitting the identical failure on the same guest binary):
-// its gRPC channel resolves a redirected OpenPak hostname correctly here, then later loses
-// that address in its own connection-establishment plumbing and calls connect() with a
-// zeroed IP -- but the SAME port it originally resolved for. Recording "port -> resolved IP"
-// at resolution time lets BSD::ConnectImpl recover the real address for that exact port.
-static std::mutex g_last_ip_for_port_mutex;
-static std::unordered_map<u16, Network::IPv4Address> g_last_ip_for_port;
-
-void SetLastIpForPort(u16 port, Network::IPv4Address ip) {
-    if (port == 0) {
-        return;
-    }
-    std::lock_guard lock(g_last_ip_for_port_mutex);
-    g_last_ip_for_port[port] = ip;
-}
-
-std::optional<Network::IPv4Address> GetLastIpForPort(u16 port) {
-    if (port == 0) {
-        return std::nullopt;
-    }
-    std::lock_guard lock(g_last_ip_for_port_mutex);
-    auto it = g_last_ip_for_port.find(port);
-    if (it != g_last_ip_for_port.end()) {
-        return it->second;
-    }
-    return std::nullopt;
-}
 
 // The setting, then the environment; empty when neither names an address, which redirects
 // nothing (as Eden has it).
@@ -111,17 +64,6 @@ static bool RedirectionOpenPakActive() {
 static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) {
     if (!RedirectionOpenPakActive()) {
         return std::nullopt;
-    }
-
-    // [OpenPak][DIAG] Opt-in certificate-validation control for Stardew. Only this exact public
-    // tenant hostname bypasses redirection; bsd.cpp suppresses the first client record after the
-    // server flight so no authenticated request can reach the normal endpoint.
-    if (host == "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net") {
-        const char* probe = std::getenv("OPENPAK_LEGACY_STARDEW_TLS_PROBE");
-        if (probe != nullptr && *probe != '\0' && std::string_view(probe) != "0") {
-            LOG_INFO(Service, "[OpenPak][DIAG] Stardew TLS probe using normal DNS for '{}'", host);
-            return std::nullopt;
-        }
     }
 
     const std::string server_ip =
@@ -170,242 +112,12 @@ static std::optional<std::string> GetOpenPakRedirectIp(const std::string& host) 
     return std::nullopt;
 }
 
-// [OpenPak] Debug-only tap: redirects an "npln" host straight to a local TLS-terminating
-// proxy instead of production, for protocol inspection. Independent of enable_openpak (this
-// isn't a OpenPak-server redirect, just a temporary debugging aid) -- unset by default, so it
-// never affects a normal run. OPENPAK_LEGACY_S3_DEBUG_PROXY_IP=<ip> to enable.
-static std::optional<std::string> GetNplnDebugProxyIp(const std::string& host) {
-    if (Common::ToLower(host).find("npln") == std::string::npos) {
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_LEGACY_S3_DEBUG_PROXY_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting npln host '{}' -> debug proxy '{}'", host, env);
-    return std::string(env);
-}
-
-// [OpenPak] Redirects Outbound's Photon traffic (ns.photonengine.io and friends) to our own
-// self-hosted Photon-protocol-compatible server instead of Photon Cloud -- see HANDOFF.md's
-// "Self-hosted Photon server" section in outbound-legacy for why. Independent of
-// enable_openpak, same reasoning as GetNplnDebugProxyIp above: a separate redirect target,
-// unset by default so it never affects a normal (non-Outbound) run.
-// OPENPAK_PHOTON_IP=<ip> to enable.
-static std::optional<std::string> GetPhotonRedirectIp(const std::string& host) {
-    if (Common::ToLower(host).find("photonengine.io") == std::string::npos) {
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_PHOTON_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting Photon host '{}' -> '{}'", host, env);
-    return std::string(env);
-}
-
-// [OpenPak] Clean-room PvZ: Battle for Neighborville (Switch) research hook. BFN is an EA
-// Frostbite title: static string analysis of its own executable (2026-08-31, see pvz-legacy
-// handoff.md) found an EA GOS/Blaze + Nucleus backend — service discovery via
-// spring18.gosredirector.ea.com, identity via accounts/gateway/signin.ea.com. None of these are
-// covered by the generic Nintendo redirect. Unlike the CTR hook (exact-host, one auth host
-// known), the full set of *.ea.com hosts the client may contact is not yet known, so this
-// matches the whole .ea.com suffix — but is gated by its own env var so it is dead code unless
-// someone explicitly runs PvZ research. Fails closed: if the var is unset, EA hosts resolve
-// normally (i.e. NOT our problem), and with the var set every .ea.com name goes to the local
-// research stub instead of production. OPENPAK_LEGACY_PVZ_EA_IP=<ip> to enable.
-static std::optional<std::string> GetPvzEaRedirectIp(const std::string& host) {
-    const std::string lower_host = Common::ToLower(host);
-    const std::string suffix = ".ea.com";
-    const bool is_ea = lower_host == "ea.com" ||
-                       (lower_host.size() > suffix.size() &&
-                        lower_host.compare(lower_host.size() - suffix.size(), suffix.size(),
-                                           suffix) == 0);
-    if (!is_ea) {
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_LEGACY_PVZ_EA_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting PvZ EA host '{}' -> '{}'", host, env);
-    return std::string(env);
-}
-
-// [OpenPak] Clean-room Crash Team Racing Nitro-Fueled research hook. CTR:NF authenticates
-// against Demonware, not Nintendo BAAS/NEX -- confirmed live 2026-08-31 (see ctr-legacy's
-// handoff.md), so it isn't covered by GetOpenPakRedirectIp's Nintendo-hostname redirect below.
-// Exact-host only, same shape as the Fall Guys EOS hook: unset by default, never applied to
-// telemetry hosts. Covers both the auth3 host and the lobby ("LSG") host that the client
-// resolves next once auth looks accepted -- static analysis of CTR:NF's own binary found an
-// igNetTaskLsgGetTicket/igNetTaskLsgAuthenticateTicket sequence suggesting auth alone was never
-// going to be sufficient (see handoff.md, Experiment 2026-08-31-7). Same env vars answer both for
-// now, since they're being pointed at the same research stub; split them if that stops making
-// sense. OPENPAK_LEGACY_CTR_AUTH_IP=<ip> to enable.
-static std::optional<std::string> GetCtrDemonwareAuthRedirectIp(const std::string& host) {
-    const std::string lower_host = Common::ToLower(host);
-    if (lower_host != "lavender-switch-auth3.prod.demonware.net" &&
-        lower_host != "lavender-switch-lobby.prod.demonware.net") {
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_LEGACY_CTR_AUTH_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting CTR:NF Demonware host '{}' -> '{}'", host, env);
-    return std::string(env);
-}
-
-// [OpenPak] Clean-room Among Us research hook. The Switch client's own cached
-// region list (observed 2026-08-31 in a JKSV save backup, see
-// amongus-legacy handoff.md Experiment 2026-08-31-1) names three HTTPS
-// matchmaker hosts: matchmaker.among.us (NA), matchmaker-eu.among.us (EU),
-// matchmaker-as.among.us (Asia), all on port 443. Exact-host only, gated by
-// its own env var, unset by default so it never affects any other title's
-// run. OPENPAK_LEGACY_AMONGUS_IP=<ip> to enable.
-static std::optional<std::string> GetAmongUsMatchmakerRedirectIp(const std::string& host) {
-    const std::string lower_host = Common::ToLower(host);
-    if (lower_host != "matchmaker.among.us" && lower_host != "matchmaker-eu.among.us" &&
-        lower_host != "matchmaker-as.among.us") {
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_LEGACY_AMONGUS_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting Among Us matchmaker host '{}' -> '{}'", host, env);
-    return std::string(env);
-}
-
-// [OpenPak] Clean-room Among Us safety block. Among Us research may run client
-// versions older than the current production architecture (e.g. a base dump
-// predating the HTTPS matchmaker era). Such versions can try legacy production
-// endpoints -- old matchmaker hosts, Photon Cloud -- that this project has not
-// approved for redirection. Opt-in gate OPENPAK_LEGACY_AMONGUS_BLOCK=1 makes every
-// resolution under the Among Us-era domains fail fast (EAI_AGAIN) WITHOUT
-// reaching production; the requested hostname is still logged by the standard
-// resolution logging above, so nothing is lost for research. Never blocks the
-// three matchmaker hosts when OPENPAK_LEGACY_AMONGUS_IP is set -- the redirect chain
-// runs first and wins. Default unset so it never affects any other title.
-static bool ShouldBlockAmongUsRelatedHost(const std::string& host) {
-    const char* env = std::getenv("OPENPAK_LEGACY_AMONGUS_BLOCK");
-    if (!env || !*env) {
-        return false;
-    }
-    const std::string lower_host = Common::ToLower(host);
-    const auto has_suffix = [&lower_host](const std::string& suffix) {
-        return lower_host.size() >= suffix.size() &&
-               lower_host.compare(lower_host.size() - suffix.size(), suffix.size(),
-                                  suffix) == 0;
-    };
-    return has_suffix(".among.us") || lower_host == "among.us" ||
-           has_suffix(".photonengine.io") || lower_host == "photonengine.io" ||
-           has_suffix(".photonengine.com") || lower_host == "photonengine.com" ||
-           has_suffix(".exitgames.com") || lower_host == "exitgames.com" ||
-           // EOS (observed 2026-08-31: the 2026.18.0 client embeds
-           // EOSSDK-Switch-Shipping.nrs and retries api.epicgames.dev endlessly
-           // during sign-in against production -- blocked here so Among Us runs
-           // neither leak to EOS nor hang on a login that can never complete with
-           // our local identity). NOTE: gate overlaps fallguys-legacy's
-           // OPENPAK_LEGACY_FALLGUYS_EOS_IP redirect for the same host; that env var is
-           // unset during Among Us runs, so the redirect chain never claims it
-           // first and this block is the one that applies.
-           lower_host == "api.epicgames.dev" ||
-           // Unity Cloud Content / CCD telemetry + CDN hosts (observed at menu
-           // load): read-only, but they are production contact -- block under the
-           // same gate.
-           has_suffix(".unity3dusercontent.com") ||
-           lower_host == "unity3dusercontent.com";
-}
-
-// [OpenPak] Among Us EOS redirect. The 2026.18.0 client embeds the Epic Online
-// Services SDK (EOSSDK-Switch-Shipping.nrs) and its sign-in path loops on
-// api.epicgames.dev. When OPENPAK_LEGACY_AMONGUS_EOS_IP is set, that host is pointed
-// at a local EOS stub instead of being blocked by ShouldBlockAmongUsRelatedHost
-// (this hook runs earlier in the chain, so the redirect wins when enabled).
-// Unset by default. OPENPAK_LEGACY_AMONGUS_EOS_IP=<ip> to enable.
-static std::optional<std::string> GetAmongUsEosRedirectIp(const std::string& host) {
-    if (Common::ToLower(host) != "api.epicgames.dev") {
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_LEGACY_AMONGUS_EOS_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting Among Us EOS host '{}' -> '{}'", host, env);
-    return std::string(env);
-}
-
-// [OpenPak] Clean-room Fall Guys EOS research hook. Redirect only the confirmed EOS bootstrap
-// hostname to a user-controlled compatibility server. This is intentionally separate from the
-// broad Nintendo redirect and the Outbound Photon redirect: unset by default, exact-host only,
-// and never applied to telemetry hosts. OPENPAK_LEGACY_FALLGUYS_EOS_IP=<ip> to enable.
-static std::optional<std::string> GetFallGuysEosRedirectIp(const std::string& host) {
-    if (Common::ToLower(host) != "api.epicgames.dev") {
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_LEGACY_FALLGUYS_EOS_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting Fall Guys EOS host '{}' -> '{}'", host, env);
-    return std::string(env);
-}
-
-// [OpenPak] Clean-room Minecraft Dungeons (Switch) research hook. Dungeons is a
-// Mojang-published Switch title, but its client was observed resolving ONLY
-// Microsoft/Mojang/Xbox hostnames up through the online sign-in screen (2026-08-31,
-// citron-legacy Nightly eed426e61-dirty; see mc-legacy handoff.md "Hostname /
-// Service Inventory"): launchercontent.mojang.com, vortex.data.microsoft.com
-// (telemetry), title.mgt.xboxlive.com, sisu.xboxlive.com (device sign-in) and
-// login.live.com (MSA OAuth) -- no *.nintendo.net host at all. So it is not covered
-// by GetOpenPakRedirectIp. Exact-host only, restricted to the confirmed inventory;
-// newly observed hosts are added here only after the DNS log confirms them. Gated by
-// its own env var, unset by default, so it never affects any other title's run.
-// OPENPAK_LEGACY_MC_DUNGEONS_IP=<ip> to enable.
-// OPENPAK_LEGACY_MC_DUNGEONS_ALLOW_SIGNIN=1 additionally excepts the three
-// identity/config hosts (title.mgt.xboxlive.com, sisu.xboxlive.com, login.live.com),
-// so a controlled run can sign in against the real Microsoft/Xbox services while
-// every other confirmed Dungeons host still resolves to the local research listener.
-// That combination is how the still-unknown multiplayer backend hostname is meant to
-// be observed: the game gets past sign-in, its next DNS lookups land in the log, and
-// only then are they added to this list (and to the bsd.cpp port-remap branch).
-static bool IsMinecraftDungeonsSignInHost(const std::string& lower_host) {
-    return lower_host == "title.mgt.xboxlive.com" || lower_host == "sisu.xboxlive.com" ||
-           lower_host == "login.live.com";
-}
-
-static std::optional<std::string> GetMinecraftDungeonsRedirectIp(const std::string& host) {
-    const std::string lower_host = Common::ToLower(host);
-    const bool is_dungeons_host = lower_host == "launchercontent.mojang.com" ||
-                                  lower_host == "vortex.data.microsoft.com" ||
-                                  IsMinecraftDungeonsSignInHost(lower_host);
-    if (!is_dungeons_host) {
-        return std::nullopt;
-    }
-    const char* allow = std::getenv("OPENPAK_LEGACY_MC_DUNGEONS_ALLOW_SIGNIN");
-    if (allow && *allow && std::string(allow) != "0" &&
-        IsMinecraftDungeonsSignInHost(lower_host)) {
-        LOG_INFO(Service,
-                 "[OpenPak] Letting Minecraft Dungeons sign-in host '{}' resolve normally "
-                 "(OPENPAK_LEGACY_MC_DUNGEONS_ALLOW_SIGNIN)",
-                 host);
-        return std::nullopt;
-    }
-    const char* env = std::getenv("OPENPAK_LEGACY_MC_DUNGEONS_IP");
-    if (!env || !*env) {
-        return std::nullopt;
-    }
-    LOG_INFO(Service, "[OpenPak] Redirecting Minecraft Dungeons host '{}' -> '{}'", host, env);
-    return std::string(env);
-}
-
 // [OpenPak] Hold the FIRST npln resolution of the session until the startup translation burst
 // has passed. A title's NPLN channel that comes up mid-burst parks without ever sending its first
 // RPC -- the title looks online and freezes. Eden holds 3000 ms, verified live against the Stardew
-// tenant (and the Ryujinx side of this integration measured the same), so that is the default
-// here too. The resolver shares the bsdsocket service with two extra host threads, so the hold
-// parks one of three, not the only one. OPENPAK_LEGACY_NPLN_DELAY_MS overrides it (0 turns it off).
+// tenant (and the Ryujinx side of this integration measured the same), so that is the hold here
+// too. The resolver shares the bsdsocket service with two extra host threads, so the hold parks
+// one of three, not the only one.
 static std::once_flag g_npln_delay_once;
 
 static void MaybeDelayNplnInit(const std::string& host) {
@@ -413,40 +125,16 @@ static void MaybeDelayNplnInit(const std::string& host) {
         return;
     }
     std::call_once(g_npln_delay_once, [] {
-        constexpr int default_wait_ms = 3000;
-        int max_wait_ms = default_wait_ms;
-        bool overridden = false;
-        if (const char* env = std::getenv("OPENPAK_LEGACY_NPLN_DELAY_MS"); env && *env) {
-            try {
-                const int parsed = std::stoi(env);
-                if (parsed >= 0) {
-                    max_wait_ms = parsed;
-                    overridden = true;
-                }
-            } catch (const std::exception&) {
-                // Malformed override -- keep the default rather than fail resolution over it.
-            }
-        }
-        if (max_wait_ms <= 0) {
-            return;
-        }
+        constexpr int wait_ms = 3000;
 
         LOG_INFO(Service,
                  "[OpenPak] Holding the first npln host resolution for {} ms while the startup "
                  "burst passes (see MaybeDelayNplnInit)",
-                 max_wait_ms);
+                 wait_ms);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(max_wait_ms));
+        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
 
-        LOG_INFO(Service, "[OpenPak] npln hold finished after {} ms", max_wait_ms);
-
-        // [OpenPak][DIAG] Arm a short window during which any finite, non-trivial
-        // WaitSynchronization timeout gets logged -- see legacy_deadline_watch.h. Research
-        // only: armed when the hold was asked for explicitly, never by the default.
-        if (overridden) {
-            Kernel::Svc::ArmOpenPakDeadlineWatch(90000);
-            LOG_INFO(Service, "[OpenPak][DIAG] Deadline watch armed for 90000 ms");
-        }
+        LOG_INFO(Service, "[OpenPak] npln hold finished after {} ms", wait_ms);
     });
 }
 
@@ -606,17 +294,25 @@ static std::vector<u8> SerializeAddrInfoAsHostEnt(const std::vector<Network::Add
     return data;
 }
 
-std::set<std::string> blocked_domains{
-    // stupid hogwarts
-    "phoenix-api.wbagora.com",
-    // prevents various battle net games from crashing
-    "battle.net",
-    // minecraft from crashing
-    "microsoft.com",
-    "mojang.com",
-    "xboxlive.com",
-    "minecraftservices.com",
-};
+// [OpenPak] The names Ryujinx refuses to resolve (Sfdnsres/Proxy/DnsBlacklist.cs), whatever
+// their case: Nintendo's own production services, which a name that was not redirected must
+// not reach.
+static bool IsBlockedHost(const std::string& host) {
+    static constexpr std::array<std::string_view, 7> blocked_suffixes{
+        "-lp1.n.n.srv.nintendo.net",
+        "-lp1.s.n.srv.nintendo.net",
+        "-lp1.lp1.t.npln.srv.nintendo.net",
+        "-lp1.znc.srv.nintendo.net",
+        "-lp1.p.srv.nintendo.net",
+        "-sb-api.accounts.nintendo.com",
+        "-sb.accounts.nintendo.com",
+    };
+    const std::string name = Common::ToLower(host);
+    return name == "accounts.nintendo.com" ||
+           std::ranges::any_of(blocked_suffixes, [&name](std::string_view suffix) {
+               return name.ends_with(suffix);
+           });
+}
 
 static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestContext& ctx) {
     struct InputParameters {
@@ -643,52 +339,17 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     ApplyNsdResolve(parameters.use_nsd_resolve != 0, host);
 
     std::string query_host = host;
-    auto redirect = GetNplnDebugProxyIp(host);
-    if (!redirect.has_value()) {
-        redirect = GetPvzEaRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetCtrDemonwareAuthRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetAmongUsEosRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetAmongUsMatchmakerRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetFallGuysEosRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetMinecraftDungeonsRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetPhotonRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetOpenPakRedirectIp(host);
-    }
+    const auto redirect = GetOpenPakRedirectIp(host);
     if (redirect.has_value()) {
         query_host = *redirect;
-    } else if (blocked_domains.find(host) != blocked_domains.end()) {
+    } else if (IsBlockedHost(host)) {
         LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
-        return {0, GetAddrInfoError::AGAIN};
-    } else if (ShouldBlockAmongUsRelatedHost(host)) {
-        LOG_WARNING(Network, "[OpenPak] Blocking Among Us-era host '{}' (OPENPAK_LEGACY_AMONGUS_BLOCK)",
-                    host);
         return {0, GetAddrInfoError::AGAIN};
     }
 
     auto res = Network::GetAddressInfo(query_host, /*service*/ std::nullopt);
     if (!res.has_value()) {
         return {0, Translate(res.error())};
-    }
-
-    // Preserve hostname context for diagnostics even when no OpenPak redirect is active.
-    // This lets the BSD layer identify Outbound's Photon Name Server packets without logging
-    // any packet payload. Literal-IP queries still bypass this block above.
-    for (const auto& addrinfo : res.value()) {
-        SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
     }
 
     const std::vector<u8> data = SerializeAddrInfoAsHostEnt(res.value(), host);
@@ -807,9 +468,19 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     // [OpenPak] See MaybeDelayNplnInit's declaration comment.
     MaybeDelayNplnInit(host);
 
-    // [OpenPak] A literal IP has nothing to resolve -- return it as-is, before any of the
-    // redirect/blocklist/NSD-rewrite logic below, all of which exist to turn a HOSTNAME into
-    // the right address and have no business touching an address that's already one. See
+    ApplyNsdResolve(parameters.use_nsd_resolve != 0, host);
+
+    std::string query_host = host;
+    const auto redirect = GetOpenPakRedirectIp(host);
+    if (redirect.has_value()) {
+        query_host = *redirect;
+    } else if (IsBlockedHost(host)) {
+        LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
+        return {0, GetAddrInfoError::AGAIN};
+    }
+
+    // [OpenPak] A literal IP has nothing to resolve -- return it as-is. [OpenPak] After the
+    // redirect and blocklist checks, which a literal passes untouched. See
     // TryParseIPv4Literal's declaration comment in internal_network/network.h for why falling
     // through to a real resolution here (which is what happened before this check existed) was
     // the actual root cause of Splatoon 3's NPLN connections completing TCP+TLS+HTTP/2 and then
@@ -819,7 +490,8 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     // every cycle regardless of timing -- consistent with the game building an HTTP/2
     // :authority header from a corrupted canonical name, not any citron-side socket/scheduling
     // issue (both were separately investigated at length and ruled out).
-    if (Network::IPv4Address literal_ip; Network::TryParseIPv4Literal(host, literal_ip)) {
+    if (Network::IPv4Address literal_ip;
+        !redirect.has_value() && Network::TryParseIPv4Literal(host, literal_ip)) {
         LOG_DEBUG(Service, "[OpenPak] Host '{}' is already a literal address: returned as-is",
                   host);
         Network::AddrInfo entry{};
@@ -831,53 +503,10 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
         entry.addr.portno = 0;
         entry.canon_name = host;
 
-        // Deliberately no SetLastHostForIp here, matching Ryujinx-Reference's own fix -- a
-        // literal IP carries no hostname to record, and recording one would corrupt the
-        // reverse lookup table used elsewhere for this exact purpose (see
-        // GetLastHostForIp's declaration comment).
         const std::vector<u8> data = SerializeAddrInfo(AnySocketTypeAddrInfo({entry}), host);
         const u32 data_size = static_cast<u32>(data.size());
         ctx.WriteBuffer(data, 0);
         return {data_size, GetAddrInfoError::SUCCESS};
-    }
-
-    ApplyNsdResolve(parameters.use_nsd_resolve != 0, host);
-
-    std::string query_host = host;
-    auto redirect = GetNplnDebugProxyIp(host);
-    if (!redirect.has_value()) {
-        redirect = GetPvzEaRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetCtrDemonwareAuthRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetAmongUsEosRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetAmongUsMatchmakerRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetFallGuysEosRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetMinecraftDungeonsRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetPhotonRedirectIp(host);
-    }
-    if (!redirect.has_value()) {
-        redirect = GetOpenPakRedirectIp(host);
-    }
-    if (redirect.has_value()) {
-        query_host = *redirect;
-    } else if (blocked_domains.find(host) != blocked_domains.end()) {
-        LOG_WARNING(Network, "Resolution of hostname {} requested, returning EAI_AGAIN", host);
-        return {0, GetAddrInfoError::AGAIN};
-    } else if (ShouldBlockAmongUsRelatedHost(host)) {
-        LOG_WARNING(Network, "[OpenPak] Blocking Among Us-era host '{}' (OPENPAK_LEGACY_AMONGUS_BLOCK)",
-                    host);
-        return {0, GetAddrInfoError::AGAIN};
     }
 
     std::optional<std::string> service = std::nullopt;
@@ -907,32 +536,6 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
             addrinfo.canon_name = host;
         }
 
-        // [OpenPak] Port-keyed recovery for gRPC-based titles (Splatoon 3) that lose this
-        // resolved address later. See SetLastIpForPort's declaration comment in sfdnsres.h.
-        std::optional<u16> service_port;
-        if (service.has_value()) {
-            try {
-                const int parsed = std::stoi(*service);
-                if (parsed > 0 && parsed <= 0xFFFF) {
-                    service_port = static_cast<u16>(parsed);
-                }
-            } catch (const std::exception&) {
-                // service wasn't a plain port number (a named service like "http") -- nothing
-                // to key the fallback on, and that's fine, most titles never need it anyway.
-            }
-        }
-        for (const auto& addrinfo : res.value()) {
-            SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
-            if (service_port.has_value()) {
-                SetLastIpForPort(*service_port, addrinfo.addr.ip);
-            }
-        }
-    } else {
-        // Same metadata-only hostname tracking as GetHostByNameRequestImpl above. Normal DNS
-        // results were previously discarded, leaving Photon traffic identifiable only by port.
-        for (const auto& addrinfo : res.value()) {
-            SetLastHostForIp(Network::IPv4AddressToString(addrinfo.addr.ip), host);
-        }
     }
 
     const std::vector<u8> data = SerializeAddrInfo(AnySocketTypeAddrInfo(res.value()), host);
@@ -1005,9 +608,10 @@ void SFDNSRES::ResolverSetOptionRequest(HLERequestContext& ctx) {
 
     LOG_WARNING(Service, "(STUBBED) sfdnsres::ResolverSetOptionRequest called. Option: {}, Value Size: {}", option_name, option_value_buffer.size());
 
-    // Default success for stub
-    IPC::ResponseBuilder rb{ctx, 2};
+    // [OpenPak] The answer carries an errno word, as Eden has it.
+    IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
+    rb.Push<s32>(0); // bsd errno
 }
 
 // New Stub Implementations
@@ -1025,7 +629,7 @@ void SFDNSRES::GetDnsAddressList(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<u32>(0); // Count
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void SFDNSRES::GetHostByAddrRequest(HLERequestContext& ctx) {
@@ -1034,7 +638,7 @@ void SFDNSRES::GetHostByAddrRequest(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 5};
     rb.Push(ResultSuccess);
     rb.PushEnum(NetDbError::Internal);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
     rb.Push<u32>(0); // data_size
 }
 
@@ -1068,7 +672,7 @@ void SFDNSRES::GetOptions(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4}; // Result, value (u32 placeholder), errno
     rb.Push(ResultSuccess);
     rb.Push<u32>(0); // Placeholder for option value
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void SFDNSRES::GetAddrInfoRequestRaw(HLERequestContext& ctx) {
@@ -1076,7 +680,7 @@ void SFDNSRES::GetAddrInfoRequestRaw(HLERequestContext& ctx) {
     // Similar to GetAddrInfoRequest: Errno, GetAddrInfoError, data_size
     IPC::ResponseBuilder rb{ctx, 5};
     rb.Push(ResultSuccess);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
     rb.PushEnum(GetAddrInfoError::AGAIN); // Changed from INTERNAL to AGAIN
     rb.Push<u32>(0); // data_size
 }
@@ -1086,7 +690,7 @@ void SFDNSRES::GetNameInfoRequest(HLERequestContext& ctx) {
     LOG_WARNING(Service, "(STUBBED) sfdnsres::GetNameInfoRequest called");
     IPC::ResponseBuilder rb{ctx, 5}; // Similar to GetAddrInfoRequest
     rb.Push(ResultSuccess);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
     rb.PushEnum(GetAddrInfoError::AGAIN); // Changed from INTERNAL to AGAIN
     rb.Push<u32>(0);
 }
@@ -1098,7 +702,7 @@ void SFDNSRES::GetNameInfoRequestWithOptions(HLERequestContext& ctx) {
     rb.Push<u32>(0); // data_size
     rb.PushEnum(GetAddrInfoError::AGAIN); // Changed from INTERNAL to AGAIN
     rb.PushEnum(NetDbError::Internal);    // This should be fine as NetDbError::Internal is defined
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 } // namespace Service::Sockets
