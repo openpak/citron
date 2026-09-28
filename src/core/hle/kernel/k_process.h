@@ -87,6 +87,9 @@ private:
     bool m_is_application{};
     bool m_is_default_application_system_resource{};
     bool m_is_hbl{};
+    // [OpenPak] The HIPC pointer buffer size, and whether the process set it itself (as Eden).
+    u32 m_pointer_buffer_size = 0x8000;
+    bool m_pointer_buffer_size_set_by_guest = false;
     std::array<char, 13> m_name{};
     std::atomic<u16> m_num_running_threads{};
     Svc::CreateProcessFlag m_flags{};
@@ -263,6 +266,19 @@ public:
 
     bool IsHbl() const {
         return m_is_hbl;
+    }
+
+    u32 GetPointerBufferSize() const {
+        return m_pointer_buffer_size;
+    }
+
+    bool IsPointerBufferSizeSetByGuest() const {
+        return m_pointer_buffer_size_set_by_guest;
+    }
+
+    void SetPointerBufferSizeByGuest(u32 size) {
+        m_pointer_buffer_size = size;
+        m_pointer_buffer_size_set_by_guest = true;
     }
 
     u32 GetAllocateOption() const {

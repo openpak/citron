@@ -1,15 +1,19 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <limits>
+
 #include "common/assert.h"
 #include "common/alignment.h"
 #include "common/logging.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_client_port.h"
 #include "core/hle/kernel/k_port.h"
+#include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scoped_resource_reservation.h"
 #include "core/hle/kernel/k_server_session.h"
 #include "core/hle/kernel/k_session.h"
+#include "core/hle/kernel/k_thread.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sm/sm_controller.h"
@@ -81,11 +85,40 @@ void Controller::QueryPointerBufferSize(HLERequestContext& ctx) {
     // 0xF000 matches Ryujinx-Reference's own fix for exactly this (515040a) -- the maximum a 16-bit
     // HIPC size field can express, comfortably covering even NPLN's heaviest concurrent-stream
     // case, verified safe for every other title's usage there too.
-    constexpr u16 pointer_buffer_size = 0xF000;
+    // [OpenPak] 0xF000 is the floor, not the answer: a size the guest set itself wins (as Eden).
+    auto* process = Kernel::GetCurrentProcessPointer(kernel);
+    ASSERT(process != nullptr);
+
+    u32 buffer_size = process->GetPointerBufferSize();
+    if (!process->IsPointerBufferSizeSetByGuest() && buffer_size < 0xF000) {
+        buffer_size = 0xF000;
+    }
+    if (buffer_size > std::numeric_limits<u16>::max()) {
+        buffer_size = std::numeric_limits<u16>::max();
+    }
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push<u16>(pointer_buffer_size);
+    rb.Push<u16>(static_cast<u16>(buffer_size));
+}
+
+// [OpenPak] The guest sets its own pointer buffer size, kept per process (as Eden).
+void Controller::SetPointerBufferSize(HLERequestContext& ctx) {
+    LOG_DEBUG(Service, "called");
+
+    auto* process = Kernel::GetCurrentProcessPointer(kernel);
+    ASSERT(process != nullptr);
+
+    IPC::RequestParser rp{ctx};
+    u32 requested_size = rp.PopRaw<u32>();
+    if (requested_size > std::numeric_limits<u16>::max()) {
+        requested_size = std::numeric_limits<u16>::max();
+    }
+
+    process->SetPointerBufferSizeByGuest(requested_size);
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
 }
 
 // https://switchbrew.org/wiki/IPC_Marshalling
@@ -96,6 +129,7 @@ Controller::Controller(Core::System& system_) : ServiceFramework{system_, "IpcCo
         {2, &Controller::CloneCurrentObject, "CloneCurrentObject"},
         {3, &Controller::QueryPointerBufferSize, "QueryPointerBufferSize"},
         {4, &Controller::CloneCurrentObjectEx, "CloneCurrentObjectEx"},
+        {5, &Controller::SetPointerBufferSize, "SetPointerBufferSize"},
     };
     RegisterHandlers(functions);
 }
