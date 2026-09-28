@@ -159,6 +159,7 @@ private:
                 std::function<void()> on_click = {});
 
     Core::System& system;
+    int guest_input_suspensions = 0; // OpenPak dialogs open right now, see SetGuestInputSuspended
     QWidget* main_window;
     OpenPakToast* toast = nullptr;
     QPointer<OpenPakAccountDialog> window;

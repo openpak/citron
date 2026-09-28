@@ -2491,8 +2491,8 @@ void GameList::ClearLaunchOverlays() {
 }
 
 void GameList::UpdateOnlineStatus() {
-    // If the Online column is hidden in settings, skip all network pings and retries.
-    if (!UISettings::values.show_online_column) {
+    // If the Online column is hidden, skip all network pings and retries.
+    if (!UISettings::values.show_online_column || !Settings::values.enable_openpak.GetValue()) {
         return;
     }
 
@@ -3961,7 +3961,9 @@ void GameList::PopulateAsync(QVector<UISettings::GameDir>& game_dirs, bool is_sm
     tree_view->setColumnHidden(COLUMN_FILE_TYPE, !UISettings::values.show_types);
     tree_view->setColumnHidden(COLUMN_SIZE, !UISettings::values.show_size);
     tree_view->setColumnHidden(COLUMN_PLAY_TIME, !UISettings::values.show_play_time);
-    tree_view->setColumnHidden(COLUMN_ONLINE, !UISettings::values.show_online_column);
+    // [OpenPak] Only while OpenPak is on (UX spec 3.11); the setting can still hide it.
+    tree_view->setColumnHidden(COLUMN_ONLINE, !UISettings::values.show_online_column ||
+                                                  !Settings::values.enable_openpak.GetValue());
     current_worker.reset();
 
     if (progress_bar) {

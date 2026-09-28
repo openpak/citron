@@ -1164,7 +1164,14 @@ std::string OpenPakHost::NatIp() const {
 
 void OpenPakHost::SetGuestInputSuspended(bool suspended) {
     // A dialog driven by the controller must not also drive the game behind it.
-    system.HIDCore().SetGuestInputSuspended(suspended);
+    // Counted, because a prompt opened from the window must not resume input when it closes.
+    if (suspended) {
+        if (guest_input_suspensions++ == 0) {
+            system.HIDCore().SetGuestInputSuspended(true);
+        }
+    } else if (guest_input_suspensions > 0 && --guest_input_suspensions == 0) {
+        system.HIDCore().SetGuestInputSuspended(false);
+    }
 }
 
 openpak::qt::Navigation* OpenPakHost::CreateNavigation(QObject* parent) {
