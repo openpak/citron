@@ -19,6 +19,9 @@
 #include "common/settings.h"
 
 #include "core/hle/service/ssl/ssl_backend.h"
+#ifdef CITRON_BUNDLED_OPENSSL
+#include "core/hle/service/ssl/openssl_cert.h"
+#endif
 #include "core/internal_network/network.h"
 #include "core/internal_network/sockets.h"
 #include "openpak/session.h"
@@ -45,12 +48,47 @@ void OneTimeInit();
 void OneTimeInitLogFile();
 bool OneTimeInitBIO();
 
+#ifdef CITRON_BUNDLED_OPENSSL
+// [OpenPak] The public roots Eden bundles, for a build whose OpenSSL has no system store to
+// read. They replace the context's store, as Eden and httplib do it.
+void LoadBundledRoots(SSL_CTX* ctx) {
+    BIO* const mem = BIO_new_mem_buf(kCert, static_cast<int>(sizeof(kCert)));
+    if (!mem) {
+        return;
+    }
+    auto* const infos = PEM_X509_INFO_read_bio(mem, nullptr, nullptr, nullptr);
+    BIO_free_all(mem);
+    if (!infos) {
+        return;
+    }
+    if (X509_STORE* const store = X509_STORE_new()) {
+        for (int i = 0; i < sk_X509_INFO_num(infos); i++) {
+            const X509_INFO* const info = sk_X509_INFO_value(infos, i);
+            if (info && info->x509) {
+                X509_STORE_add_cert(store, info->x509);
+            }
+            if (info && info->crl) {
+                X509_STORE_add_crl(store, info->crl);
+            }
+        }
+        SSL_CTX_set_cert_store(ctx, store);
+    }
+    sk_X509_INFO_pop_free(infos, X509_INFO_free);
+}
+#endif
+
 } // namespace
 
 class SSLConnectionBackendOpenSSL final : public SSLConnectionBackend {
 public:
     Result Init() {
         std::call_once(one_time_init_flag, OneTimeInit);
+
+#ifdef CITRON_BUNDLED_OPENSSL
+        if (ssl_ctx) {
+            LoadBundledRoots(ssl_ctx);
+        }
+#endif
 
         if (!one_time_init_success) {
             LOG_ERROR(Service_SSL,

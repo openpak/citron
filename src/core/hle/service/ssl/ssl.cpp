@@ -340,9 +340,7 @@ private:
     }
 
     Result PeekImpl(size_t* out_size, std::span<u8> data) {
-        if (!backend) {
-            return ResultNoSocket;
-        }
+        ASSERT_OR_EXECUTE(did_handshake, { return ResultInternalError; });
         return backend->Peek(out_size, data);
     }
 
@@ -403,7 +401,12 @@ private:
             res = backend->GetServerCerts(&certs);
             if (res == ResultSuccess) {
                 const std::vector<u8> certs_buf = SerializeServerCerts(certs);
-                ctx.WriteBuffer(certs_buf);
+                // [OpenPak] As Eden: a title may pass no buffer, or one too small for the chain.
+                if (ctx.CanWriteBuffer()) {
+                    const size_t buffer_size = ctx.GetWriteBufferSize();
+                    ctx.WriteBuffer(std::span<const u8>(
+                        certs_buf.data(), std::min(certs_buf.size(), buffer_size)));
+                }
                 out.certs_count = static_cast<u32>(certs.size());
                 out.certs_size = static_cast<u32>(certs_buf.size());
             }
@@ -870,9 +873,9 @@ private:
 
         LOG_WARNING(Service_SSL, "(STUBBED) called. option={}", option);
 
-        IPC::ResponseBuilder rb{ctx, 3};
+        // [OpenPak] No value in the reply, as Eden answers.
+        IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
-        rb.Push<s32>(0); // Stubbed value
     }
 
     void RemoveServerPki(HLERequestContext& ctx) {
@@ -1156,19 +1159,19 @@ public:
         // (100) is the separate, deliberately-system-specific entry point.
         static const FunctionInfo functions[] = {
             {0, &ISslServiceForSystem::CreateContext, "CreateContext"},
-            {1, &ISslServiceForSystem::GetContextCount, "GetContextCount"},
+            {1, &ISslServiceForSystem::StubSuccess, "GetContextCount"},
             {2, D<&ISslServiceForSystem::GetCertificates>, "GetCertificates"},
             {3, D<&ISslServiceForSystem::GetCertificateBufSize>, "GetCertificateBufSize"},
-            {4, nullptr, "DebugIoctl"},
-            {5, &ISslServiceForSystem::SetInterfaceVersion, "SetInterfaceVersion"},
-            {6, &ISslServiceForSystem::FlushSessionCache, "FlushSessionCache"},
-            {7, &ISslServiceForSystem::SetDebugOption, "SetDebugOption"},
-            {8, &ISslServiceForSystem::GetDebugOption, "GetDebugOption"},
-            {9, &ISslServiceForSystem::ClearTls12FallbackFlag, "ClearTls12FallbackFlag"},
+            {4, &ISslServiceForSystem::StubSuccess, "DebugIoctl"},
+            {5, &ISslServiceForSystem::StubSuccess, "SetInterfaceVersion"},
+            {6, &ISslServiceForSystem::StubSuccess, "FlushSessionCache"},
+            {7, &ISslServiceForSystem::StubSuccess, "SetDebugOption"},
+            {8, &ISslServiceForSystem::StubSuccess, "GetDebugOption"},
+            {9, &ISslServiceForSystem::StubSuccess, "ClearTls12FallbackFlag"},
             {100, &ISslServiceForSystem::CreateContextForSystem, "CreateContextForSystem"},
-            {101, &ISslServiceForSystem::SetThreadCoreMask, "SetThreadCoreMask"},
-            {102, &ISslServiceForSystem::GetThreadCoreMask, "GetThreadCoreMask"},
-            {103, &ISslServiceForSystem::VerifySignature, "VerifySignature"},
+            {101, &ISslServiceForSystem::StubSuccess, "SetThreadCoreMask"},
+            {102, &ISslServiceForSystem::StubSuccess, "GetThreadCoreMask"},
+            {103, &ISslServiceForSystem::StubSuccess, "VerifySignature"},
             {104, nullptr, "SetCertificateAndPrivateKeyInternal"},
         };
         // clang-format on
@@ -1196,15 +1199,6 @@ private:
         rb.PushIpcInterface<ISslContext>(system, parameters.ssl_version);
     }
 
-    void GetContextCount(HLERequestContext& ctx) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called");
-
-        // Return stub count of 0 active contexts
-        IPC::ResponseBuilder rb{ctx, 3};
-        rb.Push(ResultSuccess);
-        rb.Push<u32>(0);
-    }
-
     Result GetCertificateBufSize(
         Out<u32> out_size, InArray<CaCertificateId, BufferAttr_HipcMapAlias> certificate_ids) {
         LOG_INFO(Service_SSL, "called");
@@ -1222,37 +1216,6 @@ private:
         LOG_INFO(Service_SSL, "[OpenPak][DIAG] GetCertificates -> num_entries={} requested_ids={}",
                  *out_num_entries, certificate_ids.size());
         R_RETURN(res);
-    }
-
-    void SetDebugOption(HLERequestContext& ctx) {
-        IPC::RequestParser rp{ctx};
-        const u32 debug_option_type = rp.Pop<u32>();
-
-        LOG_WARNING(Service_SSL, "(STUBBED) called, debug_option_type={}", debug_option_type);
-
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    void GetDebugOption(HLERequestContext& ctx) {
-        IPC::RequestParser rp{ctx};
-        const u32 debug_option_type = rp.Pop<u32>();
-
-        LOG_WARNING(Service_SSL, "(STUBBED) called, debug_option_type={}", debug_option_type);
-
-        // Write stub debug option value to buffer
-        std::array<u8, 1> debug_value{0};
-        ctx.WriteBuffer(debug_value);
-
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    void ClearTls12FallbackFlag(HLERequestContext& ctx) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called");
-
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
     }
 
     void CreateContextForSystem(HLERequestContext& ctx) {
@@ -1274,62 +1237,12 @@ private:
         rb.PushIpcInterface<ISslContextForSystem>(system, parameters.ssl_version);
     }
 
-    void SetThreadCoreMask(HLERequestContext& ctx) {
-        IPC::RequestParser rp{ctx};
-        const u64 core_mask = rp.Pop<u64>();
-        const u32 core_id = rp.Pop<u32>();
-
-        LOG_WARNING(Service_SSL, "(STUBBED) called, core_mask={:016X}, core_id={}", core_mask,
-                    core_id);
+    // [OpenPak] Eden answers the rest of ssl:s with success and nothing else.
+    void StubSuccess(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_SSL, "(STUBBED) called");
 
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
-    }
-
-    void GetThreadCoreMask(HLERequestContext& ctx) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called");
-
-        constexpr u64 core_mask = 0;
-        constexpr u32 core_id = 0;
-
-        IPC::ResponseBuilder rb{ctx, 4};
-        rb.Push(ResultSuccess);
-        rb.Push(core_mask);
-        rb.Push(core_id);
-    }
-
-    void VerifySignature(HLERequestContext& ctx) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called");
-
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    void SetInterfaceVersion(HLERequestContext& ctx) {
-        IPC::RequestParser rp{ctx};
-        const u32 ssl_version = rp.Pop<u32>();
-
-        LOG_DEBUG(Service_SSL, "called, ssl_version={}", ssl_version);
-
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    void FlushSessionCache(HLERequestContext& ctx) {
-        LOG_WARNING(Service_SSL, "(STUBBED) called");
-
-        IPC::RequestParser rp{ctx};
-        const u32 option_type = rp.Pop<u32>();
-
-        // Read the hostname buffer if provided for option_type 0
-        if (option_type == 0 && ctx.CanReadBuffer(0)) {
-            const auto hostname = Common::StringFromBuffer(ctx.ReadBuffer(0));
-            LOG_INFO(Service_SSL, "FlushSessionCache with hostname={}", hostname);
-        }
-
-        IPC::ResponseBuilder rb{ctx, 3};
-        rb.Push(ResultSuccess);
-        rb.Push<u32>(0); // Flushed session count, stubbed to 0
     }
 
     CertStore cert_store;

@@ -1336,6 +1336,13 @@ target_sources(core PRIVATE
     hle/service/ssl/ssl_backend_openssl.cpp)
 target_link_libraries(core PRIVATE OpenSSL::SSL)
 
+# [OpenPak] An OpenSSL that is not the system's finds no root store at run time, so the roots
+# Eden bundles (hle/service/ssl/openssl_cert.h) are loaded instead.
+if (WIN32 OR APPLE OR ANDROID OR
+    (DEFINED _OPENSSL_INSTALL AND "${OPENSSL_INCLUDE_DIR}" STREQUAL "${_OPENSSL_INSTALL}/include"))
+    target_compile_definitions(core PRIVATE CITRON_BUNDLED_OPENSSL)
+endif()
+
 if (CITRON_USE_PRECOMPILED_HEADERS)
     target_precompile_headers(core PRIVATE precompiled_headers.h)
 endif()
