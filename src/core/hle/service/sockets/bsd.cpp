@@ -1364,9 +1364,14 @@ void BSD::DuplicateSocket(HLERequestContext& ctx) {
 }
 
 void BSD::EventFd(HLERequestContext& ctx) {
+    // EventFd(nn::socket::EventFdFlags flags, u64 initval): flags first, four bytes of padding,
+    // then the 64-bit initial value, as Ryujinx and Eden read it. Read the other way round the
+    // counter starts at whatever the flags were and the flags are lost, so an event fd is born
+    // already signalled and never non-blocking.
     IPC::RequestParser rp{ctx};
-    const u64 initval = rp.Pop<u64>();
     const u32 flags = rp.Pop<u32>();
+    rp.Pop<u32>(); // padding
+    const u64 initval = rp.Pop<u64>();
 
     LOG_DEBUG(Service, "called. initval={} flags={}", initval, flags);
 
