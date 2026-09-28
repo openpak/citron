@@ -325,16 +325,73 @@ void BSD::Select(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. nfds={} timeout={}", nfds, timeout);
 
-    ExecuteWork(ctx, SelectWork{
-                         .nfds = nfds,
-                         .timeout = timeout,
-                         .read_in = ctx.CanReadBuffer(0) ? ctx.ReadBuffer(0) : std::span<const u8>{},
-                         .write_in = ctx.CanReadBuffer(1) ? ctx.ReadBuffer(1) : std::span<const u8>{},
-                         .error_in = ctx.CanReadBuffer(2) ? ctx.ReadBuffer(2) : std::span<const u8>{},
-                         .read_out = std::vector<u8>(ctx.GetWriteBufferSize(0)),
-                         .write_out = std::vector<u8>(ctx.GetWriteBufferSize(1)),
-                         .error_out = std::vector<u8>(ctx.GetWriteBufferSize(2)),
-                     });
+    const auto read_set = [&ctx](size_t index) {
+        const auto live = ctx.CanReadBuffer(index) ? ctx.ReadBuffer(index) : std::span<const u8>{};
+        return std::vector<u8>(live.begin(), live.end());
+    };
+
+    // [OpenPak] The parked select (Ryujinx IClient.cs Select), as Eden has it. A select with an
+    // event fd in its sets is ended by another guest thread's Write() to that event fd, which a
+    // wait held on this thread would keep queued behind itself. So: one non-blocking pass, and
+    // with nothing ready the request is parked the way a deferred Poll is, re-run by the
+    // deferral heartbeat until something is ready or the park window is over. The window is
+    // fixed, not the guest's timeout: that argument is a 16-byte timeval read here as one s32.
+    constexpr auto SelectParkWindow = std::chrono::milliseconds{100};
+
+    DeferredSelectState state;
+    bool had_snapshot = false;
+    {
+        std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+        if (const auto it = deferred_select_snapshots.find(&ctx);
+            it != deferred_select_snapshots.end()) {
+            state = it->second;
+            had_snapshot = true;
+        }
+    }
+    if (!had_snapshot) {
+        state.read_in = read_set(0);
+        state.write_in = read_set(1);
+        state.error_in = read_set(2);
+    }
+
+    const bool parkable =
+        nfds > 0 && GetBsdDeferralEvent() != nullptr &&
+        SelectSetIncludesEventFd(state.read_in, state.write_in, state.error_in);
+
+    SelectWork work{
+        .nfds = nfds,
+        .timeout = parkable ? 0 : timeout,
+        .read_in = state.read_in,
+        .write_in = state.write_in,
+        .error_in = state.error_in,
+        .read_out = std::vector<u8>(ctx.GetWriteBufferSize(0)),
+        .write_out = std::vector<u8>(ctx.GetWriteBufferSize(1)),
+        .error_out = std::vector<u8>(ctx.GetWriteBufferSize(2)),
+    };
+    work.Execute(this);
+
+    if (parkable && work.ret == 0 && work.bsd_errno == Errno::SUCCESS) {
+        if (!had_snapshot) {
+            // Nothing ready yet: keep the sets as they were read, since the re-run must not
+            // read guest memory again, and give the thread up.
+            state.deadline = std::chrono::steady_clock::now() + SelectParkWindow;
+            std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+            deferred_select_snapshots[&ctx] = std::move(state);
+            ctx.SetIsDeferred();
+            return;
+        }
+        if (std::chrono::steady_clock::now() < state.deadline) {
+            ctx.SetIsDeferred();
+            return;
+        }
+        // The window is over: answered below as 0 with no error, the three sets cleared.
+    }
+
+    if (had_snapshot) {
+        std::scoped_lock snapshot_lock{deferred_poll_snapshot_mutex};
+        deferred_select_snapshots.erase(&ctx);
+    }
+    work.Response(ctx);
 }
 
 void BSD::Poll(HLERequestContext& ctx) {
@@ -1135,6 +1192,20 @@ void SetFdInMask(std::vector<u8>& mask, s32 fd) {
 }
 } // Anonymous namespace
 
+// [OpenPak] Whether any of a select's three sets names an event fd, which is what makes it one
+// to park rather than wait on (see Select).
+bool BSD::SelectSetIncludesEventFd(std::span<const u8> read_in, std::span<const u8> write_in,
+                                   std::span<const u8> error_in) const {
+    std::vector<s32> fds;
+    ExtractFdsFromMask(read_in, fds);
+    ExtractFdsFromMask(write_in, fds);
+    ExtractFdsFromMask(error_in, fds);
+    return std::ranges::any_of(fds, [](s32 fd) {
+        return fd < static_cast<s32>(MAX_FD) && file_descriptors[fd] &&
+               file_descriptors[fd]->event_value;
+    });
+}
+
 std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8> read_in,
                                       std::span<const u8> write_in, std::span<const u8> error_in,
                                       std::vector<u8>& read_out, std::vector<u8>& write_out,
@@ -1178,6 +1249,7 @@ std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8>
 
     std::vector<s32> polled_fds;
     std::vector<Network::PollFD> host_pollfds;
+    std::vector<s32> event_fds;
     polled_fds.reserve(entries.size());
     host_pollfds.reserve(entries.size());
     s32 ready = 0;
@@ -1193,6 +1265,9 @@ std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8>
             const bool writable = True(entry.requested & Network::PollEvents::Out);
             if (readable) {
                 SetFdInMask(read_out, entry.fd);
+            } else if (!writable && True(entry.requested & Network::PollEvents::In)) {
+                // Not ready yet: read again after the wait below.
+                event_fds.push_back(entry.fd);
             }
             if (writable) {
                 SetFdInMask(write_out, entry.fd);
@@ -1210,10 +1285,28 @@ std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8>
         });
     }
 
-    const auto [poll_ret, poll_errno] =
-        Translate(Network::Poll(host_pollfds, ready > 0 ? 0 : timeout));
+    // [OpenPak] The host cannot see an event fd being written, so a wait with one in the set is
+    // a bounded one, and the counters are read again after it (as Eden has it). This is the path
+    // taken only when the select could not be parked (see Select), which asks for no wait at all.
+    constexpr s32 EventFdSelectSliceMs = 250;
+    s32 host_timeout = timeout;
+    if (ready > 0) {
+        host_timeout = 0;
+    } else if (!event_fds.empty() && (timeout < 0 || timeout > EventFdSelectSliceMs)) {
+        host_timeout = EventFdSelectSliceMs;
+    }
+
+    const auto [poll_ret, poll_errno] = Translate(Network::Poll(host_pollfds, host_timeout));
     if (poll_errno != Errno::SUCCESS) {
         return {poll_ret, poll_errno};
+    }
+
+    for (const s32 fd : event_fds) {
+        if (file_descriptors[fd] && file_descriptors[fd]->event_value &&
+            file_descriptors[fd]->event_value->load() > 0) {
+            SetFdInMask(read_out, fd);
+            ++ready;
+        }
     }
 
     // error_fds only ever reports out-of-band/exceptional conditions; a plain closed/errored
@@ -1449,8 +1542,10 @@ Errno BSD::GetPeerNameImpl(s32 fd, std::vector<u8>& write_buffer) {
     }
     const SockAddrIn guest_addrin = Translate(addr_in);
 
-    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
-    write_buffer.resize(sizeof(guest_addrin));
+    // [OpenPak] A buffer shorter than a sockaddr_in takes what fits, not an assert (as Eden).
+    if (write_buffer.size() > sizeof(guest_addrin)) {
+        write_buffer.resize(sizeof(guest_addrin));
+    }
     PutValue(write_buffer, guest_addrin);
     return Translate(bsd_errno);
 }
@@ -1468,8 +1563,10 @@ Errno BSD::GetSockNameImpl(s32 fd, std::vector<u8>& write_buffer) {
     }
     const SockAddrIn guest_addrin = Translate(addr_in);
 
-    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
-    write_buffer.resize(sizeof(guest_addrin));
+    // [OpenPak] A buffer shorter than a sockaddr_in takes what fits, not an assert (as Eden).
+    if (write_buffer.size() > sizeof(guest_addrin)) {
+        write_buffer.resize(sizeof(guest_addrin));
+    }
     PutValue(write_buffer, guest_addrin);
     return Translate(bsd_errno);
 }
@@ -1869,8 +1966,11 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         if (ret < 0) {
             addr.clear();
         } else {
-            ASSERT(addr.size() >= sizeof(SockAddrIn));
-            addr.resize(sizeof(SockAddrIn));
+            // [OpenPak] A buffer shorter than a sockaddr_in takes what fits, not an assert (as
+            // Eden).
+            if (addr.size() > sizeof(SockAddrIn)) {
+                addr.resize(sizeof(SockAddrIn));
+            }
             const SockAddrIn result = Translate(addr_in);
             PutValue(addr, result);
             LOG_DEBUG(Service, "RecvFrom fd={} <- {}:{} len={} {}", fd,
@@ -1938,6 +2038,10 @@ std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> mes
     Network::SockAddrIn addr_in;
     Network::SockAddrIn* p_addr_in = nullptr;
     if (!addr.empty()) {
+        // [OpenPak] A sockaddr shorter than a sockaddr_in is EINVAL, as Eden has it.
+        if (addr.size() < sizeof(SockAddrIn)) {
+            return {-1, Errno::INVAL};
+        }
         const auto parsed_addr = ParseGuestSockAddr(addr);
         if (!parsed_addr) {
             LOG_WARNING(Service, "SendTo fd={} with unsupported address (size={})", fd,

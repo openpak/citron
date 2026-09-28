@@ -112,11 +112,11 @@ sockaddr TranslateFromSockAddrIn(SockAddrIn input) {
 }
 
 LINGER MakeLinger(bool enable, u32 linger_value) {
-    ASSERT(linger_value <= std::numeric_limits<u_short>::max());
-
+    // [OpenPak] The guest's value is clamped to what the host field holds, not asserted on.
     LINGER value;
     value.l_onoff = enable ? 1 : 0;
-    value.l_linger = static_cast<u_short>(linger_value);
+    value.l_linger = static_cast<u_short>(
+        (std::min<u32>)(linger_value, (std::numeric_limits<u_short>::max)()));
     return value;
 }
 

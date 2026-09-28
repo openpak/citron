@@ -238,6 +238,20 @@ private:
     };
     std::mutex deferred_poll_snapshot_mutex;
     std::map<const HLERequestContext*, DeferredPollState> deferred_poll_snapshots;
+
+    bool SelectSetIncludesEventFd(std::span<const u8> read_in, std::span<const u8> write_in,
+                                  std::span<const u8> error_in) const;
+
+    // [OpenPak] A parked Select's captured request: the three fd sets as they were read, and
+    // the end of its park window. Guarded by deferred_poll_snapshot_mutex.
+    struct DeferredSelectState {
+        std::vector<u8> read_in;
+        std::vector<u8> write_in;
+        std::vector<u8> error_in;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::map<const HLERequestContext*, DeferredSelectState> deferred_select_snapshots;
+
     std::pair<s32, Errno> SelectImpl(s32 nfds, s32 timeout, std::span<const u8> read_in,
                                      std::span<const u8> write_in, std::span<const u8> error_in,
                                      std::vector<u8>& read_out, std::vector<u8>& write_out,
