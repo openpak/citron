@@ -1478,9 +1478,15 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
     // four runs running, while a real Switch played on. Mapping it to STREAM is what got Ryujinx
     // into an RoR2 lobby (2026-09-26, measured). It cannot regress a working title: the
     // alternative for Unspecified is a call that always fails.
+    //
+    // STREAM was wrong, and the guest said so (openpak/ryujinx 989a12600): mapped that way the
+    // socket binds tcp/7777 -- Mirror's default port -- and the very next call is recvfrom, which
+    // answers ENOTCONN because a listening TCP socket has nothing to receive from. The title took
+    // the error, never called accept, and played on alone. socket + bind + recvfrom with no accept
+    // is a UDP server, so DGRAM is the answer.
     if (type == Type::Unspecified) {
-        LOG_INFO(Service, "socket type 0 -> STREAM (base type unset by the guest)");
-        type = Type::STREAM;
+        LOG_INFO(Service, "socket type 0 -> DGRAM (base type unset by the guest)");
+        type = Type::DGRAM;
     }
 
     const s32 fd = FindFreeFileDescriptorHandle();
