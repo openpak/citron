@@ -40,11 +40,11 @@ ACC_E_U2::ACC_E_U2(std::shared_ptr<Module> module_, std::shared_ptr<ProfileManag
         {170, &ACC_E_U2::GetProfileUpdateNotifier, "GetNasOp2MembershipStateChangeNotifier"}, // Reuse notifier
         {191, &ACC_E_U2::ActivateOpenContextHolder, "UpdateNotificationReceiverInfo"}, // [13.0.0-19.0.1]
         {205, &ACC_E_U2::GetProfileEditor, "GetProfileEditor"},
-        {401, &ACC_E_U2::DebugInvalidateTokenCacheForUser, "GetPinCodeLength"}, // [18.0.0+] STUB
-        {402, &ACC_E_U2::DebugInvalidateTokenCacheForUser, "GetPinCode"}, // [18.0.0-19.0.1] STUB
-        {403, &ACC_E_U2::DebugInvalidateTokenCacheForUser, "GetPinCodeParity"}, // [20.0.0+] STUB
-        {404, &ACC_E_U2::DebugInvalidateTokenCacheForUser, "VerifyPinCode"}, // [20.0.0+] STUB
-        {405, &ACC_E_U2::DebugInvalidateTokenCacheForUser, "IsPinCodeVerificationForbidden"}, // [20.0.0+] STUB
+        {401, nullptr, "GetPinCodeLength"}, // [18.0.0+]
+        {402, nullptr, "GetPinCode"}, // [18.0.0-19.0.1]
+        {403, nullptr, "GetPinCodeParity"}, // [20.0.0+]
+        {404, nullptr, "VerifyPinCode"}, // [20.0.0+]
+        {405, nullptr, "IsPinCodeVerificationForbidden"}, // [20.0.0+]
         {997, &ACC_E_U2::DebugInvalidateTokenCacheForUser, "DebugInvalidateTokenCacheForUser"},
         {998, &ACC_E_U2::DebugSetUserStateClose, "DebugSetUserStateClose"},
         {999, &ACC_E_U2::DebugSetUserStateOpen, "DebugSetUserStateOpen"},

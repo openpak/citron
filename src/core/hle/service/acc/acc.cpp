@@ -1062,10 +1062,9 @@ private:
 
         ctx.WriteBuffer(token_bytes);
 
-        IPC::ResponseBuilder rb{ctx, 4};
+        IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
         rb.Push<u32>(static_cast<u32>(token_bytes.size()));
-        rb.Push(0);
     }
 
     void GetNintendoAccountUserResourceCacheForApplication(HLERequestContext& ctx) {

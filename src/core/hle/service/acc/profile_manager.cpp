@@ -366,6 +366,7 @@ bool ProfileManager::SetProfileBase(UUID uuid, const ProfileBase& profile_new) {
     profile.creation_time = profile_new.timestamp;
 
     is_save_needed = true;
+    WriteUserSaveFile();
 
     return true;
 }
@@ -376,6 +377,7 @@ bool ProfileManager::SetProfileBaseAndData(Common::UUID uuid, const ProfileBase&
     if (index.has_value() && SetProfileBase(uuid, profile_new)) {
         profiles[*index].data = data_new;
         is_save_needed = true;
+        WriteUserSaveFile();
         return true;
     }
 

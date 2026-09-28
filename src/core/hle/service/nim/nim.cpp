@@ -684,7 +684,7 @@ private:
         // Signal To IPC For A Response
         IPC::ResponseBuilder rb{ctx, 2, 0, 1};
         rb.Push(ResultSuccess);
-        rb.PushIpcInterface<IShopServiceAccessor>(system);
+        rb.PushIpcInterface<IShopServiceAccessServer>(system);
     }
 
     void IsLargeResourceAvailable(HLERequestContext& ctx) {
