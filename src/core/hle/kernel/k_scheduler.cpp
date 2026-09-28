@@ -19,7 +19,6 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
-#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 
 namespace Kernel {
 
@@ -377,27 +376,6 @@ void KScheduler::SwitchThread(KThread* next_thread) {
     // if (KProcess *next_process = next_thread->GetOwnerProcess(); next_process != cur_process) {
     //     KProcess::Switch(cur_process, next_process);
     // }
-
-    // [OpenPak][DIAG] Disabled: measured at ~19,000 log calls/sec across cores during the exact
-    // connection-setup window this gates on -- that's real per-switch overhead (formatting +
-    // logger I/O) landing precisely where guest thread dispatch latency matters most, risking a
-    // measurement-induced slowdown of the very thing being diagnosed. Kept as `false &&` (not
-    // deleted) so it's a one-line revert if a future session needs this trace again.
-    if (false && Svc::IsOpenPakDeadlineWatchActive()) {
-        // [OpenPak][DIAG] KThread::GetContext() gives the thread's last-saved PC/LR directly --
-        // reliable, in-process, no external debugger round-trip (unlike an attached gdbstub
-        // session, which was intermittently failing memory reads). This is the outgoing thread's
-        // context as of its last save, which is what we actually want: where it *was* executing
-        // when it stopped running, not live register state (it isn't running right now).
-        const u64 cur_pc = cur_thread ? cur_thread->GetContext().pc : 0;
-        const u64 cur_lr = cur_thread ? cur_thread->GetContext().lr : 0;
-        LOG_INFO(Kernel,
-                 "[OpenPak][SCHED-WATCH] core={} {}(id={},prio={},pc={:#x},lr={:#x}) -> {}(id={},prio={})",
-                 m_core_id, cur_thread ? "thread" : "null", cur_thread ? cur_thread->GetThreadId() : 0,
-                 cur_thread ? cur_thread->GetPriority() : -1, cur_pc, cur_lr,
-                 next_thread == m_idle_thread ? "idle" : "thread", next_thread->GetThreadId(),
-                 next_thread->GetPriority());
-    }
 
     // Set the new thread.
     SetCurrentThread(m_kernel, next_thread);
