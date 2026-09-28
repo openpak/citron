@@ -788,28 +788,10 @@ public:
 
 class EnsureTokenIdCacheAsyncInterface final : public IAsyncContext {
 public:
-    explicit EnsureTokenIdCacheAsyncInterface(Core::System& system_, Common::UUID user_)
-        : IAsyncContext{system_}, user{user_} {
+    explicit EnsureTokenIdCacheAsyncInterface(Core::System& system_) : IAsyncContext{system_} {
         MarkComplete();
     }
     ~EnsureTokenIdCacheAsyncInterface() = default;
-
-    void LoadIdTokenCache(HLERequestContext& ctx) {
-        std::vector<u8> token_bytes = OpenPakIdTokenBytes(system, user);
-        if (token_bytes.empty()) {
-            LOG_WARNING(Service_ACC, "(STUBBED) called");
-            token_bytes.assign(0x100, u8(0));
-        } else {
-            LOG_INFO(Service_ACC, "[OpenPak] Handing the title an id_token ({} bytes)",
-                     token_bytes.size());
-        }
-
-        ctx.WriteBuffer(token_bytes);
-
-        IPC::ResponseBuilder rb{ctx, 3};
-        rb.Push(ResultSuccess);
-        rb.Push<u32>(static_cast<u32>(token_bytes.size()));
-    }
 
 protected:
     bool IsComplete() const override {
@@ -821,9 +803,6 @@ protected:
     Result GetResult() const override {
         return ResultSuccess;
     }
-
-private:
-    Common::UUID user; ///< The user the title asked about; OpenPak speaks for the active one only.
 };
 
 class AuthenticateApplicationAsyncInterface final : public IAsyncContext {
@@ -987,7 +966,7 @@ public:
                                     const std::shared_ptr<ProfileManager>& profile_manager_,
                                     Common::UUID user_id_)
         : ServiceFramework{system_, "IManagerForApplication"},
-          ensure_token_id{std::make_shared<EnsureTokenIdCacheAsyncInterface>(system, user_id_)},
+          ensure_token_id{std::make_shared<EnsureTokenIdCacheAsyncInterface>(system)},
           profile_manager{profile_manager_}, user_id{user_id_} {
         // clang-format off
         static const FunctionInfo functions[] = {

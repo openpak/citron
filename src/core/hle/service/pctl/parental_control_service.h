@@ -47,7 +47,7 @@ private:
     Result IsPlayTimerEnabled(Out<bool> out_is_play_timer_enabled);
     Result IsRestrictedByPlayTimer(Out<bool> out_is_restricted_by_play_timer);
     Result GetPlayTimerSettings(Out<PlayTimerSettings> out_play_timer_settings);
-    Result GetPlayTimerRemainingTime(Out<s64> out_remaining_time);
+    Result GetPlayTimerRemainingTime(Out<s32> out_remaining_time);
     Result GetPlayTimerRemainingTimeDisplayInfo(
         Out<PlayTimerRemainingTimeDisplayInfo> out_display_info);
     Result GetPlayTimerSettingsVer2(Out<PlayTimerSettingsVer2> out_play_timer_settings);

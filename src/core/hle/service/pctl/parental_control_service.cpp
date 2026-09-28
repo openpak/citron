@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <limits>
+
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
@@ -388,10 +390,10 @@ Result IParentalControlService::GetPlayTimerSettings(
     R_SUCCEED();
 }
 
-Result IParentalControlService::GetPlayTimerRemainingTime(Out<s64> out_remaining_time) {
+Result IParentalControlService::GetPlayTimerRemainingTime(Out<s32> out_remaining_time) {
     LOG_WARNING(Service_PCTL, "(STUBBED) called");
-    // Return 0 indicating no time restriction (unlimited playtime remaining)
-    *out_remaining_time = 0;
+    // [OpenPak] As Eden answers: no timer runs, so the most time there is, not none.
+    *out_remaining_time = std::numeric_limits<s32>::max();
     R_SUCCEED();
 }
 

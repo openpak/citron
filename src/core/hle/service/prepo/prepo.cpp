@@ -22,10 +22,10 @@ public:
             {10101, &PlayReport::SaveReportWithUser<Core::Reporter::PlayReportType::Old>, "SaveReportWithUserOld"},
             {10102, &PlayReport::SaveReport<Core::Reporter::PlayReportType::Old2>, "SaveReportOld2"},
             {10103, &PlayReport::SaveReportWithUser<Core::Reporter::PlayReportType::Old2>, "SaveReportWithUserOld2"},
-            {10104, &PlayReport::SaveReport<Core::Reporter::PlayReportType::New>, "SaveReport"},
-            {10105, &PlayReport::SaveReportWithUser<Core::Reporter::PlayReportType::New>, "SaveReportWithUser"},
-            {10106, &PlayReport::Unknown10106, "Unknown10106"},
-            {10107, &PlayReport::Unknown10107, "Unknown10107"},
+            {10104, &PlayReport::SaveReport<Core::Reporter::PlayReportType::Old3>, "SaveReportOld3"},
+            {10105, &PlayReport::SaveReportWithUser<Core::Reporter::PlayReportType::Old3>, "SaveReportWithUserOld3"},
+            {10106, &PlayReport::SaveReport<Core::Reporter::PlayReportType::New>, "SaveReport"},
+            {10107, &PlayReport::SaveReportWithUser<Core::Reporter::PlayReportType::New>, "SaveReportWithUser"},
             {10200, &PlayReport::RequestImmediateTransmission, "RequestImmediateTransmission"},
             {10300, &PlayReport::GetTransmissionStatus, "GetTransmissionStatus"},
             {10400, &PlayReport::GetSystemSessionId, "GetSystemSessionId"},
@@ -287,27 +287,6 @@ private:
     void ReadAllReportFiles(HLERequestContext& ctx) {
         LOG_WARNING(Service_PREPO, "(STUBBED) called");
 
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    void Unknown10106(HLERequestContext& ctx) {
-        LOG_WARNING(Service_PREPO, "(STUBBED) called");
-        IPC::RequestParser rp{ctx};
-        [[maybe_unused]] const auto _ = rp.PopRaw<u64>();
-        [[maybe_unused]] const auto _a = ctx.ReadBufferA(0);
-        [[maybe_unused]] const auto _x = ctx.ReadBufferX(0);
-        IPC::ResponseBuilder rb{ctx, 2};
-        rb.Push(ResultSuccess);
-    }
-
-    void Unknown10107(HLERequestContext& ctx) {
-        LOG_WARNING(Service_PREPO, "(STUBBED) called");
-        IPC::RequestParser rp{ctx};
-        [[maybe_unused]] const auto _1 = rp.PopRaw<u128>();
-        [[maybe_unused]] const auto _2 = rp.PopRaw<u64>();
-        [[maybe_unused]] const auto _a = ctx.ReadBufferA(0);
-        [[maybe_unused]] const auto _x = ctx.ReadBufferX(0);
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }

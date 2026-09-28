@@ -54,6 +54,7 @@ public:
     enum class PlayReportType {
         Old,
         Old2,
+        Old3,
         New,
         System,
     };
