@@ -9,8 +9,6 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/hle/kernel/k_transfer_memory.h"
-#include "core/hle/kernel/k_thread.h"
-#include "core/legacy_guest_call.h"
 #include "core/hle/service/am/am_results.h"
 #include "core/hle/service/am/applet.h"
 #include "core/hle/service/am/service/application_functions.h"
@@ -81,7 +79,7 @@ IApplicationFunctions::IApplicationFunctions(Core::System& system_, std::shared_
         {130, D<&IApplicationFunctions::GetGpuErrorDetectedSystemEvent>, "GetGpuErrorDetectedSystemEvent"},
         {131, nullptr, "SetDelayTimeToAbortOnGpuError"},
         {140, D<&IApplicationFunctions::GetFriendInvitationStorageChannelEvent>, "GetFriendInvitationStorageChannelEvent"},
-        {141, &IApplicationFunctions::TryPopFromFriendInvitationStorageChannel, "TryPopFromFriendInvitationStorageChannel"},
+        {141, D<&IApplicationFunctions::TryPopFromFriendInvitationStorageChannel>, "TryPopFromFriendInvitationStorageChannel"},
         {150, D<&IApplicationFunctions::GetNotificationStorageChannelEvent>, "GetNotificationStorageChannelEvent"},
         {151, nullptr, "TryPopFromNotificationStorageChannel"},
         {160, D<&IApplicationFunctions::GetHealthWarningDisappearedSystemEvent>, "GetHealthWarningDisappearedSystemEvent"},
@@ -522,82 +520,33 @@ Result IApplicationFunctions::GetFriendInvitationStorageChannelEvent(
     R_SUCCEED();
 }
 
-// [OpenPak] RAW ctx handler -- see the header comment for why this is not D<>:
-// ctx.GetThread() is the REAL requesting guest thread, while the D<>/cmif path
-// executes on a ServerManager host thread whose GetCurrentThreadPointer() is a
-// per-thread DUMMY KThread -- arming against that dummy never fires.
-void IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
-    HLERequestContext& ctx) {
+Result IApplicationFunctions::TryPopFromFriendInvitationStorageChannel(
+    Out<SharedPointer<IStorage>> out_storage) {
+    LOG_DEBUG(Service_AM, "called");
+
     // [OpenPak] What the frontend left in the channel -- an invitation accepted from the native
     // inbox, or a friend's session joined from the account dialog -- oldest first. The event
     // stays signalled only while something is still queued, so a title waiting on it wakes once
     // per invitation (as Ryujinx does). The storage is [Uid 0x10][the sender's application data],
     // relayed byte for byte: the receiving game parses its own format.
-    std::vector<u8> storage_data;
-    {
-        std::scoped_lock lk{m_applet->lock};
-        auto& channel = m_applet->friend_invitation_storage_channel;
-        m_applet->friend_invitation_storage_channel_event.Clear();
+    std::scoped_lock lk{m_applet->lock};
 
-        if (channel.empty()) {
-            LOG_DEBUG(Service_AM, "called, no invitation waiting");
-            IPC::ResponseBuilder rb{ctx, 2};
-            rb.Push(AM::ResultNoDataInChannel);
-            return;
-        }
+    auto& channel = m_applet->friend_invitation_storage_channel;
+    m_applet->friend_invitation_storage_channel_event.Clear();
 
-        storage_data = std::move(channel.front());
-        channel.pop_front();
-
-        if (!channel.empty()) {
-            m_applet->friend_invitation_storage_channel_event.Signal();
-        }
+    if (channel.empty()) {
+        R_THROW(AM::ResultNoDataInChannel);
     }
 
-    constexpr std::size_t UidSize = sizeof(Common::UUID);
-    const std::span<const u8> app_param =
-        storage_data.size() > UidSize ? std::span<const u8>{storage_data}.subspan(UidSize)
-                                      : std::span<const u8>{};
-    LOG_INFO(Service_AM, "[OpenPak] TryPopFromFriendInvitationStorageChannel: app_param_size={}",
-             app_param.size());
+    auto data = std::move(channel.front());
+    channel.pop_front();
 
-    // [OpenPak] Outbound's own mailbox-consumption path can never join by itself (its
-    // JoinSessionRequest is built from a hardcoded empty PlatformSessionID and
-    // NetworkSystemSwitch.JoinSession is a no-op on this platform -- both confirmed by
-    // full static disassembly, see outbound-re NOTES). A delivered invitation is
-    // otherwise consumed and silently discarded. Drive the game's own real, working
-    // join-by-code path (NetworkManager.Join + StartCoroutine) with the room code from
-    // this invitation's application parameter instead. See legacy_guest_call.h.
-    // ... and arm the guest-call injection against ctx.GetThread() -- the REAL
-    // requesting guest thread (Unity main).
-    if (app_param.size() >= 6 && app_param.size() == 5 + app_param[4]) {
-        const char* code_bytes = reinterpret_cast<const char*>(app_param.data()) + 5;
-        const std::string_view room_code(code_bytes, app_param[4]);
-        LOG_INFO(Service_AM, "[OpenPak] invitation room code: '{}'", room_code);
-        // [OpenPak] RECORD only: the injection must fire when the USER accepts the
-        // invite (toast click) from the multiplayer menu -- auto-firing on delivery
-        // joins from whatever screen the joiner is on and crashes on the main menu
-        // (observed live: guest svcBreak + freeze).
-        Core::OpenPakGuestCall::RecordInvite(ctx.GetThread(), *system.ApplicationProcess(),
-                                              room_code);
-    } else {
-        LOG_INFO(Service_AM,
-                 "[OpenPak] invitation app_param does not match the u32_le(1) || u8(len) || "
-                 "ascii format (size={}) -- no join armed",
-                 app_param.size());
+    if (!channel.empty()) {
+        m_applet->friend_invitation_storage_channel_event.Signal();
     }
 
-    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
-    rb.Push(ResultSuccess);
-    auto storage = std::make_shared<IStorage>(system, std::move(storage_data));
-    // Match the cmif path: domain sessions register domain objects, non-domain
-    // sessions register the HLE interface. Getting this wrong corrupts the session
-    // (observed live: hle_ipc "object_id too big" assert + guest svcBreak + freeze).
-    if (ctx.GetManager()->IsDomain()) {
-        ctx.AddDomainObject(std::move(storage));
-    } else {
-        ctx.AddMoveInterface(std::move(storage));
-    }
+    *out_storage = std::make_shared<IStorage>(system, std::move(data));
+    R_SUCCEED();
 }
 
 Result IApplicationFunctions::GetNotificationStorageChannelEvent(

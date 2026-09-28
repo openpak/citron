@@ -13,7 +13,6 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/kernel/svc.h"
-#include "core/legacy_guest_call.h"
 
 namespace Kernel {
 
@@ -91,11 +90,6 @@ void PhysicalCore::RunThread(Kernel::KThread* thread) {
                     thread->SetStepState(StepState::StepPerformed);
                 }
             } else {
-                // [OpenPak] If a manufactured guest call is armed against this thread,
-                // rewrite its context to begin the injected call chain (see
-                // legacy_guest_call.h for the full design).
-                Core::OpenPakGuestCall::OnBeforeRun(*thread, *interface, *process);
-
                 CITRON_PROFILE_SCOPE("PhysicalCore::RunThread");
                 hr = interface->RunThread(thread);
             }
@@ -116,14 +110,6 @@ void PhysicalCore::RunThread(Kernel::KThread* thread) {
         // Notify the debugger and go to sleep if a breakpoint was hit,
         // or if the thread is unable to continue for any reason.
         if (breakpoint || prefetch_abort) {
-            // [OpenPak] A prefetch abort at our LR=0 sentinel is the injected call
-            // returning: chain the next call, or restore the original context. Must be
-            // checked before the generic suspend handling below.
-            if (prefetch_abort &&
-                Core::OpenPakGuestCall::OnFault(*thread, *interface, *process, false)) {
-                continue;
-            }
-
             if (breakpoint) {
                 interface->RewindBreakpointInstruction();
             }
@@ -144,14 +130,6 @@ void PhysicalCore::RunThread(Kernel::KThread* thread) {
 
         // Notify the debugger and go to sleep on data abort.
         if (data_abort) {
-            // [OpenPak] A real abort inside an injected call: restore the original
-            // context, then fall through to the normal abort handling.
-            if (Core::OpenPakGuestCall::OnFault(*thread, *interface, *process, true)) {
-                // Context restored; still suspend via the normal path so a genuinely
-                // crashing injected call is visible instead of silently looping.
-                thread->RequestSuspend(SuspendType::Debug);
-                return;
-            }
             if (system.DebuggerEnabled()) {
                 if (const auto* watchpoint = interface->HaltedWatchpoint(); watchpoint != nullptr) {
                     system.GetDebugger().NotifyThreadWatchpoint(thread, *watchpoint);
