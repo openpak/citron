@@ -106,6 +106,24 @@ public:
 
     virtual Errno SetRcvTimeo(u32 value) = 0;
 
+    // [OpenPak] Read back from the host. A socket with no host behind it has nothing to read
+    // and answers INVAL, as Eden has it.
+    virtual std::pair<u32, Errno> GetSndBuf() {
+        return {0, Errno::INVAL};
+    }
+    virtual std::pair<u32, Errno> GetRcvBuf() {
+        return {0, Errno::INVAL};
+    }
+    virtual std::pair<u32, Errno> GetSndTimeo() {
+        return {0, Errno::INVAL};
+    }
+    virtual std::pair<u32, Errno> GetRcvTimeo() {
+        return {0, Errno::INVAL};
+    }
+    virtual std::pair<u32, Errno> GetSocketType() {
+        return {0, Errno::INVAL};
+    }
+
     virtual Errno SetNonBlock(bool enable) = 0;
 
     // [OpenPak] IPPROTO_TCP-level option, not SOL_SOCKET -- the generic SetSockOpt/GetSockOpt
@@ -190,6 +208,12 @@ public:
     Errno SetSndTimeo(u32 value) override;
 
     Errno SetRcvTimeo(u32 value) override;
+
+    std::pair<u32, Errno> GetSndBuf() override;
+    std::pair<u32, Errno> GetRcvBuf() override;
+    std::pair<u32, Errno> GetSndTimeo() override;
+    std::pair<u32, Errno> GetRcvTimeo() override;
+    std::pair<u32, Errno> GetSocketType() override;
 
     Errno SetNonBlock(bool enable) override;
 

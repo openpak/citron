@@ -4,8 +4,6 @@
 #include <atomic>
 #include <unordered_set>
 
-#include <chrono>
-
 #include "common/scope_exit.h"
 #include "common/scratch_buffer.h"
 #include "core/core.h"
@@ -13,36 +11,9 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/kernel/svc.h"
-#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 #include "core/hle/kernel/svc_results.h"
 
 namespace Kernel::Svc {
-
-std::atomic<u64> g_legacy_deadline_watch_until_ms{0};
-
-void ArmOpenPakDeadlineWatch(u64 duration_ms) {
-    const auto now_ms = static_cast<u64>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-    g_legacy_deadline_watch_until_ms.store(now_ms + duration_ms, std::memory_order_relaxed);
-}
-
-bool IsOpenPakDeadlineWatchActive() {
-    const u64 until_ms = g_legacy_deadline_watch_until_ms.load(std::memory_order_relaxed);
-    if (until_ms == 0) {
-        return false;
-    }
-    const auto now_ms = static_cast<u64>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-    if (now_ms > until_ms) {
-        g_legacy_deadline_watch_until_ms.store(0, std::memory_order_relaxed);
-        return false;
-    }
-    return true;
-}
 
 /// Close a handle
 Result CloseHandle(Core::System& system, Handle handle) {

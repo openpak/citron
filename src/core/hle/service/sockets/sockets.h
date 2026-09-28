@@ -16,22 +16,33 @@ class KEvent;
 
 namespace Service::Sockets {
 
+// [OpenPak] The numbers are the ones Ryujinx answers with (Bsd/Types/LinuxError.cs).
 enum class Errno : u32 {
     SUCCESS = 0,
+    PERM = 1,
+    NOENT = 2,
     BADF = 9,
     AGAIN = 11,
     NOMEM = 12, // [OpenPak] Sysctl: a buffer too short for the answer
+    ACCES = 13,
     INVAL = 22,
     MFILE = 24,
+    NOTTY = 25,
     PIPE = 32,
     MSGSIZE = 90,
+    NOPROTOOPT = 92,
     OPNOTSUPP = 95, // [OpenPak] Sysctl: a query this build does not answer
     AFNOSUPPORT = 97,
+    NETDOWN = 100,
+    NETUNREACH = 101,
     CONNABORTED = 103,
     CONNRESET = 104,
+    ISCONN = 106,
     NOTCONN = 107,
     TIMEDOUT = 110,
     CONNREFUSED = 111,
+    HOSTUNREACH = 113,
+    ALREADY = 114,
     DESTADDRREQ = 89,
     INPROGRESS = 115,
 };

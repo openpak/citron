@@ -20,6 +20,18 @@ namespace Service::Sockets {
 namespace {
 // [OpenPak] See the declaration comment in sockets.h.
 Kernel::KEvent* g_bsd_deferral_event = nullptr;
+
+class ISfDriverServiceCreator final : public ServiceFramework<ISfDriverServiceCreator> {
+public:
+    explicit ISfDriverServiceCreator(Core::System& system_) : ServiceFramework{system_, "eth:nd"} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, nullptr, "CreateDriverService"},
+        };
+        // clang-format on
+        RegisterHandlers(functions);
+    }
+};
 }
 
 void SetBsdDeferralEvent(Kernel::KEvent* event) {
@@ -33,17 +45,22 @@ Kernel::KEvent* GetBsdDeferralEvent() {
 void LoopProcess(Core::System& system) {
     auto server_manager = std::make_unique<ServerManager>(system);
 
-    server_manager->RegisterNamedService("bsd:a", std::make_shared<BSD>(system, "bsd:a"));
-    server_manager->RegisterNamedService("bsd:s", std::make_shared<BSD>(system, "bsd:s"));
-    server_manager->RegisterNamedService("bsd:u", std::make_shared<BSD>(system, "bsd:u"));
+    server_manager->RegisterNamedService("bsd:a", std::make_shared<BSD>(system, "bsd:a", false));
+    server_manager->RegisterNamedService("bsd:s", std::make_shared<BSD>(system, "bsd:s", false));
+    server_manager->RegisterNamedService("bsd:u", std::make_shared<BSD>(system, "bsd:u", true));
     server_manager->RegisterNamedService("bsd:nu", std::make_shared<BSDNU>(system));
-    server_manager->RegisterNamedService("bsdcfg", std::make_shared<BSDCFG>(system));
+    server_manager->RegisterNamedService("bsdcfg", std::make_shared<BSDCFG>(system, "bsdcfg"));
+    // [OpenPak] ifcfg answers as bsdcfg does, and eth:nd is registered further down, as Eden
+    // has them.
+    server_manager->RegisterNamedService("ifcfg", std::make_shared<BSDCFG>(system, "ifcfg"));
     server_manager->RegisterNamedService("dns:priv", std::make_shared<DNSPRIV>(system));
     server_manager->RegisterNamedService("ethc:c", std::make_shared<ETHC_C>(system));
     server_manager->RegisterNamedService("ethc:i", std::make_shared<ETHC_I>(system));
     server_manager->RegisterNamedService("nsd:a", std::make_shared<NSD>(system, "nsd:a"));
     server_manager->RegisterNamedService("nsd:u", std::make_shared<NSD>(system, "nsd:u"));
     server_manager->RegisterNamedService("sfdnsres", std::make_shared<SFDNSRES>(system));
+    server_manager->RegisterNamedService("eth:nd",
+                                         std::make_shared<ISfDriverServiceCreator>(system));
     // [OpenPak] A single dedicated thread serializes socket IPC in strict arrival order
     // (matching Ryujinx's Bsd service), but a blocking call like Accept() on a listening socket
     // that never gets a connection then starves every other socket operation for as long as it

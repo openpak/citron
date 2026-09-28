@@ -15,7 +15,6 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <mstcpip.h>
 #elif defined(__unix__) || defined(__APPLE__)
 #include <arpa/inet.h>
 #include <errno.h>
@@ -178,8 +177,18 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::TIMEDOUT;
     case WSAEINPROGRESS:
         return Errno::INPROGRESS;
+    case WSAEISCONN:
+        return Errno::ISCONN;
     case WSAENOPROTOOPT:
-        return Errno::INVAL;
+        return Errno::NOPROTOOPT;
+    case WSAEAFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
+    case WSAEOPNOTSUPP:
+        return Errno::OPNOTSUPP;
+    case WSAEALREADY:
+        return Errno::ALREADY;
+    case WSAEACCES:
+        return Errno::ACCES;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={}", e);
         return Errno::OTHER;
@@ -323,8 +332,20 @@ Errno TranslateNativeError(int e, CallType call_type = CallType::Other) {
         return Errno::TIMEDOUT;
     case EINPROGRESS:
         return Errno::INPROGRESS;
+    case EISCONN:
+        return Errno::ISCONN;
     case ENOPROTOOPT:
-        return Errno::INVAL;
+        return Errno::NOPROTOOPT;
+    case EAFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
+    case EOPNOTSUPP:
+        return Errno::OPNOTSUPP;
+    case EALREADY:
+        return Errno::ALREADY;
+    case EPERM:
+        return Errno::PERM;
+    case EACCES:
+        return Errno::ACCES;
     default:
         UNIMPLEMENTED_MSG("Unimplemented errno={} ({})", e, strerror(e));
         return Errno::OTHER;
@@ -854,32 +875,6 @@ Errno Socket::SetSockOpt(SOCKET fd_so, int option, T value) {
     return GetAndLogLastError();
 }
 
-namespace {
-void EnableAggressiveTcpKeepAlive(SOCKET fd) {
-    constexpr u32 enable = 1;
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&enable),
-               sizeof(enable));
-
-#ifdef _WIN32
-    tcp_keepalive vals{1, 5000, 5000};
-    DWORD bytes_returned = 0;
-    WSAIoctl(fd, SIO_KEEPALIVE_VALS, &vals, sizeof(vals), nullptr, 0, &bytes_returned, nullptr,
-             nullptr);
-#elif defined(__unix__) || defined(__APPLE__)
-    constexpr u32 idle = 5;
-    constexpr u32 interval = 5;
-    constexpr u32 count = 3;
-#ifdef __APPLE__
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle));
-#else
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-#endif
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
-#endif
-}
-} // Anonymous namespace
-
 Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
     // [OpenPak] Guest SOCK_RAW + IPPROTO_ICMP is what titles use for region-latency
     // pings (observed: Among Us opens one per selectable region before any online
@@ -909,11 +904,6 @@ Errno Socket::Initialize(Domain domain, Type type, Protocol protocol) {
                        sizeof(v6_only)) == SOCKET_ERROR) {
             LOG_WARNING(Network, "Could not make an IPv6 socket dual-mode");
         }
-    }
-
-    // Stay ahead of NAT/firewall idle-connection drops regardless of whether the game asked.
-    if (type == Type::STREAM) {
-        EnableAggressiveTcpKeepAlive(fd);
     }
 
     return Errno::SUCCESS;
@@ -971,46 +961,7 @@ Errno Socket::Connect(SockAddrIn addr_in) {
         return Errno::SUCCESS;
     }
 
-    const Errno result = GetAndLogLastError(CallType::Connect);
-    if (result != Errno::INPROGRESS) {
-        return result;
-    }
-
-    // [OpenPak] Splatoon 3's gRPC connection stack doesn't survive Citron's honest
-    // non-blocking connect()+EINPROGRESS+poll() cycle reliably -- something in its own
-    // retry bookkeeping gives up long before the connection actually finishes, even
-    // though the TCP handshake itself always succeeds. Ryujinx-Reference sidesteps this
-    // entire class of timing issue by never handing the guest an "in progress" status
-    // for this connect() at all: it blocks host-side until the handshake genuinely
-    // completes and reports the definitive outcome directly (see Ryujinx's own log
-    // line "grpc connect completed synchronously (blocked for host completion)").
-    // Mirror that here with a bounded host-side wait instead of returning INPROGRESS.
-    WSAPOLLFD wait_fd{};
-    wait_fd.fd = fd;
-    wait_fd.events = POLLOUT;
-    wait_fd.revents = 0;
-    constexpr int connect_wait_timeout_ms = 5000;
-    const int poll_result = WSAPoll(&wait_fd, 1, connect_wait_timeout_ms);
-    if (poll_result <= 0) {
-        // Timed out (or the wait itself errored) -- fall back to the original
-        // INPROGRESS status so the guest's own poll loop can still take over.
-        return result;
-    }
-
-    const auto [pending_err, getsockopt_err] = GetPendingError();
-    if (getsockopt_err != Errno::SUCCESS) {
-        return result;
-    }
-    if (pending_err != Errno::SUCCESS) {
-        LOG_ERROR(Network,
-                  "[OpenPak] Connect blocked-wait finished with error, errno={}",
-                  static_cast<int>(pending_err));
-        return pending_err;
-    }
-
-    LOG_INFO(Network, "[OpenPak] grpc connect completed synchronously (blocked for host "
-                      "completion) -> SUCCESS");
-    return Errno::SUCCESS;
+    return GetAndLogLastError(CallType::Connect);
 }
 
 std::pair<SockAddrIn, Errno> Socket::GetPeerName() {
@@ -1303,6 +1254,40 @@ Errno Socket::SetSndTimeo(u32 value) {
 
 Errno Socket::SetRcvTimeo(u32 value) {
     return SetTimevalSockOpt(fd, SO_RCVTIMEO, value);
+}
+#endif
+
+// [OpenPak] What the host holds for the options a title reads back, so the answer is the one
+// in force and not an echo of what was asked for. Ported from Eden.
+std::pair<u32, Errno> Socket::GetSndBuf() {
+    return GetSockOpt<u32>(fd, SO_SNDBUF);
+}
+
+std::pair<u32, Errno> Socket::GetRcvBuf() {
+    return GetSockOpt<u32>(fd, SO_RCVBUF);
+}
+
+std::pair<u32, Errno> Socket::GetSocketType() {
+    return GetSockOpt<u32>(fd, SO_TYPE);
+}
+
+#ifdef _WIN32
+std::pair<u32, Errno> Socket::GetSndTimeo() {
+    return GetSockOpt<u32>(fd, SO_SNDTIMEO);
+}
+
+std::pair<u32, Errno> Socket::GetRcvTimeo() {
+    return GetSockOpt<u32>(fd, SO_RCVTIMEO);
+}
+#else
+std::pair<u32, Errno> Socket::GetSndTimeo() {
+    const auto [value, error] = GetSockOpt<timeval>(fd, SO_SNDTIMEO);
+    return {static_cast<u32>(value.tv_sec * 1000 + value.tv_usec / 1000), error};
+}
+
+std::pair<u32, Errno> Socket::GetRcvTimeo() {
+    const auto [value, error] = GetSockOpt<timeval>(fd, SO_RCVTIMEO);
+    return {static_cast<u32>(value.tv_sec * 1000 + value.tv_usec / 1000), error};
 }
 #endif
 

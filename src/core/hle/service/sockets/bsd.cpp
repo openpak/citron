@@ -6,8 +6,10 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <deque>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -20,22 +22,17 @@
 
 #include "common/fs/file.h"
 #include "common/hex_util.h"
-#include "common/legacy_nat.h"
 #include "common/settings.h"
 #include "common/socket_types.h"
-#include "core/arm/debug.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_process_page_table.h"
 #include "core/hle/kernel/k_thread.h"
-#include "core/hle/kernel/svc/legacy_deadline_watch.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/sockets/bsd.h"
 #include "core/hle/service/sockets/interface_list.h"
-#include "core/hle/service/sockets/sfdnsres.h"
 #include "core/hle/service/sockets/sockets_translate.h"
-#include "core/hle/service/ssl/ssl_pending_registry.h"
 #include "core/internal_network/network.h"
 #include "core/internal_network/network_interface.h"
 #include "core/internal_network/socket_proxy.h"
@@ -48,170 +45,6 @@ using Common::Unexpected;
 namespace Service::Sockets {
 
 namespace {
-
-// A parked socket's peer can keep sending real P2P data (island/session traffic, not just NAT
-// probes) while nothing is reading it. The original parking scheme only survived being
-// reclaimed once: a second close-without-rebind left the socket parked forever with no thread
-// ever calling RecvFrom on it again, so the guest simply stopped seeing data that was arriving
-// fine at the OS level (confirmed via a live ACNH repro: real data flowed for ~1.5s, the game
-// closed the socket a second time, and every packet afterward vanished into the void). This
-// drain thread keeps consuming datagrams the whole time a socket is parked, so a second close
-// degrades to "temporarily buffered" instead of "silently dropped forever".
-struct ParkedUdpDrain {
-    std::mutex mutex;
-    std::deque<std::pair<std::vector<u8>, Network::SockAddrIn>> queued;
-    std::atomic<bool> stop{false};
-    std::thread thread;
-};
-
-constexpr std::size_t MAX_PARKED_UDP_QUEUE = 256;
-// SO_RCVTIMEO takes milliseconds (Socket::SetRcvTimeo forwards this value straight into
-// setsockopt), NOT microseconds — 200 here, not 200'000, or StopDrain()'s join() can block
-// the caller (a guest service-thread Bind()/Close() call) for the better part of 200 SECONDS
-// waiting on a blocking RecvFrom that has nothing to receive.
-constexpr u32 PARKED_DRAIN_POLL_TIMEOUT_MS = 200;
-
-static void StopDrain(ParkedUdpDrain& drain) {
-    drain.stop.store(true, std::memory_order_relaxed);
-    if (drain.thread.joinable()) {
-        drain.thread.join();
-    }
-}
-
-static void StartDrain(ParkedUdpDrain& drain, std::shared_ptr<Network::SocketBase> socket) {
-    socket->SetRcvTimeo(PARKED_DRAIN_POLL_TIMEOUT_MS);
-    drain.thread = std::thread([&drain, socket = std::move(socket)] {
-        while (!drain.stop.load(std::memory_order_relaxed)) {
-            std::vector<u8> buffer(2048);
-            Network::SockAddrIn addr{};
-            const auto [ret, err] = socket->RecvFrom(0, buffer, &addr);
-            if (ret <= 0) {
-                // Timeout (nothing arrived this poll) or the socket genuinely died — either
-                // way, loop back and check `stop` again rather than spinning on an error.
-                continue;
-            }
-            buffer.resize(static_cast<size_t>(ret));
-
-            std::lock_guard lock(drain.mutex);
-            if (drain.queued.size() >= MAX_PARKED_UDP_QUEUE) {
-                drain.queued.pop_front();
-            }
-            drain.queued.emplace_back(std::move(buffer), addr);
-        }
-    });
-}
-
-struct ParkedUdpSocket {
-    std::shared_ptr<Network::SocketBase> socket;
-    u16 port;
-    std::chrono::steady_clock::time_point park_time;
-    std::unique_ptr<ParkedUdpDrain> drain;
-};
-
-static std::mutex g_parked_udp_mutex;
-static std::vector<ParkedUdpSocket> g_parked_udp_sockets;
-
-constexpr std::size_t MAX_PARKED_UDP_SOCKETS = 16;
-constexpr auto PARK_DURATION = std::chrono::seconds{60};
-
-// Caller holds g_parked_udp_mutex.
-static void DropExpiredParkedUdpSockets(std::chrono::steady_clock::time_point now) {
-    std::erase_if(g_parked_udp_sockets, [now](ParkedUdpSocket& p) {
-        if (now - p.park_time <= PARK_DURATION) {
-            return false;
-        }
-        StopDrain(*p.drain);
-        p.socket->Close();
-        return true;
-    });
-}
-
-static bool ParkUdpSocket(std::shared_ptr<Network::SocketBase> socket, u16 port) {
-    if (!socket || port == 0) {
-        return false;
-    }
-
-    std::lock_guard lock(g_parked_udp_mutex);
-    const auto now = std::chrono::steady_clock::now();
-    DropExpiredParkedUdpSockets(now);
-
-    // Keep the newer socket: it carries the mapping the guest was last using.
-    const auto existing = std::ranges::find_if(
-        g_parked_udp_sockets, [port](const ParkedUdpSocket& p) { return p.port == port; });
-    if (existing != g_parked_udp_sockets.end()) {
-        StopDrain(*existing->drain);
-        existing->socket->Close();
-        g_parked_udp_sockets.erase(existing);
-    } else if (g_parked_udp_sockets.size() >= MAX_PARKED_UDP_SOCKETS) {
-        return false;
-    }
-
-    auto drain = std::make_unique<ParkedUdpDrain>();
-    StartDrain(*drain, socket);
-    g_parked_udp_sockets.push_back({std::move(socket), port, now, std::move(drain)});
-    return true;
-}
-
-// Returns the reclaimed socket plus whatever datagrams its drain thread buffered while parked,
-// oldest first, so the caller can replay them ahead of any new live read.
-static std::pair<std::shared_ptr<Network::SocketBase>,
-                  std::deque<std::pair<std::vector<u8>, Network::SockAddrIn>>>
-TakeParkedUdpSocket(u16 port) {
-    if (port == 0) {
-        return {};
-    }
-
-    std::lock_guard lock(g_parked_udp_mutex);
-    const auto now = std::chrono::steady_clock::now();
-    DropExpiredParkedUdpSockets(now);
-
-    const auto it = std::ranges::find_if(
-        g_parked_udp_sockets, [port](const ParkedUdpSocket& p) { return p.port == port; });
-    if (it == g_parked_udp_sockets.end()) {
-        return {};
-    }
-
-    StopDrain(*it->drain);
-    auto socket = it->socket;
-    auto queued = std::move(it->drain->queued);
-    g_parked_udp_sockets.erase(it);
-    return {std::move(socket), std::move(queued)};
-}
-
-void ClearParkedUdpSockets() {
-    std::lock_guard lock(g_parked_udp_mutex);
-    for (auto& parked : g_parked_udp_sockets) {
-        StopDrain(*parked.drain);
-        parked.socket->Close();
-    }
-    g_parked_udp_sockets.clear();
-}
-
-// [OpenPak] A connected TCP socket's peer can still have a legitimate, already-in-flight
-// reply on the wire at the exact moment the guest calls Close() -- confirmed live via packet
-// capture on Splatoon 3's NPLN/gRPC traffic: the guest sends its request, immediately calls
-// shutdown(SD_BOTH) then Close() (a few ms apart), and ~90-100ms later the real server's
-// response finally arrives... to a connection the OS no longer has any record of, because
-// closesocket() had already run. Per RFC 793, any segment for a connection missing from the
-// OS's table gets an unconditional RST back -- confirmed in the capture (client sends [RST]
-// the instant the late FIN+data arrives). The guest already told the OS it's done with both
-// directions (shutdown(SD_BOTH)), so it will never read this reply either way -- SO_LINGER
-// doesn't help here (it only governs flushing the LOCAL machine's own outgoing bytes, and
-// those had already been fully handed to the OS before Close() was even called; it has
-// nothing to do with waiting for a peer's incoming reply). The actual fix is simpler: don't
-// let the real closesocket() run the instant the guest asks -- keep the OS-level socket
-// resource alive a short grace period first, so the kernel can still gracefully ACK a
-// last-second reply (and any FIN that comes with it) instead of RSTing it. The guest-visible
-// fd is already freed synchronously in CloseImpl before this runs, so this changes nothing
-// the guest can observe -- it only delays when the real host resource is released.
-constexpr auto TCP_CLOSE_GRACE = std::chrono::milliseconds{500};
-
-void DeferredCloseTcpSocket(std::shared_ptr<Network::SocketBase> socket) {
-    std::thread([socket = std::move(socket)]() mutable {
-        std::this_thread::sleep_for(TCP_CLOSE_GRACE);
-        socket->Close();
-    }).detach();
-}
 
 // Best-effort PRUDP-Lite header decode for P2P match traffic (SYN/CONNECT/DATA/DISCONNECT/PING +
 // flags). Only the header is plaintext; the RMC payload inside stays opaque. Returns empty for
@@ -236,260 +69,6 @@ std::string DescribePrudpLite(std::span<const u8> data) {
     if (flags & 0x200) out += "|MultiACK";
     out += fmt::format(" id={}", static_cast<u16>(data[10] | (data[11] << 8)));
     return out;
-}
-
-// Photon Realtime uses these UDP ports for its Name, Master and Game servers. Keep this
-// diagnostic deliberately narrow and metadata-only: authentication packets may contain a
-// platform ticket, so never write their payload to disk. The short prefix covers the Photon
-// transport header; the FNV fingerprint lets two retries be compared without retaining the
-// credential-bearing body.
-bool IsPhotonPort(u16 port) {
-    return port == 5055 || port == 5056 || port == 5058 ||
-           (port >= 27000 && port <= 27003);
-}
-
-std::string DescribePhotonPacket(std::span<const u8> data) {
-    constexpr u64 fnv_offset = 14695981039346656037ULL;
-    constexpr u64 fnv_prime = 1099511628211ULL;
-    u64 fingerprint = fnv_offset;
-    for (const u8 byte : data) {
-        fingerprint ^= byte;
-        fingerprint *= fnv_prime;
-    }
-    if (data.size() < 12) {
-        return fmt::format("short-frame fingerprint={:016x}", fingerprint);
-    }
-
-    const auto read_be16 = [](const u8* value) {
-        return static_cast<u16>((static_cast<u16>(value[0]) << 8) | value[1]);
-    };
-    const auto read_be32 = [](const u8* value) {
-        return (static_cast<u32>(value[0]) << 24) | (static_cast<u32>(value[1]) << 16) |
-               (static_cast<u32>(value[2]) << 8) | static_cast<u32>(value[3]);
-    };
-
-    const u8 command_count = data[3];
-    std::string commands;
-    size_t offset = 12;
-    for (u8 index = 0; index < command_count && index < 16; ++index) {
-        if (data.size() - offset < 12) {
-            commands += fmt::format(" c{}=truncated", index);
-            break;
-        }
-        const u8 type = data[offset];
-        const u8 channel = data[offset + 1];
-        const u32 command_len = read_be32(data.data() + offset + 4);
-        if (command_len < 12 || command_len > data.size() - offset) {
-            commands += fmt::format(" c{}=badlen:{}", index, command_len);
-            break;
-        }
-
-        commands += fmt::format(" c{}=type:{}:ch{}:len{}", index, type, channel, command_len);
-        size_t payload_offset = offset + 12;
-        if (type == 7 && command_len >= 16) { // SendUnreliable: four-byte sequence follows.
-            payload_offset += 4;
-        } else if ((type == 8 || type == 12) && command_len >= 32) {
-            // Fragment metadata is safe and is enough to correlate the split BAAS auth request.
-            const u32 fragment_count = read_be32(data.data() + offset + 16);
-            const u32 fragment_number = read_be32(data.data() + offset + 20);
-            const u32 total_length = read_be32(data.data() + offset + 24);
-            const u32 fragment_offset = read_be32(data.data() + offset + 28);
-            commands += fmt::format(":frag{}/{}:total{}:off{}", fragment_number + 1,
-                                    fragment_count, total_length, fragment_offset);
-            payload_offset = offset + 32;
-        }
-
-        if ((type == 6 || type == 7) && payload_offset + 2 <= offset + command_len &&
-            (data[payload_offset] == 0xf3 || data[payload_offset] == 0xfd)) {
-            const u8 wire_type = data[payload_offset + 1];
-            const bool encrypted = (wire_type & 0x80) != 0;
-            const u8 message_type = wire_type & 0x7f;
-            commands += fmt::format(":msg{}:{}", message_type,
-                                    encrypted ? "encrypted" : "plain");
-            if (!encrypted && message_type == 0) {
-                // Init chooses the virtual Photon application. App IDs are public client
-                // identifiers (not credentials) and appear as 32 ASCII hex digits. Extract
-                // only that exact shape; do not print arbitrary init bytes or custom data.
-                const size_t message_end = offset + command_len;
-                bool found_app_id = false;
-                for (size_t candidate = payload_offset + 2;
-                     candidate + 32 <= message_end; ++candidate) {
-                    bool is_app_id = true;
-                    for (size_t byte = 0; byte < 32; ++byte) {
-                        const u8 value = data[candidate + byte];
-                        if (!((value >= '0' && value <= '9') ||
-                              (value >= 'a' && value <= 'f') ||
-                              (value >= 'A' && value <= 'F'))) {
-                            is_app_id = false;
-                            break;
-                        }
-                    }
-                    if (is_app_id) {
-                        commands += fmt::format(
-                            ":app_id={}",
-                            std::string{reinterpret_cast<const char*>(data.data() + candidate),
-                                        32});
-                        found_app_id = true;
-                        break;
-                    }
-                }
-                if (!found_app_id) {
-                    // ponytail: temporary structural dump. The ASCII-hex scan above found
-                    // nothing, so the App ID (still public, non-secret) is encoded some other
-                    // way -- e.g. a raw 16-byte GUID or a dashed/length-prefixed string. Dump
-                    // this small Init body (App ID + SDK/app version only, no auth material) so
-                    // the real layout can be read back. Remove once the layout is confirmed.
-                    const auto body = data.subspan(payload_offset + 2, message_end - payload_offset - 2);
-                    commands += fmt::format(":init_body[{}]={}", body.size(),
-                                            Common::HexToString(body, false));
-                }
-            }
-            // OperationResponse/InternalOpResponse: code + return code are the first three
-            // body bytes in GpBinaryV16.
-            if (!encrypted && (message_type == 3 || message_type == 7) &&
-                payload_offset + 5 <= offset + command_len) {
-                const u8 operation_code = data[payload_offset + 2];
-                const s16 return_code_be = static_cast<s16>(
-                    read_be16(data.data() + payload_offset + 3));
-                const u16 return_code_le = static_cast<u16>(
-                    data[payload_offset + 3] |
-                    (static_cast<u16>(data[payload_offset + 4]) << 8));
-                commands += fmt::format(":op{}:rc_be{}:rc_le{}", operation_code,
-                                        return_code_be, return_code_le);
-                if (operation_code == 230) {
-                    // ponytail: temporary dump of the rest of the Authenticate
-                    // OperationResponse body -- Photon's own non-secret rejection
-                    // reason (a DebugMessage parameter), not auth/token material.
-                    // Remove once the reason is confirmed.
-                    const size_t message_end = offset + command_len;
-                    const size_t rest_offset = payload_offset + 5;
-                    if (rest_offset < message_end) {
-                        const auto rest = data.subspan(rest_offset, message_end - rest_offset);
-                        commands += fmt::format(":op230_rest[{}]={}", rest.size(),
-                                                Common::HexToString(rest, false));
-                    }
-                }
-            }
-        }
-        offset += command_len;
-    }
-
-    return fmt::format("peer={} frame_flags=0x{:02x} commands={}{} fingerprint={:016x}",
-                       read_be16(data.data()), data[2], command_count, commands, fingerprint);
-}
-
-void LogPhotonPacket(const char* direction, s32 fd, const Network::SockAddrIn& peer,
-                     std::span<const u8> data) {
-    if (!IsPhotonPort(peer.portno)) {
-        return;
-    }
-    const std::string ip = Network::IPv4AddressToString(peer.ip);
-    const std::string host = Service::Sockets::GetLastHostForIp(ip);
-    LOG_INFO(Service, "[OpenPak][PHOTON] {} fd={} host={} peer={}:{} len={} {}", direction,
-             fd, host.empty() ? "<server-hop>" : host,
-             Network::IPv4AddressToRedactedString(peer.ip), peer.portno, data.size(),
-             DescribePhotonPacket(data));
-}
-
-static bool TryInjectTlsSni(std::span<const u8> input, const std::string& host_name, std::vector<u8>& output) {
-    if (input.size() < 43 || input[0] != 0x16) return false;
-    size_t recordLen = (static_cast<size_t>(input[3]) << 8) | input[4];
-    if (5 + recordLen > input.size()) return false;
-    if (input[5] != 0x01) return false; // ClientHello
-
-    size_t p = 5 + 4 + 2 + 32; // record header (5) + handshake header (4) + version (2) + random (32)
-    if (p >= input.size()) return false;
-    size_t sidLen = input[p]; p += 1 + sidLen;
-    if (p + 2 > input.size()) return false;
-    size_t csLen = (static_cast<size_t>(input[p]) << 8) | input[p + 1]; p += 2 + csLen;
-    if (p + 1 > input.size()) return false;
-    size_t cmLen = input[p]; p += 1 + cmLen;
-    if (p + 2 > input.size()) return false;
-
-    size_t extTotalLen = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
-    size_t extLenPos = p;
-    size_t extStart = p + 2;
-    size_t extEnd = extStart + extTotalLen;
-    if (extEnd > input.size()) return false;
-
-    // Check if server_name (0x0000) extension already exists
-    size_t q = extStart;
-    while (q + 4 <= extEnd) {
-        u16 etype = static_cast<u16>((input[q] << 8) | input[q + 1]);
-        u16 elen = static_cast<u16>((input[q + 2] << 8) | input[q + 3]);
-        if (etype == 0x0000) return false; // already has SNI
-        q += 4 + elen;
-    }
-
-    // Build SNI extension bytes
-    const size_t nameLen = host_name.size();
-    const size_t listLen = 1 + 2 + nameLen;
-    const size_t extDataLen = 2 + listLen;
-    const size_t sniExtLen = 4 + extDataLen;
-
-    std::vector<u8> sni(sniExtLen);
-    size_t i = 0;
-    sni[i++] = 0x00; sni[i++] = 0x00;
-    sni[i++] = static_cast<u8>(extDataLen >> 8); sni[i++] = static_cast<u8>(extDataLen);
-    sni[i++] = static_cast<u8>(listLen >> 8); sni[i++] = static_cast<u8>(listLen);
-    sni[i++] = 0x00;
-    sni[i++] = static_cast<u8>(nameLen >> 8); sni[i++] = static_cast<u8>(nameLen);
-    std::memcpy(sni.data() + i, host_name.data(), nameLen);
-
-    output.resize(input.size() + sniExtLen);
-    std::memcpy(output.data(), input.data(), extStart);
-    std::memcpy(output.data() + extStart, sni.data(), sniExtLen);
-    std::memcpy(output.data() + extStart + sniExtLen, input.data() + extStart, input.size() - extStart);
-
-    size_t newExtLen = extTotalLen + sniExtLen;
-    output[extLenPos] = static_cast<u8>(newExtLen >> 8);
-    output[extLenPos + 1] = static_cast<u8>(newExtLen);
-
-    size_t hsLen = ((input[6] << 16) | (input[7] << 8) | input[8]) + sniExtLen;
-    output[6] = static_cast<u8>(hsLen >> 16); output[7] = static_cast<u8>(hsLen >> 8); output[8] = static_cast<u8>(hsLen);
-
-    size_t newRecLen = recordLen + sniExtLen;
-    output[3] = static_cast<u8>(newRecLen >> 8); output[4] = static_cast<u8>(newRecLen);
-
-    return true;
-}
-
-static std::optional<std::string> ExtractTlsSni(std::span<const u8> input) {
-    if (input.size() < 43 || input[0] != 0x16 || input[5] != 0x01) {
-        return std::nullopt;
-    }
-    size_t p = 5 + 4 + 2 + 32;
-    if (p >= input.size()) return std::nullopt;
-    const size_t sid_len = input[p];
-    p += 1 + sid_len;
-    if (p + 2 > input.size()) return std::nullopt;
-    const size_t cipher_len = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
-    p += 2 + cipher_len;
-    if (p + 1 > input.size()) return std::nullopt;
-    const size_t compression_len = input[p];
-    p += 1 + compression_len;
-    if (p + 2 > input.size()) return std::nullopt;
-    const size_t extensions_len = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
-    p += 2;
-    const size_t extensions_end = p + extensions_len;
-    if (extensions_end > input.size()) return std::nullopt;
-
-    while (p + 4 <= extensions_end) {
-        const u16 type = static_cast<u16>((input[p] << 8) | input[p + 1]);
-        const size_t len = (static_cast<size_t>(input[p + 2]) << 8) | input[p + 3];
-        p += 4;
-        if (p + len > extensions_end) return std::nullopt;
-        if (type == 0x0000 && len >= 5) {
-            const size_t list_len = (static_cast<size_t>(input[p]) << 8) | input[p + 1];
-            const size_t name_len = (static_cast<size_t>(input[p + 3]) << 8) | input[p + 4];
-            if (input[p + 2] == 0 && list_len >= 3 + name_len && 5 + name_len <= len) {
-                return std::string(reinterpret_cast<const char*>(input.data() + p + 5), name_len);
-            }
-            return std::nullopt;
-        }
-        p += len;
-    }
-    return std::nullopt;
 }
 
 // Queued from an earlier send's ICMP error, not from this receive.
@@ -530,7 +109,7 @@ void PutValue(std::span<u8> buffer, const T& t) {
 // addr[16], scope_id[4]}, 28 bytes. An NPLN title's gRPC stack dials its dual-mode AF_INET6
 // socket with the v4-mapped form of the resolver's IPv4 answer, so the address is the mapped
 // tail; :: is "any" and ::1 is loopback. A genuine IPv6 address has nowhere to go here and is
-// refused (nullopt -> EAFNOSUPPORT), which is also what any other malformed size gets. Ported
+// refused (nullopt -> EAFNOSUPPORT). Anything else of 16 bytes or more is read as IPv4. Ported
 // from Eden, where refusing the family outright poisoned Stardew's whole gRPC channel.
 std::optional<Network::SockAddrIn> ParseGuestSockAddr(std::span<const u8> addr) {
     constexpr size_t v6_size = 28;
@@ -555,150 +134,11 @@ std::optional<Network::SockAddrIn> ParseGuestSockAddr(std::span<const u8> addr) 
         }
         return result;
     }
-    if (addr.size() == sizeof(SockAddrIn)) {
+    if (addr.size() >= sizeof(SockAddrIn)) {
         return Translate(GetValue<SockAddrIn>(addr));
     }
     return std::nullopt;
 }
-
-class OfflineSocket final : public Network::SocketBase {
-public:
-    Network::Errno Initialize(Network::Domain domain_, Network::Type type_,
-                              Network::Protocol protocol_) override {
-        domain = domain_;
-        type = type_;
-        protocol = protocol_;
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno Close() override {
-        opened = false;
-        return Network::Errno::SUCCESS;
-    }
-
-    std::pair<AcceptResult, Network::Errno> Accept() override {
-        return {AcceptResult{}, Network::Errno::NETDOWN};
-    }
-
-    Network::Errno Connect(Network::SockAddrIn) override {
-        return Network::Errno::NETDOWN;
-    }
-
-    std::pair<Network::SockAddrIn, Network::Errno> GetPeerName() override {
-        return {{}, Network::Errno::NOTCONN};
-    }
-
-    std::pair<Network::SockAddrIn, Network::Errno> GetSockName() override {
-        return {{}, Network::Errno::SUCCESS};
-    }
-
-    Network::Errno Bind(Network::SockAddrIn) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno Listen(s32) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno Shutdown(Network::ShutdownHow) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    std::pair<s32, Network::Errno> Recv(int, std::span<u8>) override {
-        return {-1, Network::Errno::AGAIN};
-    }
-
-    std::pair<s32, Network::Errno> RecvFrom(int, std::span<u8>, Network::SockAddrIn*) override {
-        return {-1, Network::Errno::AGAIN};
-    }
-
-    std::pair<s32, Network::Errno> Send(std::span<const u8> message, int) override {
-        return {static_cast<s32>(message.size()), Network::Errno::SUCCESS};
-    }
-
-    std::pair<s32, Network::Errno> SendTo(u32, std::span<const u8> message,
-                                          const Network::SockAddrIn*) override {
-        return {static_cast<s32>(message.size()), Network::Errno::SUCCESS};
-    }
-
-    Network::Errno SetLinger(bool, u32) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    std::tuple<bool, u32, Network::Errno> GetLinger() override {
-        return {false, 0, Network::Errno::SUCCESS};
-    }
-
-    Network::Errno SetReuseAddr(bool) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno SetKeepAlive(bool) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno SetBroadcast(bool) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    std::pair<bool, Network::Errno> GetReuseAddr() override {
-        return {true, Network::Errno::SUCCESS};
-    }
-
-    std::pair<bool, Network::Errno> GetKeepAlive() override {
-        return {true, Network::Errno::SUCCESS};
-    }
-
-    std::pair<bool, Network::Errno> GetBroadcast() override {
-        return {true, Network::Errno::SUCCESS};
-    }
-
-    Network::Errno SetSndBuf(u32) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno SetRcvBuf(u32) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno SetSndTimeo(u32) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno SetRcvTimeo(u32) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno SetNonBlock(bool) override {
-        return Network::Errno::SUCCESS;
-    }
-
-    Network::Errno SetNoDelay(bool enable) override {
-        no_delay = enable;
-        return Network::Errno::SUCCESS;
-    }
-
-    std::pair<bool, Network::Errno> GetNoDelay() override {
-        return {no_delay, Network::Errno::SUCCESS};
-    }
-
-    std::pair<Network::Errno, Network::Errno> GetPendingError() override {
-        return {Network::Errno::SUCCESS, Network::Errno::SUCCESS};
-    }
-
-    bool IsOpened() const override {
-        return opened;
-    }
-
-    void HandleProxyPacket(const Network::ProxyPacket&) override {}
-
-private:
-    Network::Domain domain = Network::Domain::INET;
-    Network::Type type = Network::Type::DGRAM;
-    Network::Protocol protocol = Network::Protocol::UDP;
-    bool opened = true;
-    bool no_delay = false;
-};
 
 } // Anonymous namespace
 
@@ -1151,20 +591,6 @@ void BSD::Shutdown(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. fd={} how={}", fd, how);
 
-    // [OpenPak][DIAG] Real guest call stack at the exact moment Shutdown() is called, for the
-    // socket that had its first ClientHello sent (sni_injected) -- to see which guest code
-    // actually makes this decision, directly, instead of inferring it from timing/absence of
-    // other activity.
-    if (IsFileDescriptorValid(fd) && file_descriptors[fd]->sni_injected) {
-        const auto backtrace = Core::GetBacktrace(&ctx.GetThread());
-        std::string trace_str;
-        for (const auto& entry : backtrace) {
-            trace_str += fmt::format("\n    {}+0x{:x} ({})", entry.module, entry.offset, entry.name);
-        }
-        LOG_INFO(Service, "[OpenPak][DIAG] Shutdown fd={} how={} guest backtrace:{}", fd, how,
-                 trace_str);
-    }
-
     BuildErrnoResponse(ctx, ShutdownImpl(fd, how));
 }
 
@@ -1258,67 +684,6 @@ void BSD::Read(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. fd={} len={}", fd, ctx.GetWriteBufferSize());
 
-    // [OpenPak] Real eventfd_read() drains one coalesced counter. This backing socket queues
-    // each Write() as its own datagram instead, so a single Read() only pops one of several
-    // pending signals, leaving the fd spuriously still-readable. Drain and sum them all here to
-    // match real eventfd semantics.
-    if (IsFileDescriptorValid(fd) && file_descriptors[fd]->is_eventfd) {
-        u64 total = 0;
-        s32 drained = 0;
-        Errno last_errno = Errno::SUCCESS;
-        for (int i = 0; i < 1024; ++i) {
-            // [OpenPak] Only the FIRST read may legitimately block -- a guest that calls Read()
-            // without polling first is entitled to wait for at least one value, matching real
-            // eventfd_read() semantics. Every read after that is purely this loop's own
-            // speculative "is there already more queued" check: RecvImpl(fd, 0, ...) doesn't
-            // force non-blocking here (no FLAG_MSG_DONTWAIT, and EventFd() never sets the
-            // backing socket non-blocking either), so without this guard a drain attempt past
-            // the last pending datagram calls a genuinely blocking recv() and hangs whichever
-            // BSD worker thread is running it. Confirmed live: this was the last socket-layer
-            // event before an ~19s stall, with Recv/RecvMMsg on Splatoon 3's TLS socket never
-            // running again for the rest of that connection attempt.
-            if (i > 0) {
-                std::vector<Network::PollFD> peek_fds{Network::PollFD{
-                    .socket = file_descriptors[fd]->socket.get(),
-                    .events = Network::PollEvents::In,
-                    .revents = Network::PollEvents{},
-                }};
-                const auto [peek_ret, peek_errno] = Network::Poll(peek_fds, 0);
-                if (peek_ret <= 0 || peek_errno != Network::Errno::SUCCESS ||
-                    False(peek_fds[0].revents & Network::PollEvents::In)) {
-                    break;
-                }
-            }
-            std::vector<u8> chunk(sizeof(u64));
-            const auto [chunk_ret, chunk_errno] = RecvImpl(fd, 0, chunk);
-            if (chunk_ret != sizeof(u64)) {
-                last_errno = chunk_errno;
-                break;
-            }
-            u64 value;
-            std::memcpy(&value, chunk.data(), sizeof(value));
-            total += value;
-            ++drained;
-        }
-
-        IPC::ResponseBuilder rb{ctx, 4};
-        if (drained > 0) {
-            std::vector<u8> message(sizeof(u64));
-            std::memcpy(message.data(), &total, sizeof(total));
-            ctx.WriteBuffer(message);
-            LOG_DEBUG(Service, "[OpenPak] eventfd fd={} Read coalesced {} pending write(s) into {}",
-                     fd, drained, total);
-            rb.Push(ResultSuccess);
-            rb.Push<s32>(sizeof(u64));
-            rb.PushEnum(Errno::SUCCESS);
-        } else {
-            rb.Push(ResultSuccess);
-            rb.Push<s32>(-1);
-            rb.PushEnum(last_errno);
-        }
-        return;
-    }
-
     std::vector<u8> message(ctx.GetWriteBufferSize());
     const auto [ret, bsd_errno] = RecvImpl(fd, 0, message);
     ctx.WriteBuffer(message);
@@ -1354,6 +719,17 @@ void BSD::DuplicateSocket(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     auto input = rp.PopRaw<InputParameters>();
 
+    // [OpenPak] bsd:u may not duplicate a socket (Ryujinx IClient.cs, DuplicateSocket).
+    if (is_user) {
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.PushRaw(OutputParameters{
+            .ret = -1,
+            .bsd_errno = Errno::NOENT,
+        });
+        return;
+    }
+
     Expected<s32, Errno> res = DuplicateSocketImpl(input.fd);
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
@@ -1375,11 +751,9 @@ void BSD::EventFd(HLERequestContext& ctx) {
 
     LOG_DEBUG(Service, "called. initval={} flags={}", initval, flags);
 
-    // Real eventfd semantics, built out of a UDP socket connected to itself over loopback:
-    // Write() adds a datagram (readable/poll-worthy immediately), Read() drains the next one.
-    // Games use this as a self-pipe to wake a blocked Poll/Select from another thread (e.g. to
-    // interrupt a host's listen loop) -- without a real, pollable fd behind it, that signal goes
-    // nowhere and the listener never wakes for anything but its own socket traffic.
+    // [OpenPak] The counter is the event fd, as Eden has it: a write adds to it, a read takes it,
+    // and Poll answers from it. The loopback socket behind it carries nothing; it is there so the
+    // descriptor closes, duplicates and answers fcntl like any other.
     const s32 fd = FindFreeFileDescriptorHandle();
     if (fd < 0) {
         LOG_ERROR(Service, "No more file descriptors available");
@@ -1425,24 +799,16 @@ void BSD::EventFd(HLERequestContext& ctx) {
     descriptor.domain = Network::Domain::INET;
     descriptor.type = Network::Type::DGRAM;
     descriptor.protocol = Network::Protocol::UDP;
-    descriptor.is_connection_based = true; // enables Write()/Send() without an explicit dest
-    descriptor.connected = true;
-    descriptor.is_eventfd = true;
+    descriptor.is_connection_based = false;
+    descriptor.event_value = std::make_shared<std::atomic<u64>>(initval);
 
-    // [OpenPak] nn::socket::EventFdFlags: Semaphore = 1, NonBlocking = 4 (as Ryujinx numbers
-    // them). A non-blocking event fd must answer EAGAIN from a read with nothing pending, not
-    // park a bsdsocket worker thread until someone writes it.
-    constexpr u32 EventFdNonBlocking = 1u << 2;
-    if ((flags & EventFdNonBlocking) != 0) {
-        if (descriptor.socket->SetNonBlock(true) == Network::Errno::SUCCESS) {
-            descriptor.flags |= Network::FLAG_O_NONBLOCK;
-        }
-    }
-
-    if (initval > 0) {
-        const u64 seed = initval;
-        descriptor.socket->Send(
-            std::span<const u8>{reinterpret_cast<const u8*>(&seed), sizeof(seed)}, 0);
+    // [OpenPak] nn::socket::EventFdFlags: Semaphore = 1, NonBlocking = 4. An event fd never
+    // blocks whatever the flags say: a read with nothing pending answers EAGAIN instead of
+    // parking a bsdsocket worker thread (Ryujinx EventFileDescriptor.cs).
+    constexpr u32 EventFdSemaphore = 1u << 0;
+    descriptor.event_semaphore = (flags & EventFdSemaphore) != 0;
+    if (descriptor.socket->SetNonBlock(true) == Network::Errno::SUCCESS) {
+        descriptor.flags |= Network::FLAG_O_NONBLOCK;
     }
 
     LOG_INFO(Service, "[OpenPak] New eventfd fd={} initval={}", fd, initval);
@@ -1468,12 +834,6 @@ void BSD::ExecuteWork(HLERequestContext& ctx, Work work) {
 }
 
 std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protocol) {
-    if (type == Type::SEQPACKET) {
-        UNIMPLEMENTED_MSG("SOCK_SEQPACKET errno management");
-    } else if (type == Type::RAW && (domain != Domain::INET || protocol != Protocol::ICMP)) {
-        UNIMPLEMENTED_MSG("SOCK_RAW errno management");
-    }
-
     // Horizon/libnx defines these as socket-creation flags OR'ed into the base type.
     // Preserve SOCK_NONBLOCK instead of merely stripping it: otherwise a guest polling
     // recvfrom() becomes a literal blocking host call and can stall the title indefinitely.
@@ -1502,6 +862,21 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
         type = Type::DGRAM;
     }
 
+    // [OpenPak] bsd:u may not open SEQPACKET or RAW sockets, the ICMP ping socket excepted
+    // (Ryujinx IClient.cs, SocketInternal).
+    if (is_user && (type == Type::SEQPACKET || type == Type::RAW)) {
+        if (domain != Domain::INET || type != Type::RAW || protocol != Protocol::ICMP) {
+            return {-1, Errno::NOENT};
+        }
+    }
+
+    // [OpenPak] In airplane mode a stream socket is refused before it takes a descriptor, as
+    // Eden has it.
+    if (Settings::values.airplane_mode.GetValue() && IsConnectionBased(type)) {
+        LOG_ERROR(Service, "Airplane mode is enabled, cannot create socket");
+        return {-1, Errno::NOTCONN};
+    }
+
     const s32 fd = FindFreeFileDescriptorHandle();
     if (fd < 0) {
         LOG_ERROR(Service, "No more file descriptors available");
@@ -1524,11 +899,7 @@ std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protoco
     descriptor.protocol = Translate(protocol);
     descriptor.is_connection_based = IsConnectionBased(type);
 
-    if (Settings::values.airplane_mode.GetValue()) {
-        descriptor.socket = std::make_shared<OfflineSocket>();
-        descriptor.socket->Initialize(descriptor.domain, descriptor.type, descriptor.protocol);
-        LOG_INFO(Service, "Airplane mode: created offline socket fd={}", fd);
-    } else if (using_proxy) {
+    if (using_proxy) {
         descriptor.socket = std::make_shared<Network::ProxySocket>(room_network);
         descriptor.socket->Initialize(descriptor.domain, descriptor.type, descriptor.protocol);
         LOG_DEBUG(Service, "Created new ProxySocket for fd={}", fd);
@@ -1580,11 +951,11 @@ bool BSD::PollSetIncludesEventFd(std::span<const u8> read_buffer, s32 nfds) cons
     std::vector<PollFD> fds(nfds);
     std::memcpy(fds.data(), read_buffer.data(), nfds * sizeof(PollFD));
     for (const PollFD& pollfd : fds) {
-        if (pollfd.fd < 0 || pollfd.fd > static_cast<s32>(MAX_FD)) {
+        if (pollfd.fd < 0 || pollfd.fd >= static_cast<s32>(MAX_FD)) {
             continue;
         }
         const auto& descriptor = file_descriptors[pollfd.fd];
-        if (descriptor && descriptor->is_eventfd) {
+        if (descriptor && descriptor->event_value) {
             return true;
         }
     }
@@ -1601,8 +972,9 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
         if (timeout > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
         }
-        // When no entries are provided, -1 is returned with errno zero
-        return {-1, Errno::SUCCESS};
+        // [OpenPak] With no entries the wait ends with nothing ready: 0 and no error (Ryujinx
+        // IClient.cs, Poll).
+        return {0, Errno::SUCCESS};
     }
     if (read_buffer.size() < nfds * sizeof(PollFD)) {
         return {-1, Errno::INVAL};
@@ -1645,7 +1017,7 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
         PollFD& pollfd = fds[i];
         ASSERT(False(pollfd.revents));
 
-        if (pollfd.fd > static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
+        if (pollfd.fd >= static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
             LOG_ERROR(Service, "File descriptor handle={} is invalid", pollfd.fd);
             is_valid[i] = false;
             any_invalid = true;
@@ -1663,62 +1035,62 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
     // Only valid entries get a real host-side poll; invalid ones are reported directly below.
     std::vector<size_t> valid_indices;
     std::vector<Network::PollFD> host_pollfds;
+    bool has_event_fd = false;
+    bool event_ready = false;
     for (size_t i = 0; i < fds.size(); ++i) {
         if (!is_valid[i]) {
             continue;
         }
+        const FileDescriptor& descriptor = *file_descriptors[fds[i].fd];
+        if (descriptor.event_value) {
+            // [OpenPak] An event fd is answered from its counter, never from the host, as Eden
+            // has it. Poll only observes: the read that follows takes the counter.
+            //
+            // [OpenPak] gRPC polls its wakeup eventfd with a zero event mask (valid POSIX:
+            // normally means "only tell me about errors"), but expects readability to be
+            // reported anyway once it writes that eventfd. Matches Ryujinx-Reference's
+            // EventFileDescriptorPollManager fix for the same grpc behavior -- without it this
+            // poll never reports ready and grpc's wakeup loop stalls.
+            has_event_fd = true;
+            const bool wants_in =
+                True(fds[i].events & PollEvents::In) || fds[i].events == PollEvents{};
+            if (wants_in && descriptor.event_value->load() > 0) {
+                fds[i].revents = PollEvents::In;
+                event_ready = true;
+            }
+            continue;
+        }
         valid_indices.push_back(i);
         Network::PollFD entry;
-        entry.socket = file_descriptors[fds[i].fd]->socket.get();
+        entry.socket = descriptor.socket.get();
         entry.events = Translate(fds[i].events);
         entry.revents = Network::PollEvents{};
-        // [OpenPak] gRPC polls its wakeup eventfd with a zero event mask (valid POSIX: normally
-        // means "only tell me about errors"), but expects readability to be reported anyway once
-        // it writes that eventfd. Matches Ryujinx-Reference's EventFileDescriptorPollManager fix
-        // for the same grpc behavior -- without it this poll never reports ready and grpc's
-        // wakeup loop stalls.
-        if (entry.events == Network::PollEvents{} && file_descriptors[fds[i].fd]->is_eventfd) {
-            entry.events |= Network::PollEvents::In;
-        }
         host_pollfds.push_back(entry);
     }
 
-    // host_pollfds.empty() can only happen when every entry was invalid, in which case
-    // any_invalid is already true and the POLLNVAL-implies-immediate-return rule below applies
-    // -- nothing to host-poll for, so there's no separate empty-but-valid case to wait out here.
+    // [OpenPak] The bsdsocket threads are shared with every send and receive of the title, so a
+    // long poll must not hold up a datagram transport: with a DGRAM socket open and no event fd
+    // in the set, the wait is cut to 5 ms and an empty pass answers 0 with no error (Ryujinx
+    // IClient.cs, ConcurrentUdpPollSliceMs). Without one the poll blocks as it was asked to.
+    constexpr s32 ConcurrentUdpPollSliceMs = 5;
+    s32 host_timeout = (any_invalid || event_ready) ? 0 : timeout;
+    if (!has_event_fd && (host_timeout == -1 || host_timeout > ConcurrentUdpPollSliceMs) &&
+        std::ranges::any_of(file_descriptors, [](const std::optional<FileDescriptor>& open) {
+            return open && !open->event_value && open->type == Network::Type::DGRAM;
+        })) {
+        host_timeout = ConcurrentUdpPollSliceMs;
+    }
+
+    // host_pollfds.empty() happens when every entry was invalid or an event fd: nothing to
+    // host-poll for, and nothing to wait out here.
     std::pair<s32, Network::Errno> result{0, Network::Errno::SUCCESS};
     if (!host_pollfds.empty()) {
-        result = Network::Poll(host_pollfds, any_invalid ? 0 : timeout);
+        result = Network::Poll(host_pollfds, host_timeout);
     }
 
     for (size_t j = 0; j < valid_indices.size(); ++j) {
         const size_t i = valid_indices[j];
-        // A TLS backend can decrypt an entire record in one Read(), buffering any plaintext
-        // beyond what the caller asked for internally rather than leaving it on the raw
-        // socket -- the raw poll() above has no way to see that, so it never reports this fd
-        // readable again even though there's already-decrypted data waiting.
-        if (False(host_pollfds[j].revents & Network::PollEvents::In) &&
-            True(Translate(fds[i].events) & Network::PollEvents::In) &&
-            Service::SSL::HasSslPendingData(host_pollfds[j].socket)) {
-            host_pollfds[j].revents |= Network::PollEvents::In;
-            if (result.first <= 0) {
-                result.first = 1;
-            }
-        }
         fds[i].revents = Translate(host_pollfds[j].revents);
-    }
-
-    for (size_t i = 0; i < fds.size(); ++i) {
-        if (fds[i].fd < 0 || fds[i].fd > static_cast<s32>(MAX_FD)) {
-            continue;
-        }
-        const auto& d = file_descriptors[fds[i].fd];
-        if (d && d->sni_injected) {
-            LOG_INFO(Service,
-                     "[OpenPak][DIAG] Poll fd={} requested_events={:#x} revents={:#x} timeout={}",
-                     fds[i].fd, static_cast<u16>(fds[i].events), static_cast<u16>(fds[i].revents),
-                     timeout);
-        }
     }
 
     s32 real_count = 0;
@@ -1732,7 +1104,8 @@ std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<con
     }
     std::memcpy(write_buffer.data(), fds.data(), nfds * sizeof(PollFD));
 
-    if (host_pollfds.empty()) {
+    // An event fd found ready is a success however the host poll of the rest turned out.
+    if (host_pollfds.empty() || event_ready) {
         return {real_count, Errno::SUCCESS};
     }
     if (result.second != Network::Errno::SUCCESS) {
@@ -1807,9 +1180,26 @@ std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8>
     std::vector<Network::PollFD> host_pollfds;
     polled_fds.reserve(entries.size());
     host_pollfds.reserve(entries.size());
+    s32 ready = 0;
     for (const Entry& entry : entries) {
         if (entry.fd < 0 || entry.fd >= static_cast<s32>(MAX_FD) || !file_descriptors[entry.fd] ||
             !file_descriptors[entry.fd]->socket) {
+            continue;
+        }
+        if (const auto& counter = file_descriptors[entry.fd]->event_value) {
+            // [OpenPak] An event fd is answered from its counter, as in PollImpl.
+            const bool readable =
+                True(entry.requested & Network::PollEvents::In) && counter->load() > 0;
+            const bool writable = True(entry.requested & Network::PollEvents::Out);
+            if (readable) {
+                SetFdInMask(read_out, entry.fd);
+            }
+            if (writable) {
+                SetFdInMask(write_out, entry.fd);
+            }
+            if (readable || writable) {
+                ++ready;
+            }
             continue;
         }
         polled_fds.push_back(entry.fd);
@@ -1820,7 +1210,8 @@ std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8>
         });
     }
 
-    const auto [poll_ret, poll_errno] = Translate(Network::Poll(host_pollfds, timeout));
+    const auto [poll_ret, poll_errno] =
+        Translate(Network::Poll(host_pollfds, ready > 0 ? 0 : timeout));
     if (poll_errno != Errno::SUCCESS) {
         return {poll_ret, poll_errno};
     }
@@ -1829,7 +1220,6 @@ std::pair<s32, Errno> BSD::SelectImpl(s32 nfds, s32 timeout, std::span<const u8>
     // socket surfaces through the read or write set it was asked about, same as real select().
     constexpr auto err_like =
         Network::PollEvents::Err | Network::PollEvents::Hup | Network::PollEvents::Nval;
-    s32 ready = 0;
     for (size_t i = 0; i < host_pollfds.size(); ++i) {
         const s32 fd = polled_fds[i];
         const Network::PollEvents revents = host_pollfds[i].revents;
@@ -1877,6 +1267,11 @@ std::pair<s32, Errno> BSD::AcceptImpl(s32 fd, std::vector<u8>& write_buffer) {
     FileDescriptor& new_descriptor = *file_descriptors[new_fd];
     new_descriptor.socket = std::move(result.socket);
     new_descriptor.is_connection_based = descriptor.is_connection_based;
+    // [OpenPak] The accepted socket is of the listening one's kind, so SO_TYPE and the datagram
+    // checks read it right.
+    new_descriptor.domain = descriptor.domain;
+    new_descriptor.type = descriptor.type;
+    new_descriptor.protocol = descriptor.protocol;
 
     const SockAddrIn guest_addr_in = Translate(result.sockaddr_in);
     if (write_buffer.size() > sizeof(guest_addr_in)) {
@@ -1894,6 +1289,11 @@ Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
     }
     if (!file_descriptors[fd]->socket)
         return Errno::BADF;
+    // [OpenPak] Any sockaddr of 16 bytes or more is read; a shorter one is EINVAL (Ryujinx
+    // IClient.cs, Bind).
+    if (addr.size() < sizeof(SockAddrIn)) {
+        return Errno::INVAL;
+    }
 
     // [OpenPak] A 28-byte buffer here is a real sockaddr_in6 (an IPv6 bind) -- Citron doesn't
     // support IPv6 sockets, and misreading its first 16 bytes as a 4-byte IPv4 address plus 8
@@ -1918,34 +1318,79 @@ Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
              Network::IPv4AddressToRedactedString(host_addr.ip), host_addr.portno);
 
     FileDescriptor& descriptor = *file_descriptors[fd];
-    if (descriptor.type == Network::Type::DGRAM && host_addr.portno > 0) {
-        auto [parked, queued] = TakeParkedUdpSocket(host_addr.portno);
-        if (parked) {
-            LOG_INFO(Service,
-                     "[OpenPak] Reusing parked UDP socket for port {} ({} buffered datagram(s))",
-                     host_addr.portno, queued.size());
-            // Close the displaced socket, or every adopt leaks a host descriptor.
-            if (descriptor.socket) {
-                descriptor.socket->Close();
-            }
-            descriptor.socket = std::move(parked);
-            descriptor.bound_port = host_addr.portno;
-            // Datagrams the drain thread caught while this socket sat parked go first, so
-            // RecvFrom serves them before anything read live off the socket from here on.
-            for (auto& datagram : queued) {
-                descriptor.pending_datagrams.push_back(std::move(datagram));
-            }
-            return Errno::SUCCESS;
-        }
-        descriptor.bound_port = host_addr.portno;
+    // [OpenPak] A title rebinds the same fixed port across retries, and without reuse the second
+    // bind fails while the first socket is still being torn down (Ryujinx ManagedSocket.cs,
+    // Bind). Best effort: a refusal is not the guest's to see.
+    if (descriptor.type == Network::Type::DGRAM && host_addr.portno != 0) {
+        (void)descriptor.socket->SetReuseAddr(true);
     }
 
-    const auto result = Translate(file_descriptors[fd]->socket->Bind(host_addr));
+    const auto result = Translate(descriptor.socket->Bind(host_addr));
     if (result != Errno::SUCCESS) {
         LOG_ERROR(Service, "Bind fd={} failed with errno={}", fd, static_cast<int>(result));
     }
     return result;
 }
+
+namespace {
+
+// [OpenPak] Whether this address is the OpenPak server itself: the address every redirected name
+// resolves to. Those are ours, they are TCP, and they are the ones a title's gRPC stack (NPLN
+// above all) dials. Ported from Eden.
+bool OpenPakServerTarget(const Network::SockAddrIn& addr) {
+    if (!Settings::values.enable_openpak.GetValue()) {
+        return false;
+    }
+
+    std::string ip = Settings::values.openpak_server_ip.GetValue();
+    if (ip.empty()) {
+        if (const char* env = std::getenv("OPENPAK_SERVER_IP"); env != nullptr && *env != '\0') {
+            ip = env;
+        }
+    }
+    if (ip.empty()) {
+        return false;
+    }
+
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
+        return false;
+    }
+
+    return addr.ip[0] == (a & 0xff) && addr.ip[1] == (b & 0xff) && addr.ip[2] == (c & 0xff) &&
+           addr.ip[3] == (d & 0xff);
+}
+
+// [OpenPak] A title's gRPC stack creates its first call while the channel is still connecting
+// and then polls the socket with a zero event mask -- which can never report POLLOUT -- so a
+// connect answered EINPROGRESS leaves the completion undeliverable and the title waits forever.
+// A connect aimed at the OpenPak server is waited out instead, for up to 2000 ms, and answers
+// SUCCESS when it completes within that; everything else keeps EINPROGRESS. Ported from Eden.
+Errno CompleteConnectSync(Network::SocketBase& socket, const Network::SockAddrIn& addr,
+                          Errno result) {
+    if (result != Errno::INPROGRESS || !OpenPakServerTarget(addr)) {
+        return result;
+    }
+
+    constexpr s32 connect_wait_ms = 2000;
+    constexpr auto completed =
+        Network::PollEvents::Out | Network::PollEvents::Err | Network::PollEvents::Hup;
+    std::vector<Network::PollFD> wait{
+        Network::PollFD{&socket, Network::PollEvents::Out, Network::PollEvents{}}};
+    if (Network::Poll(wait, connect_wait_ms).first != 1 || False(wait[0].revents & completed)) {
+        return result;
+    }
+
+    const auto [pending_err, getsockopt_err] = socket.GetPendingError();
+    if (getsockopt_err != Network::Errno::SUCCESS || pending_err != Network::Errno::SUCCESS) {
+        return result;
+    }
+
+    LOG_INFO(Service, "[OpenPak] Connect to the OpenPak server completed synchronously");
+    return Errno::SUCCESS;
+}
+
+} // Anonymous namespace
 
 Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
     if (!IsFileDescriptorValid(fd)) {
@@ -1954,8 +1399,10 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
     }
     if (!file_descriptors[fd]->socket)
         return Errno::BADF;
-    if (Settings::values.airplane_mode.GetValue()) {
-        return Errno::CONNREFUSED;
+    // [OpenPak] Any sockaddr of 16 bytes or more is read; a shorter one is EINVAL (Ryujinx
+    // IClient.cs, Connect).
+    if (addr.size() < sizeof(SockAddrIn)) {
+        return Errno::INVAL;
     }
 
     // [OpenPak] See BindImpl: a v4-mapped IPv6 sockaddr is dialled through the dual-mode
@@ -1966,206 +1413,25 @@ Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
                               "EAFNOSUPPORT", fd, addr.size());
         return Errno::AFNOSUPPORT;
     }
-    auto translated_addr = *parsed_addr;
-    const Network::IPv4Address guest_ip = translated_addr.ip;
-
-    // [OpenPak] Splatoon 3's gRPC stack loses the resolved address in its own connection
-    // plumbing and calls connect() with a zeroed IP, keeping only the port it originally
-    // resolved for. Recover it from what GetAddrInfoRequestImpl recorded for that exact
-    // port. Only ever populated for a OpenPak-redirected hostname's own port, so this can't
-    // misfire on a P2P socket targeting another console's port -- that port was never part of
-    // a redirect, so the lookup below returns nothing and the address is left untouched.
-    static constexpr std::array<u8, 4> zero_addr{0, 0, 0, 0};
-    if (guest_ip == zero_addr && translated_addr.portno != 0) {
-        if (const auto recovered = GetLastIpForPort(translated_addr.portno)) {
-            LOG_INFO(Service,
-                     "[OpenPak] Connect fd={} address was lost (zeroed), recovered {} for "
-                     "port {} from an earlier redirected resolution",
-                     fd, Network::IPv4AddressToRedactedString(*recovered),
-                     translated_addr.portno);
-            translated_addr.ip = *recovered;
-        }
-    }
-
-    // [OpenPak] Companion to sfdnsres.cpp's exact-host Fall Guys EOS research redirect.
-    // Port 443 may already belong to a local reverse proxy, so allow an explicit development
-    // port without changing system firewall/NAT state. This can only activate for the hostname
-    // metadata retained by the opt-in DNS redirect and an original HTTPS destination.
-    if (translated_addr.portno == 443) {
-        const std::string resolved_ip = Network::IPv4AddressToString(translated_addr.ip);
-        if (GetLastHostForIp(resolved_ip) == "api.epicgames.dev") {
-            // [OpenPak] api.epicgames.dev serves two family projects: Among Us (EOS
-            // stub, OPENPAK_LEGACY_AMONGUS_EOS_PORT) and Fall Guys (OPENPAK_LEGACY_FALLGUYS_EOS_PORT).
-            // The Among Us env wins when both are set; during any given title's run
-            // only one is normally present.
-            const char* amongus_eos_port = std::getenv("OPENPAK_LEGACY_AMONGUS_EOS_PORT");
-            const char* fallguys_eos_port = std::getenv("OPENPAK_LEGACY_FALLGUYS_EOS_PORT");
-            const char* env = (amongus_eos_port && *amongus_eos_port) ? amongus_eos_port
-                                                                      : fallguys_eos_port;
-            const char* env_name = (amongus_eos_port && *amongus_eos_port)
-                                       ? "OPENPAK_LEGACY_AMONGUS_EOS_PORT"
-                                       : "OPENPAK_LEGACY_FALLGUYS_EOS_PORT";
-            if (env && *env) {
-                try {
-                    const int parsed = std::stoi(env);
-                    if (parsed > 0 && parsed <= 0xFFFF) {
-                        LOG_INFO(Service,
-                                 "[OpenPak] Redirecting EOS destination port 443 -> {} ({})",
-                                 parsed, env_name);
-                        translated_addr.portno = static_cast<u16>(parsed);
-                    }
-                } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid EOS port '{}'; "
-                                         "expected an integer from 1 to 65535",
-                                env);
-                }
-            }
-        } else if (GetLastHostForIp(resolved_ip) == "lavender-switch-auth3.prod.demonware.net" ||
-                   GetLastHostForIp(resolved_ip) == "lavender-switch-lobby.prod.demonware.net") {
-            // [OpenPak] Companion to sfdnsres.cpp's exact-host CTR:NF Demonware redirect --
-            // same reasoning as the Fall Guys EOS port override above (port 443 already
-            // belongs to something else on this host in practice). Covers both the auth3 and
-            // lobby hosts -- see that function's comment for why they share one target.
-            // OPENPAK_LEGACY_CTR_AUTH_PORT=<port> to enable.
-            if (const char* env = std::getenv("OPENPAK_LEGACY_CTR_AUTH_PORT"); env && *env) {
-                try {
-                    const int parsed = std::stoi(env);
-                    if (parsed > 0 && parsed <= 0xFFFF) {
-                        LOG_INFO(Service,
-                                 "[OpenPak] Redirecting CTR:NF Demonware auth destination port "
-                                 "443 -> {}",
-                                 parsed);
-                        translated_addr.portno = static_cast<u16>(parsed);
-                    }
-                } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid CTR:NF auth port '{}'; "
-                                         "expected an integer from 1 to 65535",
-                                env);
-                }
-            }
-        } else if (GetLastHostForIp(resolved_ip) == "matchmaker.among.us" ||
-                   GetLastHostForIp(resolved_ip) == "matchmaker-eu.among.us" ||
-                   GetLastHostForIp(resolved_ip) == "matchmaker-as.among.us") {
-            // [OpenPak] Companion to sfdnsres.cpp's exact-host Among Us matchmaker
-            // redirect (OPENPAK_LEGACY_AMONGUS_IP). The matchmakers are HTTPS on 443; allow
-            // a development port for the local research stub. Unset by default.
-            // OPENPAK_LEGACY_AMONGUS_PORT=<port> to enable.
-            if (const char* env = std::getenv("OPENPAK_LEGACY_AMONGUS_PORT"); env && *env) {
-                try {
-                    const int parsed = std::stoi(env);
-                    if (parsed > 0 && parsed <= 0xFFFF) {
-                        LOG_INFO(Service,
-                                 "[OpenPak] Redirecting Among Us matchmaker destination port "
-                                 "443 -> {}",
-                                 parsed);
-                        translated_addr.portno = static_cast<u16>(parsed);
-                    }
-                } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid Among Us port '{}'; "
-                                         "expected an integer from 1 to 65535",
-                                env);
-                }
-            }
-        } else if (GetLastHostForIp(resolved_ip) == "launchercontent.mojang.com" ||
-                   GetLastHostForIp(resolved_ip) == "vortex.data.microsoft.com" ||
-                   GetLastHostForIp(resolved_ip) == "title.mgt.xboxlive.com" ||
-                   GetLastHostForIp(resolved_ip) == "sisu.xboxlive.com" ||
-                   GetLastHostForIp(resolved_ip) == "login.live.com") {
-            // [OpenPak] Companion to sfdnsres.cpp's exact-host Minecraft Dungeons
-            // redirect (OPENPAK_LEGACY_MC_DUNGEONS_IP). Every confirmed Dungeons host is HTTPS
-            // on 443, which is commonly already taken on the research host; allow a
-            // development port for the local observer/mock. Only meaningful when the IP
-            // redirect is active. Honors the same OPENPAK_LEGACY_MC_DUNGEONS_ALLOW_SIGNIN
-            // exception as the DNS hook, so an allowed sign-in host keeps port 443 and
-            // reaches the real Microsoft/Xbox endpoints.
-            // OPENPAK_LEGACY_MC_DUNGEONS_PORT=<port> to enable.
-            const std::string dungeons_host = GetLastHostForIp(resolved_ip);
-            const bool dungeons_signin_host = dungeons_host == "title.mgt.xboxlive.com" ||
-                                              dungeons_host == "sisu.xboxlive.com" ||
-                                              dungeons_host == "login.live.com";
-            const char* allow = std::getenv("OPENPAK_LEGACY_MC_DUNGEONS_ALLOW_SIGNIN");
-            const bool allow_signin =
-                dungeons_signin_host && allow && *allow && std::string(allow) != "0";
-            if (!allow_signin) {
-                if (const char* env = std::getenv("OPENPAK_LEGACY_MC_DUNGEONS_PORT"); env && *env) {
-                    try {
-                        const int parsed = std::stoi(env);
-                        if (parsed > 0 && parsed <= 0xFFFF) {
-                            LOG_INFO(Service,
-                                     "[OpenPak] Redirecting Minecraft Dungeons host '{}' "
-                                     "destination port 443 -> {}",
-                                     dungeons_host, parsed);
-                            translated_addr.portno = static_cast<u16>(parsed);
-                        }
-                    } catch (const std::exception&) {
-                        LOG_WARNING(Service,
-                                    "[OpenPak] Ignoring invalid Minecraft Dungeons port '{}'; "
-                                    "expected an integer from 1 to 65535",
-                                    env);
-                    }
-                }
-            }
-        } else if (GetLastHostForIp(resolved_ip).find(".baas.nintendo.com") != std::string::npos) {
-            // [OpenPak] Companion to the generic Nintendo host redirect for BAAS jku
-            // fetches: titles that locally verify their BAAS id_token (RS256) fetch the
-            // JWK Set from <hex>.baas.nintendo.com/1.0.0/certificates. With the token
-            // signed by the profile's legacy_baas key, a local baas-jwks instance
-            // (BAAS_SIGNING_KEY = same pem) must serve that URL. Env-gated, unset by
-            // default. OPENPAK_LEGACY_BAAS_JWKS_PORT=<port> to enable (Among Us research,
-            // 2026-09-01: the EOS SDK's external-token acceptance gated on this).
-            if (const char* env = std::getenv("OPENPAK_LEGACY_BAAS_JWKS_PORT"); env && *env) {
-                try {
-                    const int parsed = std::stoi(env);
-                    if (parsed > 0 && parsed <= 0xFFFF) {
-                        LOG_INFO(Service,
-                                 "[OpenPak] Redirecting BAAS JWKS destination port 443 -> {}",
-                                 parsed);
-                        translated_addr.portno = static_cast<u16>(parsed);
-                    }
-                } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid BAAS JWKS port '{}'", env);
-                }
-            }
-        } else if (GetLastHostForIp(resolved_ip).find("npln") != std::string::npos) {
-            // [OpenPak] Companion to sfdnsres.cpp's npln debug-proxy tap
-            // (OPENPAK_LEGACY_S3_DEBUG_PROXY_IP): the local TLS-terminating research
-            // proxy does not own port 443 on this host, so allow an explicit
-            // destination port for any hostname the tap resolved. Same
-            // reasoning as the Fall Guys / CTR:NF overrides above: unset by
-            // default, only ever reaches hosts the opt-in tap redirected.
-            // OPENPAK_LEGACY_S3_DEBUG_PROXY_PORT=<port> to enable.
-            if (const char* env = std::getenv("OPENPAK_LEGACY_S3_DEBUG_PROXY_PORT"); env && *env) {
-                try {
-                    const int parsed = std::stoi(env);
-                    if (parsed > 0 && parsed <= 0xFFFF) {
-                        LOG_INFO(Service,
-                                 "[OpenPak] Redirecting npln debug-proxy destination port 443 -> {}",
-                                 parsed);
-                        translated_addr.portno = static_cast<u16>(parsed);
-                    }
-                } catch (const std::exception&) {
-                    LOG_WARNING(Service, "[OpenPak] Ignoring invalid npln debug-proxy port '{}'; "
-                                         "expected an integer from 1 to 65535",
-                                env);
-                }
-            }
-        }
-    }
+    const Network::SockAddrIn translated_addr = *parsed_addr;
 
     LOG_INFO(Service, "Connect fd={} to {}:{}{}", fd,
-             Network::IPv4AddressToRedactedString(guest_ip), translated_addr.portno,
-             addr.size() > sizeof(SockAddrIn) ? " (v4-mapped IPv6)" : "");
+             Network::IPv4AddressToRedactedString(translated_addr.ip), translated_addr.portno,
+             addr[1] == static_cast<u8>(Domain::INET6) ? " (v4-mapped IPv6)" : "");
 
-    const auto result = Translate(file_descriptors[fd]->socket->Connect(translated_addr));
-    if (result == Errno::SUCCESS || result == Errno::INPROGRESS) {
-        file_descriptors[fd]->connected = true;
+    Network::SocketBase& socket = *file_descriptors[fd]->socket;
+    Errno result = Translate(socket.Connect(translated_addr));
+    result = CompleteConnectSync(socket, translated_addr, result);
+
+    // [OpenPak] A connect on a socket that is already connected is a success, as Eden has it.
+    if (result == Errno::ISCONN) {
+        LOG_DEBUG(Service, "Connect fd={} returned ISCONN - socket already connected", fd);
+        return Errno::SUCCESS;
     }
     if (result != Errno::SUCCESS) {
         LOG_ERROR(Service, "Connect fd={} failed with errno={}", fd, static_cast<int>(result));
     } else {
         LOG_INFO(Service, "Connect fd={} succeeded", fd);
-        // [OpenPak][DIAG] See connect_success_time's declaration comment in bsd.h.
-        file_descriptors[fd]->connect_success_time = std::chrono::steady_clock::now();
     }
     return result;
 }
@@ -2286,11 +1552,11 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
     // whole connection sequence from scratch forever. See SocketBase::GetNoDelay's declaration
     // comment in internal_network/sockets.h.
     if (level == 6 && static_cast<u32>(optname) == 1) {
+        if (optval.size() < sizeof(u32)) {
+            return Errno::INVAL;
+        }
         auto [enabled, getsockopt_err] = file_descriptors[fd]->socket->GetNoDelay();
         if (getsockopt_err == Network::Errno::SUCCESS) {
-            ASSERT_OR_EXECUTE_MSG(
-                optval.size() == sizeof(u32), { return Errno::INVAL; },
-                "Incorrect getsockopt option size");
             optval.resize(sizeof(u32));
             PutValue(optval, static_cast<u32>(enabled ? 1 : 0));
         }
@@ -2316,40 +1582,31 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
     // REUSEADDR/KEEPALIVE/BROADCAST used to have a setter but no matching getter, so a title
     // that verifies one of these right after setting it (Splatoon 3's gRPC/NintendoSDK_NPLN
     // stack does) always got INVAL back and abandoned an otherwise-fine socket.
-    auto write_bool_opt = [&](std::pair<bool, Network::Errno> result) -> Errno {
-        auto [enabled, getsockopt_err] = result;
+    //
+    // [OpenPak] A buffer of four bytes or more takes the value, as Eden has it.
+    auto write_u32_opt = [&](std::pair<u32, Network::Errno> result) -> Errno {
+        if (optval.size() < sizeof(u32)) {
+            return Errno::INVAL;
+        }
+        auto [value, getsockopt_err] = result;
         if (getsockopt_err == Network::Errno::SUCCESS) {
-            ASSERT_OR_EXECUTE_MSG(
-                optval.size() == sizeof(u32), { return Errno::INVAL; },
-                "Incorrect getsockopt option size");
             optval.resize(sizeof(u32));
-            PutValue(optval, static_cast<u32>(enabled ? 1 : 0));
+            PutValue(optval, value);
         }
         return Translate(getsockopt_err);
     };
-
-    // [OpenPak] optname=0x80000001 is never actually applied to the real socket (see
-    // SetSockOptImpl) -- echo back whatever bytes were "set", matching Ryujinx-Reference's
-    // _feignedSockOpts behavior, instead of querying the real (untouched) socket's linger state.
-    if (static_cast<u32>(optname) == 0x80000001) {
-        const auto& descriptor = *file_descriptors[fd];
-        optval.resize(8);
-        if (descriptor.vendor_linger_feigned) {
-            std::memcpy(optval.data(), descriptor.vendor_linger_feigned->data(), 8);
-        } else {
-            std::ranges::fill(optval, 0);
-        }
-        return Errno::SUCCESS;
-    }
+    auto write_bool_opt = [&](std::pair<bool, Network::Errno> result) -> Errno {
+        return write_u32_opt({result.first ? 1u : 0u, result.second});
+    };
 
     // [OpenPak] SO_LINGER. A title that sets this and reads it back to confirm it took
     // previously got INVAL, same failure class as the TCP_NODELAY/REUSEADDR gaps above.
     if (optname == OptName::LINGER) {
+        if (optval.size() < sizeof(Linger)) {
+            return Errno::INVAL;
+        }
         auto [onoff, linger, getsockopt_err] = socket->GetLinger();
         if (getsockopt_err == Network::Errno::SUCCESS) {
-            ASSERT_OR_EXECUTE_MSG(
-                optval.size() == sizeof(Linger), { return Errno::INVAL; },
-                "Incorrect getsockopt option size");
             optval.resize(sizeof(Linger));
             PutValue(optval, Linger{.onoff = onoff ? 1u : 0u, .linger = linger});
         }
@@ -2358,12 +1615,12 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
 
     switch (optname) {
     case OptName::ERROR_: {
+        if (optval.size() < sizeof(Errno)) {
+            return Errno::INVAL;
+        }
         auto [pending_err, getsockopt_err] = socket->GetPendingError();
         if (getsockopt_err == Network::Errno::SUCCESS) {
             Errno translated_pending_err = Translate(pending_err);
-            ASSERT_OR_EXECUTE_MSG(
-                optval.size() == sizeof(Errno), { return Errno::INVAL; },
-                "Incorrect getsockopt option size");
             optval.resize(sizeof(Errno));
             PutValue(optval, translated_pending_err);
         }
@@ -2375,22 +1632,24 @@ Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& o
         return write_bool_opt(socket->GetKeepAlive());
     case OptName::BROADCAST:
         return write_bool_opt(socket->GetBroadcast());
-    case OptName::TYPE: {
-        // [OpenPak] The type the socket was created with, as the guest numbers it.
-        if (optval.size() < sizeof(u32)) {
-            return Errno::INVAL;
-        }
-        optval.resize(sizeof(u32));
-        PutValue(optval, static_cast<u32>(Translate(file_descriptors[fd]->type)));
-        return Errno::SUCCESS;
-    }
+    // [OpenPak] Read from the host, not echoed from what was set, as Eden has it.
+    case OptName::SNDBUF:
+        return write_u32_opt(socket->GetSndBuf());
+    case OptName::RCVBUF:
+        return write_u32_opt(socket->GetRcvBuf());
+    case OptName::SNDTIMEO:
+        return write_u32_opt(socket->GetSndTimeo());
+    case OptName::RCVTIMEO:
+        return write_u32_opt(socket->GetRcvTimeo());
+    case OptName::TYPE:
+        return write_u32_opt(socket->GetSocketType());
     default:
-        // [OpenPak] Everything the set side tolerated or stored without a host getter (SNDBUF,
-        // RCVBUF, the timeouts, NOSIGPIPE and any option this build does not know) is echoed
-        // back as it was set -- zeros if it never was -- with SUCCESS. A title's network stack
-        // (NPLN's gRPC above all) sets an option and reads it straight back before trusting the
-        // socket; a set that answers SUCCESS and a get that answers INVAL reads as a broken
-        // socket and the connection is abandoned. Ported from Eden.
+        // [OpenPak] Everything the set side tolerated without applying (NOSIGPIPE and any option
+        // this build does not know, Nintendo's 0x80000001 among them) is echoed back as it was
+        // set -- zeros if it never was -- with SUCCESS. A title's network stack (NPLN's gRPC
+        // above all) sets an option and reads it straight back before trusting the socket; a
+        // set that answers SUCCESS and a get that answers INVAL reads as a broken socket and
+        // the connection is abandoned. Ported from Eden.
         EchoFeignedSockOpt(*file_descriptors[fd], level, optname, optval);
         return Errno::SUCCESS;
     }
@@ -2402,15 +1661,25 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
     if (!file_descriptors[fd]->socket)
         return Errno::BADF;
 
+    // [OpenPak] The value as Ryujinx reads it (ManagedSocket.cs, SetSocketOption): an int from
+    // four bytes or more, the first byte from fewer, and EINVAL when there is nothing to read.
+    const auto read_value = [&optval]() -> std::optional<u32> {
+        if (optval.empty()) {
+            return std::nullopt;
+        }
+        if (optval.size() >= sizeof(u32)) {
+            return GetValue<u32>(optval);
+        }
+        return u32{optval[0]};
+    };
+
     // [OpenPak] IPPROTO_TCP / TCP_NODELAY -- see the matching comment in GetSockOptImpl.
     if (level == 6 && static_cast<u32>(optname) == 1) {
-        if (optval.size() != sizeof(u32)) {
-            LOG_WARNING(Service, "TCP_NODELAY optval size mismatch: expected {}, got {}",
-                        sizeof(u32), optval.size());
+        const auto value = read_value();
+        if (!value) {
             return Errno::INVAL;
         }
-        const auto value = GetValue<u32>(optval);
-        return Translate(file_descriptors[fd]->socket->SetNoDelay(value != 0));
+        return Translate(file_descriptors[fd]->socket->SetNoDelay(*value != 0));
     }
 
     if (level != static_cast<u32>(SocketLevel::SOCKET)) {
@@ -2425,51 +1694,13 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
     FileDescriptor& descriptor = *file_descriptors[fd];
     Network::SocketBase* const socket = descriptor.socket.get();
 
-    // [OpenPak] optname=0x80000001 (undocumented in public libnx headers) is Splatoon 3's
-    // NPLN/gRPC stack's own vendor-private setsockopt, called once right after every connect
-    // with an 8-byte payload. A prior guess treated this as Nintendo's proprietary spelling of
-    // SO_LINGER and applied it for real (onoff=1, 2s timeout) -- but Ryujinx-Reference's own
-    // working reference implementation (ManagedSocket.SetSocketOption) does the opposite: an
-    // option that doesn't validate against its known BsdSocketOption table is fed straight to
-    // its generic tolerant fallback, which remembers the bytes for getsockopt to echo back but
-    // never calls the real socket's SetSocketOption at all. Match that here: stash the bytes so
-    // GetSockOptImpl can echo them back, but never touch the real socket's linger state.
-    if (static_cast<u32>(optname) == 0x80000001) {
-        std::array<u8, 8> stored{};
-        std::memcpy(stored.data(), optval.data(), std::min(optval.size(), stored.size()));
-        descriptor.vendor_linger_feigned = stored;
-        return Errno::SUCCESS;
-    }
-
-    if (optname == OptName::LINGER) {
-        if (optval.size() != sizeof(Linger)) {
-            LOG_WARNING(Service, "LINGER optval size mismatch: expected {}, got {}", sizeof(Linger),
-                        optval.size());
-            return Errno::INVAL;
-        }
-        auto linger = GetValue<Linger>(optval);
-        if (linger.onoff != 0 && linger.onoff != 1) {
-            LOG_WARNING(Service, "Invalid LINGER onoff value: {}", linger.onoff);
-            return Errno::INVAL;
-        }
-        return Translate(socket->SetLinger(linger.onoff != 0, linger.linger));
-    }
-
-    // [OpenPak] The old code gated ALL of setsockopt on "optval is exactly 4 bytes",
-    // unconditionally returning EINVAL for any option shaped differently -- BEFORE ever checking
-    // whether the option is even one Citron recognizes. Every other unimplemented optname in this
-    // function is a soft "(STUBBED) ... returning SUCCESS" no-op; an option Citron simply hasn't
-    // implemented shouldn't fail any harder just because its payload also happens not to be 4
-    // bytes. Observed live: Splatoon 3's gRPC stack calls setsockopt with optname=0x80000001
-    // optval.size()=8 on every single connection (both the abandoned IPv6 dual-stack attempt and
-    // the real IPv4 socket) -- not a value in Citron's or libnx's known SO_* numbering, so its
-    // exact meaning is unclear, but failing it outright when an unrecognized 4-byte option next
-    // to it would have been silently accepted is an inconsistency with no justification. Route
-    // unrecognized optnames to the same graceful stub regardless of size; only the options this
-    // function actually implements still require their expected 4-byte u32 payload.
+    // [OpenPak] Anything this build does not know is remembered for the matching get and never
+    // applied, whatever its size: Nintendo's linger-shaped 0x80000001 carries eight bytes.
     switch (optname) {
     case OptName::REUSEADDR:
     case OptName::KEEPALIVE:
+    case OptName::BROADCAST:
+    case OptName::LINGER:
     case OptName::SNDBUF:
     case OptName::RCVBUF:
     case OptName::SNDTIMEO:
@@ -2477,69 +1708,49 @@ Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8
     case OptName::NOSIGPIPE:
         break;
     default:
-        if (static_cast<u32>(optname) != 0x200 && optname != OptName::BROADCAST) {
-            LOG_WARNING(Service,
-                        "(STUBBED) Unimplemented optname={} (0x{:x}) optlen={}, remembered "
-                        "and returning SUCCESS for compatibility",
-                        static_cast<u32>(optname), static_cast<u32>(optname), optval.size());
-            RememberFeignedSockOpt(descriptor, level, optname, optval);
-            return Errno::SUCCESS;
-        }
-        break;
-    }
-
-    if (optval.size() != sizeof(u32)) {
-        LOG_WARNING(Service, "optval size mismatch: expected {}, got {} for optname={}", sizeof(u32),
-                    optval.size(), static_cast<u32>(optname));
-        return Errno::INVAL;
-    }
-    auto value = GetValue<u32>(optval);
-
-    if (static_cast<u32>(optname) == 0x200 || optname == OptName::BROADCAST) {
-        socket->SetBroadcast(value != 0);
+        LOG_WARNING(Service,
+                    "(STUBBED) Unimplemented optname={} (0x{:x}) optlen={}, remembered "
+                    "and returning SUCCESS for compatibility",
+                    static_cast<u32>(optname), static_cast<u32>(optname), optval.size());
+        RememberFeignedSockOpt(descriptor, level, optname, optval);
         return Errno::SUCCESS;
     }
 
+    const auto value = read_value();
+    if (!value) {
+        return Errno::INVAL;
+    }
+
     switch (optname) {
+    case OptName::LINGER: {
+        // The seconds are the second int, when there is one (Ryujinx ManagedSocket.cs).
+        const u32 seconds = optval.size() >= sizeof(Linger) ? GetValue<Linger>(optval).linger : 0;
+        return Translate(socket->SetLinger(*value != 0, seconds));
+    }
     case OptName::REUSEADDR:
-        if (value != 0 && value != 1) {
-            LOG_WARNING(Service, "Invalid REUSEADDR value: {}", value);
-            return Errno::INVAL;
-        }
-        return Translate(socket->SetReuseAddr(value != 0));
+        return Translate(socket->SetReuseAddr(*value != 0));
     case OptName::KEEPALIVE:
-        if (value != 0 && value != 1) {
-            LOG_WARNING(Service, "Invalid KEEPALIVE value: {}", value);
-            return Errno::INVAL;
-        }
-        return Translate(socket->SetKeepAlive(value != 0));
+        return Translate(socket->SetKeepAlive(*value != 0));
+    case OptName::BROADCAST:
+        return Translate(socket->SetBroadcast(*value != 0));
     case OptName::SNDBUF:
+        return Translate(socket->SetSndBuf(*value));
     case OptName::RCVBUF:
+        return Translate(socket->SetRcvBuf(*value));
     case OptName::SNDTIMEO:
-    case OptName::RCVTIMEO:
-    case OptName::NOSIGPIPE: {
-        // These have no host getter here, so what was set is what a later get reads back.
-        Errno result = Errno::SUCCESS;
-        if (optname == OptName::SNDBUF) {
-            result = Translate(socket->SetSndBuf(value));
-        } else if (optname == OptName::RCVBUF) {
-            result = Translate(socket->SetRcvBuf(value));
-        } else if (optname == OptName::SNDTIMEO) {
-            result = Translate(socket->SetSndTimeo(value));
-        } else if (optname == OptName::RCVTIMEO) {
-            result = Translate(socket->SetRcvTimeo(value));
-            descriptor.has_receive_timeout = result == Errno::SUCCESS && value != 0;
-        } else {
-            LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
-        }
-        if (result == Errno::SUCCESS) {
-            RememberFeignedSockOpt(descriptor, level, optname, optval);
-        }
+        return Translate(socket->SetSndTimeo(*value));
+    case OptName::RCVTIMEO: {
+        const Errno result = Translate(socket->SetRcvTimeo(*value));
+        descriptor.has_receive_timeout = result == Errno::SUCCESS && *value != 0;
         return result;
     }
+    case OptName::NOSIGPIPE:
+        // No host getter here, so what was set is what a later get reads back.
+        LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", *value);
+        RememberFeignedSockOpt(descriptor, level, optname, optval);
+        return Errno::SUCCESS;
     default:
-        // Unreachable: non-4-byte-payload unknown optnames already returned above, and every
-        // recognized case is handled explicitly.
+        // Unreachable: every other optname already returned above.
         return Errno::SUCCESS;
     }
 }
@@ -2551,20 +1762,6 @@ Errno BSD::ShutdownImpl(s32 fd, s32 how) {
     if (!file_descriptors[fd]->socket)
         return Errno::BADF;
 
-    // [OpenPak][DIAG] How long did this connection actually live before the guest gave up on
-    // it? Logged unconditionally (not gated on sni_injected/deadline-watch) so it's visible on
-    // whichever fd actually calls Shutdown, checking for a correlation with a round-number
-    // wall-clock deadline (grpc-core's deadline_filter is wall-clock-based).
-    if (const auto& t0 = file_descriptors[fd]->connect_success_time) {
-        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::steady_clock::now() - *t0)
-                                     .count();
-        LOG_INFO(Service,
-                 "[OpenPak][DIAG] Shutdown fd={} how={} -- {}ms since Connect() succeeded on "
-                 "this fd",
-                 fd, how, elapsed_ms);
-    }
-
     const Network::ShutdownHow host_how = Translate(static_cast<ShutdownHow>(how));
     return Translate(file_descriptors[fd]->socket->Shutdown(host_how));
 }
@@ -2575,13 +1772,25 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
     }
 
     FileDescriptor& descriptor = *file_descriptors[fd];
-    if (Settings::values.airplane_mode.GetValue()) {
-        return {-1, Errno::AGAIN};
-    }
-    // A connect()ed UDP socket (e.g. a P2P client dialing a single host station) supports
-    // plain recv() same as TCP; only an unconnected DGRAM socket needs an explicit peer.
-    if (!descriptor.is_connection_based && !descriptor.connected) {
-        return {-1, Errno::AGAIN};
+
+    // [OpenPak] An event fd answers from its counter and never blocks: the whole count, which
+    // the read clears, or 1 off a semaphore (Ryujinx EventFileDescriptor.cs, Read).
+    if (descriptor.event_value) {
+        if (message.size() < sizeof(u64)) {
+            return {-1, Errno::INVAL};
+        }
+
+        u64 value = descriptor.event_value->load();
+        do {
+            if (value == 0) {
+                return {-1, Errno::AGAIN};
+            }
+        } while (!descriptor.event_value->compare_exchange_weak(
+            value, descriptor.event_semaphore ? value - 1 : 0));
+
+        const u64 count = descriptor.event_semaphore ? 1 : value;
+        std::memcpy(message.data(), &count, sizeof(count));
+        return {static_cast<s32>(sizeof(u64)), Errno::SUCCESS};
     }
 
     // Apply flags
@@ -2594,87 +1803,7 @@ std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message)
         }
     }
 
-    auto [ret, bsd_errno] = Translate(descriptor.socket->Recv(flags, message));
-
-    if (ret > 5 && descriptor.tls_sni ==
-                       "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net" &&
-        message[0] == 0x16 && message[5] == 0x02) {
-        descriptor.tls_server_flight_received = true;
-    }
-
-    if (ret > 0 && !descriptor.is_connection_based) {
-        const auto [peer, peer_err] = descriptor.socket->GetPeerName();
-        if (peer_err == Network::Errno::SUCCESS) {
-            LogPhotonPacket("RX", fd, peer,
-                            std::span<const u8>{message.data(), static_cast<size_t>(ret)});
-        }
-    }
-
-    if (descriptor.sni_injected) {
-        LOG_INFO(Service, "[OpenPak][DIAG] Recv fd={} requested={} ret={} errno={}", fd,
-                 message.size(), ret, static_cast<int>(bsd_errno));
-    }
-
-    // [OpenPak] awaiting_reply is meant as a one-shot grace period for the *next* would-block
-    // recv() right after a send -- but it was only ever consumed in the AGAIN branch below. If
-    // that next recv() instead succeeds immediately (the common case: a whole TLS flight already
-    // sitting in the kernel buffer, e.g. ServerHello+Certificate+ServerKeyExchange+ServerHelloDone
-    // arriving as one read), the flag survived untouched and stayed armed for whatever recv() came
-    // *after* that -- a routine "anything else?" follow-up call with genuinely nothing pending --
-    // forcing an unrelated, fully wasted 250ms block on a thread the guest's own gRPC deadline is
-    // timing against. Measured directly: this exact leak burned 250ms of a 731ms connect-to-
-    // shutdown budget on one connection, right where a working capture (Ryujinx-Reference, same
-    // server, same handshake) completes the whole sequence in ~350ms. A successful recv already
-    // means the wait condition this flag exists for has been satisfied -- clear it here so it
-    // can't leak into an unrelated later call.
-    if (ret > 0) {
-        descriptor.awaiting_reply = false;
-    }
-
-    // [OpenPak] Splatoon 3's gRPC stack sends its TLS ClientKeyExchange/ChangeCipherSpec/
-    // Finished flight, does exactly ONE opportunistic non-blocking recv() a fraction of a
-    // millisecond later, and -- finding nothing, since no real network reply can possibly
-    // exist yet -- immediately abandons the connection and restarts the whole handshake from
-    // scratch. Confirmed against the real OpenPak server directly (a plain TLS client gets a
-    // full handshake, ChangeCipherSpec+Finished included, in ~200ms round trip): the server is
-    // never given a chance to answer before the game gives up. Ryujinx-Reference hit the same
-    // shape of bug for this exact gRPC connection at the poll layer (IClient.cs's eventfd/socket
-    // accumulation and drain fixes) and resolved it by making the host side deterministic
-    // instead of racing the guest's own overly-eager give-up logic -- same principle as this
-    // socket's Connect() fix. Mirror that here: only for a socket that had its SNI substituted
-    // (i.e. only ever an actual OpenPak redirect, never an unrelated title's own socket), give
-    // a would-block recv() one bounded blocking wait for real data before honoring it, so the
-    // server's already-in-flight reply has an actual chance to arrive first.
-    //
-    if (bsd_errno == Errno::AGAIN && descriptor.sni_injected && descriptor.awaiting_reply) {
-        descriptor.awaiting_reply = false;
-        std::vector<Network::PollFD> wait_fds{Network::PollFD{
-            .socket = descriptor.socket.get(),
-            .events = Network::PollEvents::In,
-            .revents = Network::PollEvents{},
-        }};
-        // [OpenPak] Was 800ms; a real reply here measures ~200ms round trip (see this block's
-        // opening comment), and a working Ryujinx-Reference capture completes its entire
-        // handshake-to-first-real-request sequence in well under 350ms total. Splatoon 3's gRPC
-        // call carries its own deadline (embedded grpc-core deadline_filter.cc) computed from
-        // wall-clock time since the call started -- every millisecond this wait burns without a
-        // real reply pending eats directly into that budget before the guest can even send its
-        // first real request. 250ms still comfortably covers the measured real round trip with
-        // margin, without spending 4x that on a wait that's usually going to time out anyway.
-        constexpr s32 handshake_reply_wait_ms = 250;
-        const auto wait_start = std::chrono::steady_clock::now();
-        const auto [poll_ret, poll_errno] = Network::Poll(wait_fds, handshake_reply_wait_ms);
-        const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 std::chrono::steady_clock::now() - wait_start)
-                                 .count();
-        if (poll_ret > 0 && poll_errno == Network::Errno::SUCCESS &&
-            True(wait_fds[0].revents & Network::PollEvents::In)) {
-            std::tie(ret, bsd_errno) = Translate(descriptor.socket->Recv(flags, message));
-        }
-        LOG_INFO(Service,
-                 "[OpenPak][DIAG] Recv fd={} grace-wait took {}ms poll_ret={} -> ret={} errno={}",
-                 fd, wait_ms, poll_ret, ret, static_cast<int>(bsd_errno));
-    }
+    const auto [ret, bsd_errno] = Translate(descriptor.socket->Recv(flags, message));
 
     // Restore original state
     if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
@@ -2691,10 +1820,6 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
     }
 
     FileDescriptor& descriptor = *file_descriptors[fd];
-    if (Settings::values.airplane_mode.GetValue()) {
-        addr.clear();
-        return {-1, Errno::AGAIN};
-    }
 
     Network::SockAddrIn addr_in{};
     Network::SockAddrIn* p_addr_in = nullptr;
@@ -2705,31 +1830,6 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
         // Datagram (UDP): receive the sender's address. (Previously this path returned
         // AGAIN unconditionally, which silently broke all UDP recvfrom/MSG_PEEK.)
         p_addr_in = &addr_in;
-    }
-
-    // Serve anything a parked socket's drain thread buffered for this fd before touching the
-    // live socket, oldest first — otherwise a reused parked socket would silently skip straight
-    // past data that arrived during the close/park/rebind gap.
-    if (!descriptor.pending_datagrams.empty()) {
-        auto [buffered_data, buffered_addr] = std::move(descriptor.pending_datagrams.front());
-        descriptor.pending_datagrams.pop_front();
-
-        const s32 ret = static_cast<s32>(std::min(message.size(), buffered_data.size()));
-        std::copy_n(buffered_data.begin(), ret, message.begin());
-
-        if (p_addr_in) {
-            // A dual-mode v6 socket offers room for a sockaddr_in6; the peer is answered in the
-            // IPv4 shape this layer speaks, with its own length.
-            ASSERT(addr.size() >= sizeof(SockAddrIn));
-            addr.resize(sizeof(SockAddrIn));
-            PutValue(addr, Translate(buffered_addr));
-            LOG_DEBUG(Service, "RecvFrom fd={} <- {}:{} len={} (buffered) {}", fd,
-                      Network::IPv4AddressToRedactedString(buffered_addr.ip),
-                      buffered_addr.portno, ret,
-                      DescribePrudpLite(
-                          std::span<const u8>{message.data(), static_cast<size_t>(ret)}));
-        }
-        return {ret, Errno::SUCCESS};
     }
 
     // Apply flags
@@ -2777,16 +1877,14 @@ std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& mess
                       Network::IPv4AddressToRedactedString(addr_in.ip), addr_in.portno, ret,
                       DescribePrudpLite(std::span<const u8>{message.data(),
                                                             static_cast<size_t>(std::max(ret, 0))}));
-            if (ret > 0) {
-                LogPhotonPacket("RX", fd, addr_in,
-                                std::span<const u8>{message.data(), static_cast<size_t>(ret)});
-            }
 
-            // nncs reply is 4x u32 BE: [type][ext port][ext ip][server ip]. Remember the ext
-            // ip so legacy_nat_rewrite.cpp can fix up ReplaceURL's stale station address.
+            // [OpenPak] The NAT check's answer is 16 bytes: [type][external port][external ip]
+            // [server ip]. It is the only place this console is told how the outside world sees
+            // it, so it is worth a line (as Eden has it).
             if (ret == 16 && (addr_in.portno == 10025 || addr_in.portno == 10125)) {
-                Common::OpenPakNat::SetObservedExternalIp(
-                    {message[8], message[9], message[10], message[11]});
+                LOG_INFO(Service, "[OpenPak] NAT check: external address {}.{}.{}.{} (from {}:{})",
+                         message[8], message[9], message[10], message[11],
+                         Network::IPv4AddressToRedactedString(addr_in.ip), addr_in.portno);
             }
         }
     }
@@ -2800,91 +1898,30 @@ std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> messa
     }
     if (!file_descriptors[fd]->socket)
         return {-1, Errno::BADF};
-    if (Settings::values.airplane_mode.GetValue()) {
-        return {static_cast<s32>(message.size()), Errno::SUCCESS};
-    }
     FileDescriptor& descriptor = *file_descriptors[fd];
-    // Same as RecvImpl: a connect()ed UDP socket needs plain send() to actually reach the
-    // peer, not a silently-dropped no-op -- that starved P2P clients dialing a host station.
-    if (!descriptor.is_connection_based && !descriptor.connected) {
-        LOG_DEBUG(Service, "Dropping datagram send without destination fd={}", fd);
-        return {static_cast<s32>(message.size()), Errno::SUCCESS};
-    }
 
-    std::span<const u8> send_buf = message;
-    std::vector<u8> injected_buf;
-    // First ClientHello only; a later handshake record must not be rewritten mid-stream.
-    if (!descriptor.sni_injected && message.size() > 5 && message[0] == 0x16 &&
-        message[5] == 0x01) {
-        descriptor.sni_injected = true;
-        auto [peer_addr, err] = descriptor.socket->GetPeerName();
-        if (err == Network::Errno::SUCCESS) {
-            std::string ip_str = Network::IPv4AddressToString(peer_addr.ip);
-            std::string host = Service::Sockets::GetLastHostForIp(ip_str);
-            if (!host.empty() && TryInjectTlsSni(message, host, injected_buf)) {
-                LOG_INFO(Service, "[OpenPak] Injected SNI extension '{}' into TLS ClientHello for BSD socket fd={}", host, fd);
-                send_buf = injected_buf;
-            } else {
-                // Stardew/NPLN clean-room diagnostic: record only the public hostname candidate,
-                // never ClientHello bytes. A false injection result means the hello was malformed
-                // for this parser or already carried SNI; the server certificate identifies which
-                // virtual host was ultimately selected.
-                const auto client_sni = ExtractTlsSni(message);
-                descriptor.tls_sni = client_sni.value_or("");
-                LOG_INFO(
-                    Service,
-                    "[OpenPak][DIAG] ClientHello fd={} SNI injection not applied; "
-                    "client-sni='{}' last-host candidate='{}'",
-                    fd, client_sni.value_or("<absent-or-unparsed>"),
-                    host.empty() ? "<none>" : host);
-            }
+    // [OpenPak] Writing an event fd adds to its count and wakes whoever is polling it (Ryujinx
+    // EventFileDescriptor.cs, Write).
+    if (descriptor.event_value) {
+        u64 value{};
+        if (message.size() >= sizeof(u64)) {
+            std::memcpy(&value, message.data(), sizeof(value));
         }
-    }
+        if (message.size() < sizeof(u64) || value == std::numeric_limits<u64>::max()) {
+            return {-1, Errno::INVAL};
+        }
 
-    // [OpenPak][DIAG] Certificate-validation control experiment. The DNS side of this opt-in
-    // probe resolves only Stardew's exact tenant via normal DNS. If the guest accepts that
-    // endpoint's server flight, suppress its very next TLS record so no Finished, HTTP/2 data,
-    // token, or authenticated request can leave the emulator. Returning success keeps the
-    // observation isolated from guest retry behavior. Unset by default.
-    if (descriptor.tls_server_flight_received &&
-        descriptor.tls_sni == "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net") {
-        const char* probe = std::getenv("OPENPAK_LEGACY_STARDEW_TLS_PROBE");
-        if (probe != nullptr && *probe != '\0' && std::string_view(probe) != "0") {
-            LOG_INFO(Service,
-                     "[OpenPak][DIAG] Stardew production TLS probe observed and suppressed "
-                     "post-server-flight record type=0x{:02x} len={}",
-                     message.empty() ? 0 : message[0], message.size());
-            descriptor.tls_server_flight_received = false;
-            return {static_cast<s32>(message.size()), Errno::SUCCESS};
-        }
-    }
+        descriptor.event_value->fetch_add(value);
 
-    auto [sent_bytes, err] = descriptor.socket->Send(send_buf, flags);
-    if (err == Network::Errno::SUCCESS && !descriptor.is_connection_based) {
-        const auto [peer, peer_err] = descriptor.socket->GetPeerName();
-        if (peer_err == Network::Errno::SUCCESS) {
-            LogPhotonPacket("TX", fd, peer, send_buf);
-        }
-    }
-    if (err == Network::Errno::SUCCESS && !injected_buf.empty()) {
-        sent_bytes = static_cast<s32>(message.size());
-    }
-    if (err == Network::Errno::SUCCESS && descriptor.sni_injected) {
-        descriptor.awaiting_reply = true;
-    }
-    if (descriptor.sni_injected) {
-        LOG_INFO(Service, "[OpenPak][DIAG] Send fd={} len={} sent={} errno={} first_byte=0x{:02x}",
-                 fd, send_buf.size(), sent_bytes, static_cast<int>(Translate(err)),
-                 send_buf.empty() ? 0 : send_buf[0]);
-    }
-    if (err == Network::Errno::SUCCESS && descriptor.is_eventfd) {
         // [OpenPak] Wake any Poll() this game deferred waiting on this eventfd. See
         // sockets.h's SetBsdDeferralEvent declaration comment.
         if (Kernel::KEvent* deferral_event = GetBsdDeferralEvent()) {
             deferral_event->Signal();
         }
+        return {static_cast<s32>(sizeof(u64)), Errno::SUCCESS};
     }
-    return Translate(std::make_pair(sent_bytes, err));
+
+    return Translate(descriptor.socket->Send(message, flags));
 }
 
 std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
@@ -2894,18 +1931,10 @@ std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> mes
     }
     if (!file_descriptors[fd]->socket)
         return {-1, Errno::BADF};
-    if (Settings::values.airplane_mode.GetValue()) {
-        return {static_cast<s32>(message.size()), Errno::SUCCESS};
-    }
 
     FileDescriptor& descriptor = *file_descriptors[fd];
 
-    // For datagram sockets (UDP), a destination address is required
-    if (!descriptor.is_connection_based && addr.empty()) {
-        LOG_DEBUG(Service, "Dropping datagram sendto without destination fd={}", fd);
-        return {static_cast<s32>(message.size()), Errno::SUCCESS};
-    }
-
+    // With no address the datagram goes out with the host's send, to the connected peer.
     Network::SockAddrIn addr_in;
     Network::SockAddrIn* p_addr_in = nullptr;
     if (!addr.empty()) {
@@ -2923,10 +1952,9 @@ std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> mes
         LOG_DEBUG(Service, "SendTo fd={} -> {}:{} len={} {}", fd,
                   Network::IPv4AddressToRedactedString(p_addr_in->ip), p_addr_in->portno,
                   message.size(), DescribePrudpLite(message));
-        LogPhotonPacket("TX", fd, *p_addr_in, message);
     }
 
-    return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
+    return Translate(descriptor.socket->SendTo(flags, message, p_addr_in));
 }
 
 Errno BSD::CloseImpl(s32 fd) {
@@ -2935,38 +1963,22 @@ Errno BSD::CloseImpl(s32 fd) {
     }
 
     std::shared_ptr<Network::SocketBase> socket_to_close;
-    u16 bound_port = 0;
-    bool is_udp = false;
-    bool was_connected = false;
-
     {
         std::lock_guard lock(fd_table_mutex);
         if (!file_descriptors[fd]->socket)
             return Errno::BADF;
         socket_to_close = file_descriptors[fd]->socket;
-        bound_port = file_descriptors[fd]->bound_port;
-        is_udp = (file_descriptors[fd]->type == Network::Type::DGRAM);
-        was_connected = file_descriptors[fd]->connected;
         file_descriptors[fd].reset();
-    }
 
-    // Connected means one peer, so closing it is a real teardown, not the probe/play port swap.
-    if (is_udp && bound_port > 0 && !was_connected) {
-        if (ParkUdpSocket(socket_to_close, bound_port)) {
-            LOG_INFO(Service, "[OpenPak] Parking UDP socket fd={} bound to port {}", fd,
-                     bound_port);
-            return Errno::SUCCESS;
+        // [OpenPak] A duplicate shares its host socket with the descriptor it was made from (ssl
+        // duplicates the one a connection is given), so the host socket goes only with the last
+        // of them, as Ryujinx counts references (BsdContext.cs). Closed with the first, a TLS
+        // connection going away took the title's own socket with it.
+        for (const auto& other : file_descriptors) {
+            if (other && other->socket == socket_to_close) {
+                return Errno::SUCCESS;
+            }
         }
-    }
-
-    // [OpenPak] See DeferredCloseTcpSocket's declaration comment. Only for TCP sockets that
-    // were actually connected to a peer -- an unconnected/never-dialed socket has no peer that
-    // could still have a reply in flight, so there's nothing to protect by delaying its close.
-    if (!is_udp && was_connected) {
-        LOG_DEBUG(Service, "[OpenPak] Deferring real close of TCP socket fd={} by {}ms", fd,
-                  TCP_CLOSE_GRACE.count());
-        DeferredCloseTcpSocket(std::move(socket_to_close));
-        return Errno::SUCCESS;
     }
 
     const Errno bsd_errno = Translate(socket_to_close->Close());
@@ -3022,8 +2034,8 @@ bool BSD::DeferBlockingReceive(HLERequestContext& ctx, s32 fd, u32 flags) {
         return false;
     }
     FileDescriptor& descriptor = *file_descriptors[fd];
-    if (!descriptor.socket || descriptor.is_connection_based || descriptor.is_eventfd ||
-        descriptor.has_receive_timeout || !descriptor.pending_datagrams.empty() ||
+    if (!descriptor.socket || descriptor.is_connection_based || descriptor.event_value ||
+        descriptor.has_receive_timeout ||
         (descriptor.flags & Network::FLAG_O_NONBLOCK) != 0 ||
         (flags & Network::FLAG_MSG_DONTWAIT) != 0) {
         return false;
@@ -3045,7 +2057,7 @@ bool BSD::DeferBlockingReceive(HLERequestContext& ctx, s32 fd, u32 flags) {
 }
 
 bool BSD::IsFileDescriptorValid(s32 fd) const noexcept {
-    if (fd > static_cast<s32>(MAX_FD) || fd < 0) {
+    if (fd >= static_cast<s32>(MAX_FD) || fd < 0) {
         LOG_ERROR(Service, "Invalid file descriptor handle={}", fd);
         return false;
     }
@@ -3084,8 +2096,8 @@ void BSD::OnProxyPacketReceived(const Network::ProxyPacket& packet) {
     }
 }
 
-BSD::BSD(Core::System& system_, const char* name)
-    : ServiceFramework{system_, name}, room_network{system_.GetRoomNetwork()} {
+BSD::BSD(Core::System& system_, const char* name, bool is_user_)
+    : ServiceFramework{system_, name}, room_network{system_.GetRoomNetwork()}, is_user{is_user_} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, &BSD::RegisterClient, "RegisterClient"},
@@ -3136,6 +2148,17 @@ BSD::BSD(Core::System& system_, const char* name)
 
     RegisterHandlers(functions);
 
+    {
+        std::lock_guard lock(fd_table_mutex);
+        ++instance_count;
+    }
+
+    // [OpenPak] The descriptor table is shared by bsd:u, bsd:s and bsd:a, so one of them
+    // listening is enough: every instance listening would hand each packet to each socket once
+    // per instance.
+    if (!is_user) {
+        return;
+    }
     if (auto room_member = room_network.GetRoomMember().lock()) {
         proxy_packet_received = room_member->BindOnProxyPacketReceived(
             [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
@@ -3145,11 +2168,20 @@ BSD::BSD(Core::System& system_, const char* name)
 }
 
 BSD::~BSD() {
-    if (auto room_member = room_network.GetRoomMember().lock()) {
-        room_member->Unbind(proxy_packet_received);
+    if (is_user) {
+        if (auto room_member = room_network.GetRoomMember().lock()) {
+            room_member->Unbind(proxy_packet_received);
+        }
     }
 
-    ClearParkedUdpSockets();
+    // [OpenPak] The shared table outlives any one service: it is emptied when the last of them
+    // goes, so a service closing does not take the others' sockets with it.
+    std::lock_guard lock(fd_table_mutex);
+    if (--instance_count == 0) {
+        for (auto& descriptor : file_descriptors) {
+            descriptor.reset();
+        }
+    }
 }
 
 std::unique_lock<std::mutex> BSD::LockService() {
@@ -3157,7 +2189,7 @@ std::unique_lock<std::mutex> BSD::LockService() {
     return {};
 }
 
-BSDCFG::BSDCFG(Core::System& system_) : ServiceFramework{system_, "bsdcfg"} {
+BSDCFG::BSDCFG(Core::System& system_, const char* name) : ServiceFramework{system_, name} {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, &BSDCFG::SetIfUp, "SetIfUp"},
@@ -3190,7 +2222,7 @@ void BSDCFG::SetIfUp(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::SetIfUpWithEvent(HLERequestContext& ctx) {
@@ -3198,7 +2230,7 @@ void BSDCFG::SetIfUpWithEvent(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::CancelIf(HLERequestContext& ctx) {
@@ -3206,7 +2238,7 @@ void BSDCFG::CancelIf(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::SetIfDown(HLERequestContext& ctx) {
@@ -3214,7 +2246,7 @@ void BSDCFG::SetIfDown(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::GetIfState(HLERequestContext& ctx) {
@@ -3222,7 +2254,7 @@ void BSDCFG::GetIfState(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::DhcpRenew(HLERequestContext& ctx) {
@@ -3230,7 +2262,7 @@ void BSDCFG::DhcpRenew(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::AddStaticArpEntry(HLERequestContext& ctx) {
@@ -3238,7 +2270,7 @@ void BSDCFG::AddStaticArpEntry(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::RemoveArpEntry(HLERequestContext& ctx) {
@@ -3246,7 +2278,7 @@ void BSDCFG::RemoveArpEntry(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::LookupArpEntry(HLERequestContext& ctx) {
@@ -3254,7 +2286,7 @@ void BSDCFG::LookupArpEntry(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::LookupArpEntry2(HLERequestContext& ctx) {
@@ -3262,7 +2294,7 @@ void BSDCFG::LookupArpEntry2(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::ClearArpEntries(HLERequestContext& ctx) {
@@ -3270,7 +2302,7 @@ void BSDCFG::ClearArpEntries(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::ClearArpEntries2(HLERequestContext& ctx) {
@@ -3278,7 +2310,7 @@ void BSDCFG::ClearArpEntries2(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::PrintArpEntries(HLERequestContext& ctx) {
@@ -3286,7 +2318,7 @@ void BSDCFG::PrintArpEntries(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::Unknown13(HLERequestContext& ctx) {
@@ -3294,7 +2326,7 @@ void BSDCFG::Unknown13(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::Unknown14(HLERequestContext& ctx) {
@@ -3302,7 +2334,7 @@ void BSDCFG::Unknown14(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSDCFG::Unknown15(HLERequestContext& ctx) {
@@ -3310,7 +2342,7 @@ void BSDCFG::Unknown15(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::GetResourceStatistics(HLERequestContext& ctx) {
@@ -3318,7 +2350,7 @@ void BSD::GetResourceStatistics(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::GetSocketStatistics(HLERequestContext& ctx) {
@@ -3326,7 +2358,7 @@ void BSD::GetSocketStatistics(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::GetThreadCoreMask(HLERequestContext& ctx) {
@@ -3335,7 +2367,7 @@ void BSD::GetThreadCoreMask(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
     rb.Push<u64>(0);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::Ioctl(HLERequestContext& ctx) {
@@ -3343,7 +2375,7 @@ void BSD::Ioctl(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(ENOTTY));
+    rb.PushEnum(Errno::NOTTY);
 }
 
 void BSD::NifIoctl(HLERequestContext& ctx) {
@@ -3351,7 +2383,7 @@ void BSD::NifIoctl(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(ENOTTY));
+    rb.PushEnum(Errno::NOTTY);
 }
 
 void BSD::Open(HLERequestContext& ctx) {
@@ -3359,7 +2391,7 @@ void BSD::Open(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EACCES));
+    rb.PushEnum(Errno::ACCES);
 }
 
 // [OpenPak] BSD::RecvMMsg's real implementation is defined below SendMMsg, alongside the
@@ -3370,7 +2402,7 @@ void BSD::RegisterResourceStatisticsName(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 namespace {
@@ -3498,8 +2530,7 @@ bool MMsgDeserialize(std::span<const u8> data, s32 vlen, std::vector<MMsgEntry>&
         if (!MMsgReadU32(data, msg.flags)) {
             return false;
         }
-        u32 unused_input_length;
-        if (!MMsgReadU32(data, unused_input_length)) {
+        if (!MMsgReadU32(data, msg.length)) {
             return false;
         }
     }
@@ -3536,6 +2567,48 @@ void MMsgSerialize(std::vector<u8>& out, const std::vector<MMsgEntry>& messages)
         append_u32(msg.length);
     }
 }
+
+// [OpenPak] A named or control-carrying message is a datagram shape that cannot go out as one
+// stream send; titles only use the plain form. Ported from Eden.
+bool MMsgIsPlain(const std::vector<MMsgEntry>& messages) {
+    return std::ranges::all_of(messages, [](const MMsgEntry& msg) {
+        return msg.name.empty() && msg.control.empty();
+    });
+}
+
+// [OpenPak] Spreads the byte count one send or recv moved back over the messages it covered,
+// and answers with how many messages it reached. A message only partly filled still counts: a
+// stream read almost never fills the room offered. Nothing moved is 0, the end of the stream.
+// Ported from Eden.
+s32 MMsgSpreadTransferred(std::vector<MMsgEntry>& messages, size_t transferred) {
+    if (transferred == 0) {
+        return 0;
+    }
+
+    size_t index = 0;
+    size_t left = transferred;
+    while (left > 0 && index < messages.size()) {
+        MMsgEntry& msg = messages[index];
+
+        size_t capacity = 0;
+        for (const auto& segment : msg.iov) {
+            capacity += segment.size();
+        }
+
+        size_t stored;
+        if (left > capacity) {
+            stored = capacity;
+            ++index;
+        } else {
+            stored = left;
+        }
+
+        msg.length = static_cast<u32>(stored);
+        left -= stored;
+    }
+
+    return static_cast<s32>(std::min(index + 1, messages.size()));
+}
 } // Anonymous namespace
 
 void BSD::SendMMsg(HLERequestContext& ctx) {
@@ -3551,11 +2624,6 @@ void BSD::SendMMsg(HLERequestContext& ctx) {
     // NintendoSDK_gRPC_For_NPLN stack does) had that data silently dropped: the underlying
     // TCP connection could complete perfectly (confirmed: SO_ERROR came back 0) and the game
     // would still sit forever waiting for a response to a handshake it never actually sent.
-    // Sends each message individually via the same SendImpl every other BSD send call uses
-    // (including its TLS SNI injection for a ClientHello) rather than Ryujinx-Reference's
-    // single batched scatter-gather send -- functionally equivalent for both a stream socket
-    // (message boundaries don't matter) and a datagram one (each message is its own
-    // datagram), just simpler and lower-risk to get right.
     if (!IsFileDescriptorValid(fd)) {
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
@@ -3590,42 +2658,40 @@ void BSD::SendMMsg(HLERequestContext& ctx) {
         return;
     }
 
-    s32 processed = 0;
-    Errno last_errno = Errno::SUCCESS;
-    for (auto& msg : messages) {
-        std::vector<u8> concatenated;
-        for (const auto& segment : msg.iov) {
-            concatenated.insert(concatenated.end(), segment.begin(), segment.end());
-        }
-
-        LogTlsRecordDiag("SendMMsg", concatenated);
-        if (Kernel::Svc::IsOpenPakDeadlineWatchActive()) {
-            const auto* cur = Kernel::GetCurrentThreadPointer(system.Kernel());
-            LOG_INFO(Service, "[OpenPak][SCHED-WATCH] SendMMsg on thread id={} prio={}",
-                     cur ? cur->GetThreadId() : 0, cur ? cur->GetPriority() : -1);
-        }
-        auto [sent, send_errno] = SendImpl(fd, flags | msg.flags, concatenated);
-        if (send_errno != Errno::SUCCESS) {
-            last_errno = send_errno;
-            // A message already sent stays sent -- only stop processing further ones, same
-            // as the real syscall returning a short count on a mid-batch failure.
-            break;
-        }
-        msg.length = sent < 0 ? 0 : static_cast<u32>(sent);
-        ++processed;
+    if (!MMsgIsPlain(messages)) {
+        LOG_WARNING(Service, "SendMMsg fd={} vlen={}: named or control message", fd, vlen);
+        BuildErrnoResponse(ctx, Errno::OPNOTSUPP);
+        return;
     }
 
-    std::vector<u8> write_buffer;
-    MMsgSerialize(write_buffer, messages);
-    ctx.WriteBuffer(write_buffer);
+    // [OpenPak] The messages go out as one send, their buffers end to end, as Eden has it.
+    std::vector<u8> payload;
+    for (const auto& msg : messages) {
+        for (const auto& segment : msg.iov) {
+            payload.insert(payload.end(), segment.begin(), segment.end());
+        }
+    }
 
-    // [OpenPak] sendmmsg(2): a failure before any message went is -1 with the error; after at
-    // least one, the count and no error. Answering 0 with an errno is "nothing sent, nothing
-    // wrong" to the caller. As Eden answers.
+    LogTlsRecordDiag("SendMMsg", payload);
+
+    s32 sent = 0;
+    Errno bsd_errno = Errno::SUCCESS;
+    if (!payload.empty()) {
+        std::tie(sent, bsd_errno) = SendImpl(fd, flags, payload);
+    }
+
+    s32 ret = -1;
+    if (bsd_errno == Errno::SUCCESS) {
+        ret = MMsgSpreadTransferred(messages, static_cast<size_t>(std::max(sent, 0)));
+        std::vector<u8> write_buffer;
+        MMsgSerialize(write_buffer, messages);
+        ctx.WriteBuffer(write_buffer);
+    }
+
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
-    rb.Push<s32>(processed > 0 || last_errno == Errno::SUCCESS ? processed : -1);
-    rb.PushEnum(processed > 0 ? Errno::SUCCESS : last_errno);
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
 }
 
 void BSD::RecvMMsg(HLERequestContext& ctx) {
@@ -3678,66 +2744,57 @@ void BSD::RecvMMsg(HLERequestContext& ctx) {
         return;
     }
 
-    s32 processed = 0;
-    Errno last_errno = Errno::SUCCESS;
-    for (auto& msg : messages) {
-        size_t capacity = 0;
+    if (!MMsgIsPlain(messages)) {
+        LOG_WARNING(Service, "RecvMMsg fd={} vlen={}: named or control message", fd, vlen);
+        BuildErrnoResponse(ctx, Errno::OPNOTSUPP);
+        return;
+    }
+
+    // [OpenPak] One recv into the room all the messages offer, end to end, as Eden has it.
+    size_t capacity = 0;
+    for (const auto& msg : messages) {
         for (const auto& segment : msg.iov) {
             capacity += segment.size();
         }
-
-        std::vector<u8> received(capacity);
-        if (Kernel::Svc::IsOpenPakDeadlineWatchActive()) {
-            const auto* cur = Kernel::GetCurrentThreadPointer(system.Kernel());
-            LOG_INFO(Service, "[OpenPak][SCHED-WATCH] RecvMMsg (pre-recv) on thread id={} prio={}",
-                     cur ? cur->GetThreadId() : 0, cur ? cur->GetPriority() : -1);
-        }
-        // [OpenPak] Only the first message may wait. The ones after it take what is already
-        // there, the way MSG_WAITFORONE reads: a stream reply that fits in the first message
-        // must not park the call (and a bsdsocket thread) waiting for bytes nobody is sending.
-        const u32 recv_flags =
-            flags | msg.flags | (processed > 0 ? Network::FLAG_MSG_DONTWAIT : 0u);
-        auto [ret, recv_errno] = RecvImpl(fd, recv_flags, received);
-        if (recv_errno != Errno::SUCCESS) {
-            LOG_INFO(Service, "RecvMMsg fd={} capacity={}: recv_errno={}", fd, capacity,
-                     static_cast<int>(recv_errno));
-            last_errno = recv_errno;
-            break;
-        }
-
-        const size_t actual = ret < 0 ? 0 : static_cast<size_t>(ret);
-        LogTlsRecordDiag("RecvMMsg", std::span<const u8>(received).first(actual));
-        // Distribute the received bytes back across this message's iovs in the same order
-        // they were laid out on the way in.
-        size_t offset = 0;
-        for (auto& segment : msg.iov) {
-            if (offset < actual) {
-                const size_t take = std::min(segment.size(), actual - offset);
-                std::copy(received.begin() + offset, received.begin() + offset + take,
-                          segment.begin());
-            }
-            offset += segment.size();
-        }
-        msg.length = static_cast<u32>(actual);
-        ++processed;
-        if (actual < capacity && IsFileDescriptorValid(fd) &&
-            file_descriptors[fd]->is_connection_based) {
-            // A short stream read: whatever was waiting has been taken.
-            break;
-        }
     }
 
-    std::vector<u8> write_buffer;
-    MMsgSerialize(write_buffer, messages);
-    ctx.WriteBuffer(write_buffer);
+    std::vector<u8> buffer(capacity);
+    s32 received = 0;
+    Errno bsd_errno = Errno::SUCCESS;
+    if (capacity > 0) {
+        std::tie(received, bsd_errno) = RecvImpl(fd, flags, buffer);
+    }
 
-    // [OpenPak] recvmmsg(2): -1 with the error only when no message was received; 0 with an
-    // errno reads as a clean end of stream, and a gRPC transport closes the channel on it. A
-    // failure after the first message is the next call's to report. As Eden answers.
+    s32 ret = -1;
+    if (bsd_errno == Errno::SUCCESS) {
+        const size_t actual = static_cast<size_t>(std::max(received, 0));
+        LogTlsRecordDiag("RecvMMsg", std::span<const u8>(buffer).first(actual));
+
+        size_t offset = 0;
+        for (auto& msg : messages) {
+            for (auto& segment : msg.iov) {
+                const size_t take = std::min(segment.size(), actual - offset);
+                std::memcpy(segment.data(), buffer.data() + offset, take);
+                offset += take;
+                if (offset >= actual) {
+                    break;
+                }
+            }
+            if (offset >= actual) {
+                break;
+            }
+        }
+
+        ret = MMsgSpreadTransferred(messages, actual);
+        std::vector<u8> write_buffer;
+        MMsgSerialize(write_buffer, messages);
+        ctx.WriteBuffer(write_buffer);
+    }
+
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
-    rb.Push<s32>(processed > 0 || last_errno == Errno::SUCCESS ? processed : -1);
-    rb.PushEnum(processed > 0 ? Errno::SUCCESS : last_errno);
+    rb.Push<s32>(ret);
+    rb.PushEnum(bsd_errno);
 }
 
 void BSD::SetThreadCoreMask(HLERequestContext& ctx) {
@@ -3745,7 +2802,7 @@ void BSD::SetThreadCoreMask(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::ShutdownAllSockets(HLERequestContext& ctx) {
@@ -3753,15 +2810,28 @@ void BSD::ShutdownAllSockets(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::SocketExempt(HLERequestContext& ctx) {
-    LOG_WARNING(Service, "(STUBBED) called SocketExempt");
+    IPC::RequestParser rp{ctx};
+    const u32 domain = rp.Pop<u32>();
+    const u32 type = rp.Pop<u32>();
+    const u32 protocol = rp.Pop<u32>();
+
+    LOG_DEBUG(Service, "called. domain={} type={} protocol={}", domain, type, protocol);
+
+    // [OpenPak] A socket like any other, shut down for reading once made. Ported from Eden.
+    auto [fd, bsd_errno] = SocketImpl(static_cast<Domain>(domain), static_cast<Type>(type),
+                                      static_cast<Protocol>(protocol));
+    if (bsd_errno == Errno::SUCCESS) {
+        bsd_errno = ShutdownImpl(fd, 0);
+    }
+
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
-    rb.Push<s32>(-1); // fd
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.Push<s32>(fd);
+    rb.PushEnum(bsd_errno);
 }
 
 void BSD::Unknown36(HLERequestContext& ctx) {
@@ -3769,7 +2839,7 @@ void BSD::Unknown36(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::Unknown37(HLERequestContext& ctx) {
@@ -3777,7 +2847,7 @@ void BSD::Unknown37(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::Unknown38(HLERequestContext& ctx) {
@@ -3785,7 +2855,7 @@ void BSD::Unknown38(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::Unknown39(HLERequestContext& ctx) {
@@ -3793,7 +2863,7 @@ void BSD::Unknown39(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::Unknown40(HLERequestContext& ctx) {
@@ -3801,7 +2871,7 @@ void BSD::Unknown40(HLERequestContext& ctx) {
     IPC::ResponseBuilder rb{ctx, 4};
     rb.Push(ResultSuccess);
     rb.Push<s32>(-1);
-    rb.PushEnum(static_cast<Errno>(EOPNOTSUPP));
+    rb.PushEnum(Errno::OPNOTSUPP);
 }
 
 void BSD::Sysctl(HLERequestContext& ctx) {

@@ -5,8 +5,8 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
-#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -34,7 +34,7 @@ namespace Service::Sockets {
 
 class BSD final : public ServiceFramework<BSD> {
 public:
-    explicit BSD(Core::System& system_, const char* name);
+    explicit BSD(Core::System& system_, const char* name, bool is_user_);
     ~BSD() override;
 
     // These methods are called from SSL; the first two are also called from
@@ -55,47 +55,18 @@ private:
         Network::Domain domain = Network::Domain::INET;
         Network::Type type = Network::Type::DGRAM;
         Network::Protocol protocol = Network::Protocol::UDP;
-        u16 bound_port = 0;
-        bool sni_injected = false;
-        // [OpenPak][DIAG] Public hostname parsed from the first TLS ClientHello. Used only by
-        // the opt-in Stardew certificate-validation probe; no payload or credential is retained.
-        std::string tls_sni;
-        bool tls_server_flight_received = false;
-        // [OpenPak] RecvImpl's post-handshake grace-wait (see bsd.cpp) should only cover a
-        // reply that might genuinely still be in flight -- set true by SendImpl right after the
-        // guest writes something on this socket, and consumed (cleared) the first time RecvImpl
-        // uses the wait afterward. Without this, every immediate "is there anything else?"
-        // recv() the guest makes right after already getting a full reply -- completely normal
-        // client behaviour -- also blocks for up to 800ms even though nothing more is ever
-        // coming until the guest itself sends its next request. Measured: three of these firing
-        // back-to-back after the real reply already arrived is the entire 1.6-1.7s stall before
-        // the game gives up and resets the stream.
-        bool awaiting_reply = false;
-        // [OpenPak] Splatoon 3's vendor-private setsockopt optname=0x80000001 (see bsd.cpp's
-        // SetSockOptImpl/GetSockOptImpl) is accepted but never applied to the real socket --
-        // stash the bytes it was "set" to so a getsockopt right afterward echoes them back,
-        // matching Ryujinx-Reference's own _feignedSockOpts behavior for the same option.
-        std::optional<std::array<u8, 8>> vendor_linger_feigned;
-        // [OpenPak] Every other option the set side tolerated or has no host getter for, keyed by
+        // [OpenPak] Every option the set side tolerated without applying, keyed by
         // level << 32 | optname, so the matching get echoes what was set (ported from Eden).
         std::map<u64, std::vector<u8>> feigned_sockopts;
         // [OpenPak] A receive timeout is set. Such a recv returns on its own, so it is never parked
         // (see DeferBlockingReceive).
         bool has_receive_timeout = false;
-        bool connected = false;
-        // [OpenPak][DIAG] Set on a successful ConnectImpl -- lets ShutdownImpl log how long
-        // this specific connection actually lived before the guest gave up on it, to check for
-        // a correlation with a round-number wall-clock deadline (grpc-core's own deadline_filter
-        // is wall-clock-based, not a fixed retry count).
-        std::optional<std::chrono::steady_clock::time_point> connect_success_time;
-        // [OpenPak] Set by EventFd(). Lets Poll() recognize a self-pipe wakeup fd (see
-        // sockets.h's SetBsdDeferralEvent) and lets SendImpl() know a Write() to this fd is a
-        // completion signal another thread's deferred Poll() may be waiting on.
-        bool is_eventfd = false;
-        // Datagrams a parked UDP socket's background drain thread received before this fd
-        // reclaimed it (see ParkUdpSocket in bsd.cpp) — served before any live socket read so
-        // nothing arriving during the close/park/rebind gap is lost.
-        std::deque<std::pair<std::vector<u8>, Network::SockAddrIn>> pending_datagrams;
+        // [OpenPak] Non-null makes this an event fd: the counter a write adds to and a read
+        // takes. Poll() answers from it, and a write to it ends a deferred Poll() (see
+        // sockets.h's SetBsdDeferralEvent). Ported from Eden.
+        std::shared_ptr<std::atomic<u64>> event_value;
+        // [OpenPak] EventFdFlags::Semaphore: a read takes 1 off the counter instead of all of it.
+        bool event_semaphore = false;
     };
 
     struct PollWork {
@@ -298,10 +269,17 @@ private:
 
     void BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const noexcept;
 
-    std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors;
-    std::mutex fd_table_mutex; // Protects access to the file_descriptors array
+    // [OpenPak] One table for bsd:u, bsd:s and bsd:a, as Eden has it and as Ryujinx keeps one
+    // BsdContext per process: a descriptor opened through one is good through the others.
+    static inline std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
+    static inline std::mutex fd_table_mutex; // Protects access to the file_descriptors array
+    // The services sharing the table; the last one to go empties it.
+    static inline int instance_count = 0;
 
     Network::RoomNetwork& room_network;
+
+    // [OpenPak] bsd:u, which may neither duplicate a socket nor open a SEQPACKET or RAW one.
+    bool is_user = false;
 
     /// Callback to parse and handle a received wifi packet.
     void OnProxyPacketReceived(const Network::ProxyPacket& packet);
@@ -329,7 +307,7 @@ protected:
 
 class BSDCFG final : public ServiceFramework<BSDCFG> {
 public:
-    explicit BSDCFG(Core::System& system_);
+    explicit BSDCFG(Core::System& system_, const char* name);
     ~BSDCFG() override;
 
 private:

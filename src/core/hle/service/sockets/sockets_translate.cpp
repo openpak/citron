@@ -40,6 +40,29 @@ Errno Translate(Network::Errno value) {
         return Errno::DESTADDRREQ;
     case Network::Errno::INPROGRESS:
         return Errno::INPROGRESS;
+    // [OpenPak] Each of these reaches the guest as itself instead of as INVAL.
+    case Network::Errno::HOSTUNREACH:
+        return Errno::HOSTUNREACH;
+    case Network::Errno::NETUNREACH:
+        return Errno::NETUNREACH;
+    case Network::Errno::NETDOWN:
+        return Errno::NETDOWN;
+    case Network::Errno::MSGSIZE:
+        return Errno::MSGSIZE;
+    case Network::Errno::NOPROTOOPT:
+        return Errno::NOPROTOOPT;
+    case Network::Errno::ISCONN:
+        return Errno::ISCONN;
+    case Network::Errno::AFNOSUPPORT:
+        return Errno::AFNOSUPPORT;
+    case Network::Errno::OPNOTSUPP:
+        return Errno::OPNOTSUPP;
+    case Network::Errno::ALREADY:
+        return Errno::ALREADY;
+    case Network::Errno::PERM:
+        return Errno::PERM;
+    case Network::Errno::ACCES:
+        return Errno::ACCES;
     case Network::Errno::OTHER:
         // Map OTHER to INVAL as a reasonable default for unknown errors
         return Errno::INVAL;
