@@ -144,6 +144,9 @@ object OpenPak {
         scope.launch {
             val signedIn = nativeStart()
             Log.info("[OpenPak] start(): ${if (signedIn) "signed in" else "not signed in"}")
+            if (signedIn) {
+                runCatching { OpenPakUi.followAccount() }
+            }
             // What the site says right now about each title's online play, over the list this
             // build shipped with; the game list is drawn again only when that changes something.
             if (callObject("compatibility_refresh").optBoolean("changed")) {

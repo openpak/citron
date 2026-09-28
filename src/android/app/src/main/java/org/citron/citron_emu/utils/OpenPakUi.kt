@@ -652,10 +652,22 @@ object OpenPakUi : Application.ActivityLifecycleCallbacks {
         sheet.show()
     }
 
-    /** The account's name and picture, copied into the current profile once. */
-    private suspend fun adoptAccount(activity: Activity, username: String, avatar: String) {
-        val uuid = OpenPak.currentProfile()?.uuid ?: return
-        if (username.isNotEmpty()) {
+    /**
+     * The name and picture follow the account at every sign-in, not only the one made in the
+     * sign-in screen: what was changed on the website shows at the next launch, as on the desktop
+     * builds (openpak/ryujinx 888987257).
+     */
+    suspend fun followAccount() {
+        val account = OpenPak.callObject("account")
+        if (!account.optBoolean("ok")) return
+        adoptAccount(context(), account.optString("name"), account.optString("avatar"))
+    }
+
+    /** The account's name and picture, copied into the current profile. */
+    private suspend fun adoptAccount(activity: Context, username: String, avatar: String) {
+        val profile = OpenPak.currentProfile() ?: return
+        val uuid = profile.uuid
+        if (username.isNotEmpty() && username.take(32) != profile.name) {
             OpenPak.profileAction("rename", uuid, username.take(32))
         }
         if (avatar.isEmpty()) return
