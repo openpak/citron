@@ -535,17 +535,6 @@ QString OpenPakHost::ResolveGameIcon(const std::string& app_id_hex) const {
             .toBase64());
 }
 
-bool OpenPakHost::ChatEnabled() const {
-    // Citron's chat rooms are an experiment outside the OpenPak spec, offered only where a chat
-    // server has been named (OPENPAK_CHAT_HOST).
-    const char* host_env = std::getenv("OPENPAK_CHAT_HOST");
-    return host_env && *host_env;
-}
-
-QString OpenPakHost::ChatInviteText() const {
-    return tr("Invite to Chat Room");
-}
-
 std::string OpenPakHost::GetLocalAppId() const {
     if (!system.IsPoweredOn()) {
         return {};

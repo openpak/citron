@@ -74,7 +74,6 @@
 #include "citron/main.h"
 #include "citron/mod_manager/gamebanana_dialog.h"
 #include "citron/legacy_ldn_counts.h"
-#include "citron/legacy_population_history.h"
 #include "citron/multiplayer/state.h"
 #include "citron/poster_selection_dialog.h"
 #include "citron/theme.h"
@@ -2516,8 +2515,6 @@ void GameList::UpdateOnlineStatus() {
         return;
     }
 
-    OpenPak::PopulationHistory::Refresh();
-
     // A watcher gets the result back on the main thread safely
     auto online_status_watcher = new QFutureWatcher<std::map<u64, std::pair<int, int>>>(this);
     connect(online_status_watcher, &QFutureWatcher<std::map<u64, std::pair<int, int>>>::finished,
@@ -2675,10 +2672,6 @@ void GameList::StartLaunchAnimation(const QModelIndex& item) {
     m_is_launching = true;
 
     u64 program_id = item.data(GameListItemPath::ProgramIdRole).toULongLong();
-
-    if (main_window) {
-        main_window->OfferOpenPakByamlDownload(program_id);
-    }
 
     QStandardItem* original_item = nullptr;
     for (int folder_idx = 0; folder_idx < item_model->rowCount(); ++folder_idx) {
@@ -3104,30 +3097,6 @@ void GameList::DonePopulating(const QStringList& watch_list) {
                  "Mirroring: Startup sync skipped (Reason: UI Busy or Game is Emulating).");
     }
 
-    if (main_window && !main_window->HasPerformedBcatAutoDownload()) {
-        main_window->SetPerformedBcatAutoDownload(true);
-        for (int i = 0; i < item_model->rowCount(); ++i) {
-            QStandardItem* folder = item_model->item(i, 0);
-            if (!folder) {
-                continue;
-            }
-            for (int j = 0; j < folder->rowCount(); ++j) {
-                QStandardItem* game = folder->child(j, 0);
-                if (!game) {
-                    continue;
-                }
-                const u64 title_id = game->data(GameListItemPath::ProgramIdRole).toULongLong();
-                if (title_id != 0 && main_window->OpenPakByamlRequired(title_id) &&
-                    !main_window->OpenPakByamlInstalled(title_id) &&
-                    !main_window->OpenPakByamlSkipped(title_id)) {
-                    LOG_INFO(Frontend, "OpenPak BCAT: auto-downloading schedule for {:016X}",
-                             title_id);
-                    main_window->SilentlyDownloadOpenPakByaml(title_id);
-                }
-            }
-        }
-    }
-
     // Automatically refresh compatibility data from GitHub if enabled
     if (UISettings::values.show_compat) {
         RefreshCompatibilityList();
@@ -3304,11 +3273,6 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
     QAction* favorite = context_menu.addAction(tr("Favorite"));
     QAction* hide_game = context_menu.addAction(tr("Hide Game"));
     context_menu.addSeparator();
-    QAction* download_online_schedule = nullptr;
-    if (main_window && main_window->OpenPakByamlRequired(program_id) &&
-        main_window->OpenPakByamlDownloadEnabled()) {
-        download_online_schedule = context_menu.addAction(tr("Download Online Schedule"));
-    }
     QAction* install_ssbu_mods = nullptr;
     if (main_window && WebService::SkylineMods::IsSsbuTitleId(program_id)) {
         install_ssbu_mods = context_menu.addAction(tr("Install/Update Skyline Mods"));
@@ -3627,13 +3591,6 @@ void GameList::AddGamePopup(QMenu& context_menu, const QModelIndex& index, u64 p
             dir.mkpath(QStringLiteral("."));
         QDesktopServices::openUrl(QUrl::fromLocalFile(qpath));
     });
-    if (download_online_schedule) {
-        connect(download_online_schedule, &QAction::triggered, [this, program_id]() {
-            if (main_window) {
-                main_window->OpenPakByamlDownloadFromMenu(program_id);
-            }
-        });
-    }
     if (install_ssbu_mods) {
         connect(install_ssbu_mods, &QAction::triggered, [this, program_id]() {
             if (main_window) {

@@ -262,23 +262,12 @@ add_executable(citron
     multiplayer/validation.h
     play_time_manager.cpp
     play_time_manager.h
-    legacy_chat_room.cpp
-    legacy_chat_room.h
-    legacy_chat_room.ui
-    legacy_chat_room_member_delegate.cpp
-    legacy_chat_room_member_delegate.h
-    legacy_chat_window.cpp
-    legacy_chat_window.h
-    legacy_room_overlay.cpp
-    legacy_room_overlay.h
     openpak_host.cpp
     openpak_host.h
     openpak_online_status.cpp
     openpak_online_status.h
     legacy_ldn_counts.cpp
     legacy_ldn_counts.h
-    legacy_population_history.cpp
-    legacy_population_history.h
     precompiled_headers.h
     qt_common.cpp
     qt_common.h

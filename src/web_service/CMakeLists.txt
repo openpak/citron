@@ -6,8 +6,6 @@ add_library(web_service STATIC
     announce_room_json.h
     mk8d_country_flags.cpp
     mk8d_country_flags.h
-    population_scraper_client.cpp
-    population_scraper_client.h
     precompiled_headers.h
     ssbu_mod_installer.cpp
     ssbu_mod_installer.h

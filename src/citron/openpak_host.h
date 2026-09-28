@@ -113,8 +113,6 @@ public:
     OpenPakChatClient* GetChatClient() override {
         return chat_client;
     }
-    bool ChatEnabled() const override;
-    QString ChatInviteText() const override;
 
     // openpak::qt::Host: what the shared dialogs need from this emulator.
     QString ProfileName() const override;

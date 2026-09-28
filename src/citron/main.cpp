@@ -172,15 +172,11 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "openpak/platform.h"
 #include "openpak/qt/account_dialog.h"
 #include "openpak/session.h"
-#include "citron/legacy_chat_window.h"
-#include "citron/legacy_room_overlay.h"
 #include "citron/openpak_host.h"
 #include "openpak/qt/friend_picker.h"
 #include "openpak/qt/online_counts.h"
 #include "openpak/qt/nzp_online_count.h"
-#include "citron/legacy_population_history.h"
 #include "openpak/qt/strings.h"
-#include "openpak/qt/toast.h"
 #include "citron/play_time_manager.h"
 #include "openpak/account.h"
 #include "openpak/friends_cache.h"
@@ -197,7 +193,6 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "common/string_util.h"
 #include "common/xci_trimmer.h"
 #include "core/core.h"
-#include "core/legacy_guest_call.h"
 #include "core/core_timing.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/card_image.h"
@@ -512,28 +507,6 @@ GMainWindow::GMainWindow(std::unique_ptr<QtConfig> config_, bool has_broken_vulk
 
     game_list->LoadCompatibilityList();
     game_list->PopulateAsync(UISettings::values.game_dirs);
-
-#ifdef ENABLE_WEB_SERVICE
-    // The content provider isn't populated with installed titles yet at this point in boot, so
-    // there's nothing reliable to check "is Splatoon 2 installed" against here. Just attempt it
-    // for the 3 known title IDs; OpenPakByamlSkipped still makes this a no-op after a decline.
-    // Always attempted, not gated on OpenPakByamlInstalled: the download itself is conditional
-    // (If-Modified-Since) so an up-to-date copy costs a cheap 304, but a stale one now actually
-    // gets refreshed instead of being treated as "done" forever after the first successful run.
-    if (!has_performed_bcat_autodownload && OpenPakByamlDownloadEnabled()) {
-        has_performed_bcat_autodownload = true;
-        static constexpr std::array<u64, 3> kByamlTitles{
-            0x0100f8f0000a2000ULL, 0x01003bc0000a0000ULL, 0x01003c700009c800ULL,
-        };
-        for (const u64 title_id : kByamlTitles) {
-            if (!OpenPakByamlSkipped(title_id)) {
-                LOG_INFO(Frontend, "OpenPak BCAT: checking schedule freshness for {:016X}",
-                         title_id);
-                SilentlyDownloadOpenPakByaml(title_id);
-            }
-        }
-    }
-#endif
 
     // make sure menubar has the arrow cursor instead of inheriting from this
     ui->menubar->setCursor(QCursor());
@@ -1377,7 +1350,6 @@ void GMainWindow::InitializeWidgets() {
     openpak::qt::InstallFriendPicker(openpak_host, this);
     OpenPak::OnlineCounts::Start(this);
     OpenPak::NzpOnlineCount::Start(this);
-    OpenPak::PopulationHistory::Start(this);
 
     // [OpenPak] What the site says right now about each title's online play, over the list this
     // build shipped with. The list, the carousel and the details panel read the status when they
@@ -1443,10 +1415,6 @@ void GMainWindow::InitializeWidgets() {
 
     multiplayer_room_overlay = new MultiplayerRoomOverlay(this);
     multiplayer_room_overlay->hide();
-
-    legacy_room_overlay = new OpenPakRoomOverlay(this, openpak_host);
-    connect(legacy_room_overlay, &OpenPakRoomOverlay::InvitePickerRequested, this,
-            [this] { openpak_host->OpenWindow(OpenPakAccountDialog::kFriendsPage); });
 
     vram_overlay = new VramOverlay(this);
     vram_overlay->hide();
@@ -2101,52 +2069,10 @@ void GMainWindow::ConnectMenuEvents() {
     // OpenPak page. The host owns the window and the toasts (§3.10), so nothing OpenPak goes to
     // the status bar.
     openpak_host->PopulateMenu(ui->menu_OpenPak, [this] { OnConfigureOpenPak(); });
-    // Citron's chat rooms, an experiment outside the spec, hang off the window's Friends page.
-    openpak_host->decorate_window = [this](OpenPakAccountDialog& dialog) {
-        connect(&dialog, &OpenPakAccountDialog::InviteToChatRequested, this,
-                [this](u64 pid, const QString& name) { OpenOpenPakChatWindow({}, pid, name); });
-    };
     // Open OpenPak (UX spec §3.1): the window at its last page, or closed when it is open. No
     // keyboard default; Home+X on a controller.
     connect(ui->action_OpenPak_Open_Account, &QAction::triggered, this,
             [this] { openpak_host->ToggleWindow(); });
-    // Outbound's join is armed by hand while it runs (the guest call in core/legacy_guest_call):
-    // a game-invitation toast clicked then joins, rather than opening the Invitations page.
-    openpak_host->invitation_clicked = [this] {
-        constexpr u64 OutboundTitleId = 0x0100ED9024EB8000ULL;
-        if (!emulation_running || !system->IsPoweredOn() ||
-            play_time_manager->GetProgramId() != OutboundTitleId) {
-            return false;
-        }
-        // Auto-firing on delivery crashed the game when the invitation arrived at the title or
-        // main menu (seen live, twice); the click is the person saying they are ready.
-        if (!Core::OpenPakGuestCall::ArmPendingInvite(*system->ApplicationProcess())) {
-            LOG_ERROR(Frontend, "OpenPak: could not arm the Outbound join");
-        }
-        return true;
-    };
-    // The chat experiment's own notices, only while it is switched on (OPENPAK_CHAT_HOST).
-    connect(openpak_host, &openpak::qt::Host::ChatInviteReceived, this,
-            [this](const QString& room_id, const QString& room_name, u64 /*from_pid*/,
-                   const QString& from_name) {
-                pending_chat_invite_room_id = room_id;
-                if (openpak_host->ChatEnabled()) {
-                    openpak_host->Toasts()->Show(
-                        OpenPakToast::Kind::ChatRequest,
-                        tr("%1 invited you to \"%2\"").arg(from_name, room_name), {},
-                        [this] { OpenOpenPakChatWindow(pending_chat_invite_room_id); });
-                }
-            });
-    connect(openpak_host, &openpak::qt::Host::ChatBanned, this, [this](const QString& reason) {
-        if (legacy_room_overlay) {
-            legacy_room_overlay->hide();
-        }
-        QMessageBox::warning(this, tr("Chat Rooms"),
-                             reason.isEmpty()
-                                 ? tr("You have been banned from using this feature.")
-                                 : tr("You have been banned from using this feature.\n\nReason: %1")
-                                       .arg(reason));
-    });
     connect(openpak_host, &openpak::qt::Host::QuickStartRequested, this, [this](u64 title_id) {
         const QString path = game_list->GetGamePath(title_id);
         if (!path.isEmpty()) {
@@ -2613,8 +2539,6 @@ void GMainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletP
             return;
         }
     }
-
-    OfferOpenPakByamlDownload(title_id);
 
     if (type == StartGameType::Normal) {
         // Load per game settings if it is a normal boot
@@ -6007,36 +5931,6 @@ double GMainWindow::GetEmulationSpeed() const {
     return last_perf_stats.emulation_speed * 100.0;
 }
 
-void GMainWindow::OpenOpenPakChatWindow(const QString& auto_join_room_id, u64 invite_pid,
-                                         const QString& invite_name) {
-    if (!auto_join_room_id.isEmpty()) {
-        // Invite-toast click: we already know the room, skip straight to it.
-        legacy_room_overlay->JoinRoom(auto_join_room_id);
-        return;
-    }
-    if (invite_pid != 0) {
-        // Friends-list invite: create/reuse our own room, then invite once host is confirmed.
-        legacy_room_overlay->InviteFriendOnJoin(invite_pid, invite_name);
-        legacy_room_overlay->ShowOverlay();
-        return;
-    }
-    if (legacy_room_overlay->IsInRoom()) {
-        legacy_room_overlay->ShowOverlay();
-        return;
-    }
-
-    // Not in a room yet -- show the Create/Join picker. It closes itself once
-    // the overlay confirms a room was actually joined.
-    auto* launcher = new OpenPakChatWindow(this);
-    launcher->setAttribute(Qt::WA_DeleteOnClose);
-    connect(launcher, &OpenPakChatWindow::CreateRoomRequested, legacy_room_overlay,
-            &OpenPakRoomOverlay::CreateRoom);
-    connect(launcher, &OpenPakChatWindow::JoinRoomRequested, legacy_room_overlay,
-            &OpenPakRoomOverlay::JoinRoom);
-    connect(legacy_room_overlay, &OpenPakRoomOverlay::RoomJoined, launcher, &QDialog::accept);
-    launcher->exec();
-}
-
 void GMainWindow::OnAlbum() {
     constexpr u64 AlbumId = static_cast<u64>(Service::AM::AppletProgramId::PhotoViewer);
     auto bis_system = system->GetFileSystemController().GetSystemNANDContents();
@@ -7079,9 +6973,6 @@ void GMainWindow::UpdateUITheme() {
     if (multiplayer_room_overlay) {
         multiplayer_room_overlay->UpdateTheme();
     }
-    if (legacy_room_overlay) {
-        legacy_room_overlay->UpdateTheme();
-    }
 
     m_is_updating_theme = false;
 }
@@ -7505,76 +7396,7 @@ void GMainWindow::SyncOpenPakHistory() {
 #endif
 }
 
-bool GMainWindow::OpenPakByamlRequired(u64 title_id) const {
-    switch (title_id) {
-    case 0x0100f8f0000a2000ULL: // Splatoon 2
-    case 0x01003bc0000a0000ULL: // Splatoon 2
-    case 0x01003c700009c800ULL: // Splatoon 2
-        return true;
-    default:
-        return false;
-    }
-}
-
-bool GMainWindow::OpenPakByamlDownloadEnabled() const {
-    return true;
-}
-
-bool GMainWindow::OpenPakByamlInstalled(u64 title_id) const {
-    const auto path = Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
-                      fmt::format("system/save/bcat/{:016X}/vsdata/VSSetting_0.byaml", title_id);
-    return std::filesystem::exists(path);
-}
-
-bool GMainWindow::OpenPakByamlSkipped(u64 title_id) const {
-    const auto skip_path =
-        Common::FS::GetCitronPath(Common::FS::CitronPath::ConfigDir) / "legacy_byaml_skip.txt";
-    std::ifstream file{skip_path};
-    if (!file) {
-        return false;
-    }
-    const auto needle = fmt::format("{:016X}", title_id);
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line == needle) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void GMainWindow::OpenPakByamlMarkSkipped(u64 title_id) const {
-    const auto skip_path =
-        Common::FS::GetCitronPath(Common::FS::CitronPath::ConfigDir) / "legacy_byaml_skip.txt";
-    std::ofstream file{skip_path, std::ios::app};
-    if (file) {
-        file << fmt::format("{:016X}", title_id) << "\n";
-    }
-}
-
 namespace {
-std::filesystem::path OpenPakByamlHashPath(const std::string& title_id_hex) {
-    return Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
-           fmt::format("system/save/bcat/{}/.legacy_bcat_hash", title_id_hex);
-}
-
-std::string OpenPakByamlReadHash(const std::string& title_id_hex) {
-    std::ifstream file{OpenPakByamlHashPath(title_id_hex)};
-    std::string value;
-    std::getline(file, value);
-    return value;
-}
-
-void OpenPakByamlWriteHash(const std::string& title_id_hex, const std::string& value) {
-    if (value.empty()) {
-        return;
-    }
-    std::ofstream file{OpenPakByamlHashPath(title_id_hex)};
-    if (file) {
-        file << value;
-    }
-}
-
 // ExtractZipToDirectory doesn't reject ".." entries; pre-scan since one zip source is
 // matched by a version-tagged filename rather than a fixed, previously-verified name.
 #ifdef CITRON_ENABLE_LIBARCHIVE
@@ -7634,93 +7456,6 @@ std::filesystem::path FindAtmosphereDir(const std::filesystem::path& root) {
     return {};
 }
 } // namespace
-
-bool GMainWindow::OpenPakByamlDownload(u64 title_id) {
-#ifdef ENABLE_WEB_SERVICE
-    if (!OpenPakByamlDownloadEnabled()) {
-        return false;
-    }
-    const auto title_id_hex = fmt::format("{:016X}", title_id);
-
-    // Only this title ID's server-side BCAT content is kept current; fetch it for all variants.
-    constexpr u64 kCanonicalByamlTitleId = 0x0100f8f0000a2000ULL;
-    const auto fetch_title_id_hex = fmt::format("{:016X}", kCanonicalByamlTitleId);
-
-    // Always fetch the full seed and compare its hash locally, rather than trusting the
-    // server's Last-Modified/304 response as the sole freshness signal — that path could get
-    // stuck serving a stale rotation schedule if the server's conditional-GET handling doesn't
-    // track content changes precisely. Ryujinx-Reference hits the same server and takes the same
-    // always-fetch-and-hash approach for exactly this reason.
-    const auto zip_bytes = WebService::OpenPakApi::DownloadBcatSeed(fetch_title_id_hex);
-    if (zip_bytes.empty()) {
-        return false;
-    }
-
-    const auto server_hash = WebService::OpenPakApi::HashBcatSeedHex(zip_bytes);
-    if (server_hash == OpenPakByamlReadHash(title_id_hex) && OpenPakByamlInstalled(title_id)) {
-        // Already have the current rotation schedule; nothing to redo.
-        return true;
-    }
-
-    const auto tmp_path = Common::FS::GetCitronPath(Common::FS::CitronPath::CacheDir) /
-                          fmt::format("legacy_byaml_{}.zip", title_id_hex);
-    {
-        std::ofstream out{tmp_path, std::ios::binary};
-        if (!out) {
-            return false;
-        }
-        out.write(reinterpret_cast<const char*>(zip_bytes.data()),
-                  static_cast<std::streamsize>(zip_bytes.size()));
-    }
-
-    const auto dest_path =
-        Common::FS::GetCitronPath(Common::FS::CitronPath::NANDDir) /
-        fmt::format("system/save/bcat/{}", title_id_hex);
-
-    // A prior download's files that aren't part of this one would otherwise linger indefinitely.
-    std::error_code ec;
-    std::filesystem::remove_all(dest_path, ec);
-
-    const bool ok = ExtractZipToDirectory(tmp_path, dest_path);
-    std::filesystem::remove(tmp_path);
-    if (ok) {
-        OpenPakByamlWriteHash(title_id_hex, server_hash);
-    }
-    return ok;
-#else
-    return false;
-#endif
-}
-
-void GMainWindow::RunOpenPakByamlDownloadWithProgress(u64 title_id) {
-#ifdef ENABLE_WEB_SERVICE
-    QProgressDialog progress(tr("Downloading online schedule..."), QString{}, 0, 0, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setCancelButton(nullptr);
-    progress.show();
-
-    auto future = QtConcurrent::run([this, title_id] { return OpenPakByamlDownload(title_id); });
-    while (!future.isFinished()) {
-        QCoreApplication::processEvents();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    progress.close();
-
-    if (future.result()) {
-        QMessageBox::information(this, tr("OpenPak"), tr("Online schedule installed."));
-    } else {
-        QMessageBox::warning(this, tr("OpenPak"),
-                             tr("Failed to download the online schedule. You can try again later "
-                                "via right-click on the game."));
-    }
-#endif
-}
-
-void GMainWindow::OpenPakByamlDownloadFromMenu(u64 title_id) {
-#ifdef ENABLE_WEB_SERVICE
-    RunOpenPakByamlDownloadWithProgress(title_id);
-#endif
-}
 
 GMainWindow::SsbuModInstallOutcome GMainWindow::InstallSsbuSkylineModsBlocking(u64 program_id) {
     SsbuModInstallOutcome outcome{};
@@ -8069,50 +7804,3 @@ void GMainWindow::InstallMk8dCountryFlag(u64 program_id) {
     (void)program_id;
 #endif
 }
-
-void GMainWindow::SilentlyDownloadOpenPakByaml(u64 title_id) {
-#ifdef ENABLE_WEB_SERVICE
-    std::thread{[this, title_id] {
-        const bool ok = OpenPakByamlDownload(title_id);
-        if (ok) {
-            LOG_INFO(Frontend, "OpenPak BCAT: auto-download succeeded for {:016X}", title_id);
-        } else {
-            LOG_ERROR(Frontend, "OpenPak BCAT: auto-download failed for {:016X}", title_id);
-        }
-    }}.detach();
-#endif
-}
-
-void GMainWindow::OfferOpenPakByamlDownload(u64 title_id) {
-#ifdef ENABLE_WEB_SERVICE
-    if (!OpenPakByamlDownloadEnabled() || !OpenPakByamlRequired(title_id) ||
-        OpenPakByamlInstalled(title_id) || OpenPakByamlSkipped(title_id)) {
-        return;
-    }
-
-    QMessageBox ask(this);
-    ask.setWindowTitle(tr("OpenPak"));
-    ask.setText(tr("This game needs the online schedule (OpenPak)."));
-    ask.setInformativeText(
-        tr("This file (stage/mode/festival schedules) is required to play online and is NOT "
-           "included with the emulator. It can be downloaded from OpenPak servers and "
-           "installed automatically.\n\nWithout it, the game stays stuck \"offline\". "
-           "(Re-downloadable later via right-click on the game.)"));
-    QPushButton* yes_button = ask.addButton(tr("Yes, download"), QMessageBox::AcceptRole);
-    ask.addButton(tr("No"), QMessageBox::RejectRole);
-    QPushButton* skip_button = ask.addButton(tr("Don't ask again"), QMessageBox::DestructiveRole);
-    ask.setDefaultButton(yes_button);
-    ask.exec();
-
-    if (ask.clickedButton() == skip_button) {
-        OpenPakByamlMarkSkipped(title_id);
-        return;
-    }
-    if (ask.clickedButton() != yes_button) {
-        return;
-    }
-
-    RunOpenPakByamlDownloadWithProgress(title_id);
-#endif
-}
-

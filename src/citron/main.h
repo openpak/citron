@@ -49,7 +49,6 @@ class QLabel;
 class MultiplayerState;
 class OpenPakAccountDialog;
 class OpenPakHost;
-class OpenPakRoomOverlay;
 class OpenPakToast;
 class QPushButton;
 class QProgressDialog;
@@ -156,12 +155,6 @@ class GMainWindow : public QMainWindow {
 public:
     void filterBarSetChecked(bool state);
     void UpdateUITheme();
-    void OfferOpenPakByamlDownload(u64 title_id);
-    void OpenPakByamlDownloadFromMenu(u64 title_id);
-    bool OpenPakByamlRequired(u64 title_id) const;
-    bool OpenPakByamlInstalled(u64 title_id) const;
-    bool OpenPakByamlSkipped(u64 title_id) const;
-    bool OpenPakByamlDownloadEnabled() const;
     void InstallSsbuSkylineMods(u64 program_id);
     void InstallMk8dCountryFlag(u64 program_id);
     bool IsConfiguring() const {
@@ -195,13 +188,6 @@ public:
     void SetPerformedInitialSync(bool synced) {
         has_performed_initial_sync = synced;
     }
-    [[nodiscard]] bool HasPerformedBcatAutoDownload() const {
-        return has_performed_bcat_autodownload;
-    }
-    void SetPerformedBcatAutoDownload(bool done) {
-        has_performed_bcat_autodownload = done;
-    }
-    void SilentlyDownloadOpenPakByaml(u64 title_id);
 signals:
     void EmulationStarting(EmuThread* emu_thread);
     void EmulationStopping();
@@ -462,15 +448,6 @@ private:
     QTimer shutdown_timer;
     OpenPakHost* openpak_host = nullptr;
     bool configure_at_openpak = false; ///< The next Configure opens at its OpenPak page.
-    QString pending_chat_invite_room_id;
-    // The room itself lives in this persistent floating overlay (not tied to any
-    // menu/toast click's lifetime), same pattern as multiplayer_room_overlay below
-    // but for OpenPak chat and not gated on emulation running. The launcher
-    // dialog (Create/Join picker) is transient and only shown when not already
-    // in a room.
-    OpenPakRoomOverlay* legacy_room_overlay = nullptr;
-    void OpenOpenPakChatWindow(const QString& auto_join_room_id = {}, u64 invite_pid = 0,
-                                const QString& invite_name = {});
     OverlayDialog* shutdown_dialog{};
     PerformanceOverlay* performance_overlay{};
     MultiplayerRoomOverlay* multiplayer_room_overlay{};
@@ -505,10 +482,6 @@ private:
     std::string current_game_icon_base64;
 
     void SyncOpenPakHistory();
-
-    void OpenPakByamlMarkSkipped(u64 title_id) const;
-    bool OpenPakByamlDownload(u64 title_id);
-    void RunOpenPakByamlDownloadWithProgress(u64 title_id);
 
     struct SsbuModInstallFailure {
         std::string display_name;
@@ -566,7 +539,6 @@ private:
     bool m_is_updating_theme = false;
     bool m_is_configuring = false;
     bool has_performed_initial_sync = false;
-    bool has_performed_bcat_autodownload = false;
 #ifdef __unix__
     QSocketNotifier* sig_interrupt_notifier;
     static std::array<int, 3> sig_interrupt_fds;
