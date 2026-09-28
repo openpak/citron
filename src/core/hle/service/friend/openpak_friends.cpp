@@ -894,8 +894,25 @@ private:
             R_SUCCEED();
         }
 
-        // Answered per slot, in the order asked, as the module matches its results by id. A user
-        // nobody has looked up yet is left invalid and fetched for the next call.
+        // [OpenPak] A user nobody has looked up yet is fetched before the answer, as the console's
+        // module does: a title asks once for each player in its session and draws whoever comes
+        // back invalid without a picture, for good. Answered from the cache and warmed for "the
+        // next call", a player who is not a friend never got an avatar (Moving Out 2: the host
+        // asked for three times, fetched three times, drawn blank three times).
+        // ponytail: one blocking round trip on the friends thread, bounded by the HTTP timeout;
+        // the client calls this from its own worker. Move it off-thread behind the completion
+        // event if a slow server ever stalls the other friend commands.
+        std::vector<u64> missing;
+        for (const u64 id : friend_ids) {
+            if (id != 0 && !User(id)) {
+                missing.push_back(id);
+            }
+        }
+        if (!missing.empty()) {
+            baas::WarmUsers(missing);
+        }
+
+        // Answered per slot, in the order asked, as the module matches its results by id.
         for (std::size_t index = 0; index < friend_ids.size() && index < out_list.size();
              index++) {
             const auto found = User(friend_ids[index]);
@@ -912,7 +929,6 @@ private:
             }
         }
 
-        Warm(friend_ids);
         R_SUCCEED();
     }
 
